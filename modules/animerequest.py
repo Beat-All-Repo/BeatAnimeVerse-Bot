@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/animerequest.py
+# ACTION: Replace existing file
+# ====================================================================
 """
 Anime Request System for BeatVerseProbot
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -105,7 +109,10 @@ if DB_URI:
 elif MONGO_DB_URI:
     # ── MongoDB backend ───────────────────────────────────────────────────────
     _USE_MONGO = True
-    from BeatVerseProbot.utils.mongo import db as _mongo_db
+    try:
+        from BeatVerseProbot.utils.mongo import db as _mongo_db
+    except ImportError:
+        _mongo_db = None
     _req_col = _mongo_db.anime_requests
     _counter_col = _mongo_db.anime_req_counters
 
