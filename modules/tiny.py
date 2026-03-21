@@ -1,10 +1,22 @@
+# ====================================================================
+# PLACE AT: /app/modules/tiny.py
+# ACTION: Replace existing file
+# ====================================================================
 import os
 
-import cv2
+try:
+    import cv2
+except ImportError:
+    cv2 = None
 from PIL import Image
 
 from beataniversebot_compat import telethn as tbot
-from BeatVerseProbot.events import register
+try:
+    from BeatVerseProbot.events import register
+except ImportError:
+    def register(*a,**k):
+        def d(f): return f
+        return d
 
 
 @register(pattern="^/tiny ?(.*)")
