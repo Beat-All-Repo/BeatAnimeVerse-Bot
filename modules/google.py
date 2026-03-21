@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/google.py
+# ACTION: Replace existing file
+# ====================================================================
 import glob
 import io
 import os
@@ -7,7 +11,10 @@ import urllib.request
 
 import bs4
 import requests
-from bing_image_downloader import downloader
+try:
+    from bing_image_downloader import downloader
+except ImportError:
+    downloader = None
 from bs4 import BeautifulSoup
 from PIL import Image
 from search_engine_parser import GoogleSearch
