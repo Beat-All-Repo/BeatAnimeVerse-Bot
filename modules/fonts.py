@@ -1,8 +1,17 @@
+# ====================================================================
+# PLACE AT: /app/modules/fonts.py
+# ACTION: Replace existing file
+# ====================================================================
 from pyrogram import filters
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from beataniversebot_compat import pbot
-from BeatVerseProbot.utils.fonts import Fonts
+try:
+    from BeatVerseProbot.utils.fonts import Fonts
+except ImportError:
+    class Fonts:
+        @staticmethod
+        def convert(t, s=""): return t
 
 
 @pbot.on_message(filters.command(["font", "fonts"]))
