@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/users.py
+# ACTION: Replace existing file
+# ====================================================================
 from io import BytesIO
 from time import sleep
 
