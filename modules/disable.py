@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/disable.py
+# ACTION: Replace existing file
+# ====================================================================
 import importlib
 from typing import Union
 
