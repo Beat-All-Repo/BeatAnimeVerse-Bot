@@ -8406,7 +8406,7 @@ async def button_handler(
         await listusers_command(update, context)
         return
 
-    if data == "um_export_csv":
+    if data in ("um_export_csv", "admin_export_users_quick"):
         if not is_admin:
             return
         try:
