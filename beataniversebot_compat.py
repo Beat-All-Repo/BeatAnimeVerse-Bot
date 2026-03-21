@@ -85,6 +85,22 @@ class _StubClient:
     def add_handler(self, *a, **kw): pass          # Fix: various modules
     async def iter_chat_members(self, *a, **kw): return iter([])
 
+# ── Patch SQLAlchemy to allow duplicate table definitions ─────────────────────
+# Prevents: "Table 'users' is already defined for this MetaData instance"
+try:
+    import sqlalchemy.orm.decl_api as _decl
+    _orig_meta = getattr(_decl, 'DeclarativeMeta', None)
+    # Patch __init_subclass__ or use event — simpler: patch the error at SQL level
+    import sqlalchemy
+    _orig_Table = sqlalchemy.Table
+    def _patched_Table(name, metadata, *args, **kwargs):
+        if name in metadata.tables:
+            kwargs.setdefault('extend_existing', True)
+        return _orig_Table(name, metadata, *args, **kwargs)
+    sqlalchemy.Table = _patched_Table
+except Exception:
+    pass
+
 pbot = _StubClient()
 telethn = _StubClient()
 
@@ -103,12 +119,58 @@ try:
 except Exception:
     CustomCommandHandler = None
 
-# ── Telegram dispatcher (set by bot.py after startup) ─────────────────────────
-dispatcher = None
+# ── Telegram dispatcher — lazy proxy (never None, queues handlers) ────────────
+class _LazyDispatcher:
+    """
+    Proxy dispatcher: queues add_handler/add_error_handler calls made at module
+    import time, then replays them onto the real dispatcher when bot.py calls
+    _set_dispatcher(real_dp).
+    """
+    def __init__(self):
+        self._real = None
+        self._queue = []   # list of (method_name, args, kwargs)
+
+    def _replay(self):
+        if self._real is None:
+            return
+        for method, args, kwargs in self._queue:
+            try:
+                getattr(self._real, method)(*args, **kwargs)
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).debug(f"LazyDispatcher replay {method}: {exc}")
+        self._queue.clear()
+
+    def add_handler(self, *args, **kwargs):
+        if self._real is not None:
+            return self._real.add_handler(*args, **kwargs)
+        self._queue.append(("add_handler", args, kwargs))
+
+    def add_error_handler(self, *args, **kwargs):
+        if self._real is not None:
+            return self._real.add_error_handler(*args, **kwargs)
+        self._queue.append(("add_error_handler", args, kwargs))
+
+    @property
+    def bot(self):
+        if self._real is not None:
+            return self._real.bot
+        return None
+
+    def __getattr__(self, name):
+        if self._real is not None:
+            return getattr(self._real, name)
+        # Return a no-op for unknown attrs
+        def _noop(*a, **k): pass
+        return _noop
+
+
+dispatcher = _LazyDispatcher()
 
 def _set_dispatcher(dp):
     global dispatcher
-    dispatcher = dp
+    dispatcher._real = dp
+    dispatcher._replay()   # replay queued handlers onto real dispatcher
 
 def _set_pbot(client):
     global pbot
