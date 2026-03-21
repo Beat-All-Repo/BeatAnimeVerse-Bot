@@ -165,6 +165,28 @@ if not hasattr(_tg, 'TelegramError'):
 if not hasattr(_tg, 'Unauthorized'):
     _tg.Unauthorized = Forbidden
 
+# ── Inject into telegram namespace (v13 modules do: from telegram import ParseMode) ──
+import telegram as _tg
+_inject_tg = {
+    'ParseMode': ParseMode,
+    'MAX_MESSAGE_LENGTH': MAX_MESSAGE_LENGTH,
+    'TelegramError': TelegramError,
+    'Unauthorized': Forbidden,
+    'ChatAction': ChatAction,
+    'InlineKeyboardButton': InlineKeyboardButton,
+    'InlineKeyboardMarkup': InlineKeyboardMarkup,
+    'InlineQueryResultArticle': InlineQueryResultArticle,
+    'InlineQueryResultPhoto': InlineQueryResultPhoto,
+    'InputTextMessageContent': InputTextMessageContent,
+    'MessageEntity': MessageEntity,
+    'CallbackQuery': CallbackQuery,
+    'Bot': Bot, 'Update': Update, 'User': User,
+    'Chat': Chat, 'Message': Message, 'ChatPermissions': ChatPermissions,
+}
+for _k, _v in _inject_tg.items():
+    if not hasattr(_tg, _k):
+        setattr(_tg, _k, _v)
+
 # ── Inject into telegram.ext namespace ───────────────────────────────────────
 import telegram.ext as _tge
 if not hasattr(_tge, 'Filters'):
