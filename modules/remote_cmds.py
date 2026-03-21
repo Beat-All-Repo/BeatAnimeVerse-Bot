@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/remote_cmds.py
+# ACTION: Replace existing file
+# ====================================================================
 from telegram import ChatPermissions, Update
 from telegram.error import BadRequest
 from telegram.ext import CallbackContext, CommandHandler
