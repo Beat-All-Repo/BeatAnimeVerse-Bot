@@ -172,6 +172,42 @@ if not hasattr(_tge, 'Filters'):
 if not hasattr(_tge, 'CallbackContext'):
     pass  # Already exists in v21
 
+# ── RegexHandler — removed in PTB v21, recreate it ───────────────────────────
+import re as _re
+class RegexHandler(MessageHandler):
+    """PTB v13 RegexHandler compat for v21."""
+    def __init__(self, pattern, callback, **kwargs):
+        kwargs.pop('run_async', None)
+        super().__init__(
+            filters=_filters_module.Regex(_re.compile(pattern)),
+            callback=callback,
+        )
+
+_tge.RegexHandler = RegexHandler
+
+# ── DispatcherHandlerStop injection ───────────────────────────────────────────
+_tge.DispatcherHandlerStop = DispatcherHandlerStop
+
+# ── Unauthorized injection into telegram.error ────────────────────────────────
+import telegram.error as _te
+if not hasattr(_te, 'Unauthorized'):
+    _te.Unauthorized = Forbidden
+
+# ── Fake telegram.utils module (used by many old modules) ─────────────────────
+import sys as _sys
+import types as _types
+
+if 'telegram.utils' not in _sys.modules:
+    _utils_mod = _types.ModuleType('telegram.utils')
+    _sys.modules['telegram.utils'] = _utils_mod
+
+if 'telegram.utils.helpers' not in _sys.modules:
+    _utils_helpers = _types.ModuleType('telegram.utils.helpers')
+    _utils_helpers.mention_html = mention_html
+    _utils_helpers.escape_markdown = escape_markdown
+    _sys.modules['telegram.utils.helpers'] = _utils_helpers
+    _sys.modules['telegram.utils'].helpers = _utils_helpers
+
 # ── Export everything modules might need ──────────────────────────────────────
 __all__ = [
     'ParseMode', 'ChatAction', 'MAX_MESSAGE_LENGTH',
@@ -181,7 +217,7 @@ __all__ = [
     'InputTextMessageContent', 'MessageEntity', 'CallbackQuery',
     'CommandHandler', 'MessageHandler', 'CallbackQueryHandler',
     'InlineQueryHandler', 'ContextTypes', 'CallbackContext',
-    'Filters', 'DispatcherHandlerStop',
+    'Filters', 'DispatcherHandlerStop', 'RegexHandler',
     'TelegramError', 'BadRequest', 'NetworkError', 'TimedOut',
     'Forbidden', 'Unauthorized', 'RetryAfter', 'InvalidToken',
     'mention_html', 'escape_markdown',
