@@ -5,7 +5,7 @@ wheel
 # ── Telegram libraries ────────────────────────────────────────────────────────
 python-telegram-bot==13.15
 pyrogram==2.0.106
-telethon==1.41.2
+telethon==1.42.0
 tgcrypto==1.2.5
 
 # ── Scheduler  (3.9.x = last version before pkg_resources was required) ───────
