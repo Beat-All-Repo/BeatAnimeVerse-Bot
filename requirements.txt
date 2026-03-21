@@ -11,7 +11,7 @@ tgcrypto==1.2.5
 # ── Scheduler  (3.9.x = last version before pkg_resources was required) ───────
 # apscheduler 3.6.3 crashes on startup with "No module named pkg_resources"
 # 3.9.1 is fully compatible with python-telegram-bot 13.x JobQueue API
-apscheduler==3.9.1
+apscheduler==3.11.2
 
 # ── Database ──────────────────────────────────────────────────────────────────
 sqlalchemy==1.4.46
