@@ -74,6 +74,14 @@ _PANEL_TAGS = {
     "default":     ["waifu", "maid", "elf", "uniform"],
 }
 
+# ── Pre-warm cache with static images — first panel load is INSTANT ───────────
+# Background APIs will refresh these after TTL expires (30 min)
+import random as _rand
+for _panel_key in list(_PANEL_TAGS.keys()) + ["default", "admin", "channels", "users", "broadcast", "upload", "flags", "style", "poster", "clones"]:
+    if _panel_key not in _img_cache:
+        _img_cache[_panel_key] = _rand.choice(_STATIC_FALLBACKS)
+        _cache_ts[_panel_key] = 0  # Expired so first real call refreshes from API
+
 # ── Waifu categories that are always SFW ─────────────────────────────────────
 _WAIFU_IM_TAGS = [
     "maid", "waifu", "elf", "oppai", "school",
@@ -330,8 +338,23 @@ def get_panel_image_sync(panel: str = "default") -> Optional[str]:
 
 
 async def get_panel_image_async(panel: str = "default") -> Optional[str]:
-    """Async wrapper — runs in executor to avoid blocking."""
+    """
+    Async wrapper — INSTANT return using cache, refreshes in background.
+    First call returns static fallback immediately (pre-warmed).
+    Subsequent calls get fresh API images after cache TTL expires.
+    """
     import asyncio
+
+    # Return cached value immediately (even if expired) for instant panel load
+    cached = _img_cache.get(panel)
+    if cached:
+        # If cache is stale, refresh in background without blocking
+        if not _is_cached(panel):
+            loop = asyncio.get_event_loop()
+            loop.run_in_executor(None, get_panel_image, panel)
+        return cached
+
+    # No cache at all — fetch synchronously (only happens if pre-warm missed)
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, get_panel_image, panel)
 
