@@ -8000,7 +8000,58 @@ async def button_handler(
 
         # Watermark setting
         if data == f"cat_watermark_{cat_name}":
-            user_states[uid] = f"AWAITING_WATERMARK_{cat_name.upper()}"
+            # Show full watermark panel with all options
+            try:
+                await query.delete_message()
+            except Exception:
+                pass
+            settings = get_category_settings(cat_name)
+            wm = settings.get("watermark_text") or "Not set"
+            wm_pos = settings.get("watermark_position") or "center"
+            logo = "✅ Set" if settings.get("logo_file_id") else "❌ Not set"
+            wm_positions = ["center", "bottom", "top", "bottom-right", "bottom-left", "top-right", "top-left"]
+            pos_btns = [
+                [InlineKeyboardButton(
+                    ("✅ " if wm_pos == p else "") + p.upper(),
+                    callback_data=f"cat_wm_pos_{cat_name}_{p}"
+                ) for p in wm_positions[:3]],
+                [InlineKeyboardButton(
+                    ("✅ " if wm_pos == p else "") + p.upper(),
+                    callback_data=f"cat_wm_pos_{cat_name}_{p}"
+                ) for p in wm_positions[3:6]],
+                [InlineKeyboardButton(
+                    ("✅ " if wm_pos == wm_positions[6] else "") + wm_positions[6].upper(),
+                    callback_data=f"cat_wm_pos_{cat_name}_{wm_positions[6]}"
+                )],
+            ]
+            action_btns = [
+                [bold_button("📝 Set Text Watermark", callback_data=f"cat_wm_text_{cat_name}")],
+                [bold_button("🖼 Send Image/Sticker as Watermark", callback_data=f"cat_wm_image_{cat_name}")],
+                [bold_button("❌ Remove Watermark", callback_data=f"cat_wm_clear_{cat_name}")],
+                [_back_btn(f"cat_settings_{cat_name}"), _close_btn()],
+            ]
+            markup = InlineKeyboardMarkup(pos_btns + action_btns)
+            text = (
+                b(f"💧 {cat_name.upper()} WATERMARK SETTINGS") + "\n\n"
+                + bq(
+                    f"<b>Current Text:</b> {code(e(str(wm)[:30]))}\n"
+                    f"<b>Position:</b> {code(wm_pos)}\n"
+                    f"<b>Visual Logo:</b> {logo}\n\n"
+                    "<b>Positions:</b> Tap to set where watermark appears\n"
+                    "<b>Text:</b> Type your channel name or watermark\n"
+                    "<b>Image:</b> Send sticker/image → bot saves it as logo overlay"
+                )
+            )
+            img_url = await get_panel_pic_async("categories")
+            if img_url:
+                try:
+                    await context.bot.send_photo(chat_id, img_url, caption=text,
+                        parse_mode=ParseMode.HTML, reply_markup=markup)
+                    return
+                except Exception:
+                    pass
+            await safe_send_message(context.bot, chat_id, text, reply_markup=markup)
+            return
             context.user_data["editing_category"] = cat_name
             await safe_edit_text(
                 query,
@@ -8017,6 +8068,79 @@ async def button_handler(
             return
 
         # Logo setting
+        # Watermark position set handler
+        if data.startswith(f"cat_wm_pos_{cat_name}_"):
+            pos = data[len(f"cat_wm_pos_{cat_name}_"):]
+            update_category_field(cat_name, "watermark_position", pos)
+            try:
+                await query.answer(f"✅ Watermark position set to {pos}", show_alert=False)
+            except Exception:
+                pass
+            # Re-show watermark panel
+            context.user_data["editing_category"] = cat_name
+            fake_data = f"cat_watermark_{cat_name}"
+            # Recurse by re-triggering the watermark panel
+            await safe_send_message(context.bot, chat_id,
+                b(f"✅ Watermark position set to {code(pos)}"),
+                reply_markup=InlineKeyboardMarkup([[
+                    _back_btn(f"cat_settings_{cat_name}"), _close_btn()
+                ]]))
+            return
+
+        # Watermark text input handler
+        if data == f"cat_wm_text_{cat_name}":
+            user_states[uid] = f"AWAITING_WATERMARK_{cat_name.upper()}"
+            try:
+                await query.delete_message()
+            except Exception:
+                pass
+            await safe_send_message(context.bot, chat_id,
+                b(f"💧 Set Text Watermark for {cat_name}") + "\n\n"
+                + bq(
+                    "Send your watermark text now.\n\n"
+                    "<b>Format:</b> <code>Your Text</code>\n"
+                    "Optionally add position: <code>Your Text | bottom-right</code>\n\n"
+                    "<b>Positions:</b> center, bottom, top, bottom-right,\n"
+                    "bottom-left, top-right, top-left\n\n"
+                    "Send <code>none</code> to remove text watermark."
+                ),
+                reply_markup=InlineKeyboardMarkup([[_back_btn(f"cat_settings_{cat_name}")]]),
+            )
+            return
+
+        # Watermark image/sticker handler
+        if data == f"cat_wm_image_{cat_name}":
+            user_states[uid] = f"AWAITING_WATERMARK_{cat_name.upper()}"
+            context.user_data["wm_mode"] = "image"
+            context.user_data["editing_category"] = cat_name
+            try:
+                await query.delete_message()
+            except Exception:
+                pass
+            await safe_send_message(context.bot, chat_id,
+                b(f"🖼 Set Image/Sticker Watermark for {cat_name}") + "\n\n"
+                + bq(
+                    "Send one of these as watermark overlay:\n"
+                    "• 🖼 Photo / image\n"
+                    "• 🎭 Sticker (static or animated)\n"
+                    "• 📄 Image document (.png .jpg .webp)\n\n"
+                    "It will appear as logo overlay on all posters for this category.\n"
+                    "Position is set from the Watermark panel."
+                ),
+                reply_markup=InlineKeyboardMarkup([[_back_btn(f"cat_settings_{cat_name}")]]),
+            )
+            return
+
+        # Clear watermark handler
+        if data == f"cat_wm_clear_{cat_name}":
+            update_category_field(cat_name, "watermark_text", None)
+            update_category_field(cat_name, "logo_file_id", None)
+            try:
+                await query.answer("✅ Watermark cleared", show_alert=True)
+            except Exception:
+                pass
+            return
+
         if data == f"cat_logo_{cat_name}":
             user_states[uid] = f"AWAITING_LOGO_{cat_name.upper()}"
             context.user_data["editing_category"] = cat_name
