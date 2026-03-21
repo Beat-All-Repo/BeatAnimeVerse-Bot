@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/blacklist_stickers.py
+# ACTION: Replace existing file
+# ====================================================================
 from typing import Optional
 import html
 
