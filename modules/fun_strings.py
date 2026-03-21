@@ -1,3 +1,7 @@
+# ==============================================================================
+# PLACE AT: /app/modules/fun_strings.py
+# ACTION: Replace existing file
+# ==============================================================================
 RUN_STRINGS = (
     "Now you see me, now you don't." "ε=ε=ε=ε=┌(;￣▽￣)┘",
     "Get back here!",
