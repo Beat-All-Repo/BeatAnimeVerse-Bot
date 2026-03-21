@@ -3,7 +3,7 @@ python-telegram-bot[webhooks,job-queue]==21.7
 pyrogram==2.0.106
 tgcrypto==1.2.5
 telethon==1.41.2
-apscheduler==3.9.1
+apscheduler~=3.10.4
 
 # ── Database: NeonDB (PostgreSQL) ─────────────────────────────────────────────
 sqlalchemy==1.4.46
