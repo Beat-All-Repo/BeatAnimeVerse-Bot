@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/sudoers.py
+# ACTION: Replace existing file
+# ====================================================================
 """
 sudoers.py — dev-only system stats.
 
