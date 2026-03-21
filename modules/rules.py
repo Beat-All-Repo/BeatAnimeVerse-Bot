@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/rules.py
+# ACTION: Replace existing file
+# ====================================================================
 from typing import Optional
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ParseMode, Update
 from telegram.error import BadRequest
