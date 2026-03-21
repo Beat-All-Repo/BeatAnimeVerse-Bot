@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/animequotes.py
+# ACTION: Replace existing file
+# ====================================================================
 import requests
 from telegram import Update, ParseMode
 from telegram.ext import CallbackContext
