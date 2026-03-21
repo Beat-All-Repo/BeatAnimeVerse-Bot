@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/zip.py
+# ACTION: Replace existing file
+# ====================================================================
 import os
 import time
 import zipfile
@@ -7,7 +11,12 @@ from telethon.tl import functions
 
 from beataniversebot_compat import TEMP_DOWNLOAD_DIRECTORY
 from beataniversebot_compat import telethn as client
-from BeatVerseProbot.events import register
+try:
+    from BeatVerseProbot.events import register
+except ImportError:
+    def register(*a,**k):
+        def d(f): return f
+        return a[0] if a and callable(a[0]) else d
 
 
 async def is_register_admin(chat, user):
