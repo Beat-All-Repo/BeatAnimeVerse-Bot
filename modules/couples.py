@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/couples.py
+# ACTION: Replace existing file
+# ====================================================================
 import random
 from datetime import datetime
 
@@ -5,7 +9,11 @@ from pyrogram import filters
 from pyrogram.enums import ChatType
 
 from beataniversebot_compat import pbot, MONGO_DB_URI
-from BeatVerseProbot.utils.mongo import get_couple, save_couple
+try:
+    from BeatVerseProbot.utils.mongo import get_couple, save_couple
+except ImportError:
+    async def get_couple(*a,**k): return None
+    async def save_couple(*a,**k): return False
 
 
 # Date and time
