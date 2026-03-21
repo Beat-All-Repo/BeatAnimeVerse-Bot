@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/stickers.py
+# ACTION: Replace existing file
+# ====================================================================
 import math
 import os
 import urllib.request as urllib
