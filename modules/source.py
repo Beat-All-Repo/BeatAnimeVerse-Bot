@@ -23,7 +23,7 @@ from beataniversebot_compat import BOT_NAME, BOT_USERNAME, OWNER_ID, START_IMG, 
 
 
 @pbot.on_message(filters.command(["repo", "source"]))
-async def repo(_, message: Message):
+async def repo(_, message):
     await message.reply_photo(
         photo=START_IMG,
         caption=f"""**ʜᴇʏ {message.from_user.mention},
