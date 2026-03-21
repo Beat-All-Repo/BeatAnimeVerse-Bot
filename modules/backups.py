@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/backups.py
+# ACTION: Replace existing file
+# ====================================================================
 import json
 import os
 import time
@@ -18,7 +22,10 @@ import modules.sql.notes_sql as sql
 # from modules.rules import get_rules
 import modules.sql.rules_sql as rulessql
 from beataniversebot_compat import EVENT_LOGS, LOGGER, OWNER_ID, SUPPORT_CHAT, dispatcher
-from BeatVerseProbot.__main__ import DATA_IMPORT
+try:
+    from BeatVerseProbot.__main__ import DATA_IMPORT
+except ImportError:
+    DATA_IMPORT = {}
 from modules.connection import connected
 from modules.helper_funcs.alternate import typing_action
 from modules.helper_funcs.chat_status import user_admin
