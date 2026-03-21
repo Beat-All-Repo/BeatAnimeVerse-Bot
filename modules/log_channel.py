@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/log_channel.py
+# ACTION: Replace existing file
+# ====================================================================
 from datetime import datetime
 from functools import wraps
 
