@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/misc.py
+# ACTION: Replace existing file
+# ====================================================================
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ParseMode, Update
 from telegram.ext import CallbackContext, CommandHandler, Filters
 
