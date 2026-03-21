@@ -1,10 +1,23 @@
+# ====================================================================
+# PLACE AT: /app/modules/error_handler.py
+# ACTION: Replace existing file
+# ====================================================================
 import html
 import io
 import random
 import sys
 import traceback
 
-import pretty_errors
+try:
+    import pretty_errors
+except ImportError:
+    class pretty_errors:
+        @staticmethod
+        def mono(): pass
+        output_stderr = None
+        @staticmethod
+        def excepthook(*a, **kw): return ""
+
 import requests
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackContext, CommandHandler
