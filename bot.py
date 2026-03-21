@@ -1030,15 +1030,36 @@ async def loading_animation_start(
     chat_id: int,
 ) -> Optional[Any]:
     """
-    Send a bold loading animation with ❗ as first message.
-    The message stays visible (acts as safety anchor) then gets deleted after.
-    Returns the message object.
+    Loading animation — supports:
+      • Custom TG sticker (set via /set_loader, forwarding a sticker)
+      • Default ❗ bold text frames
+      • Fully disableable via /set_loader off
+    Returns the message object (sticker or text).
     """
-    frames = ["❗", "❗ 𝗟𝗼𝗮𝗱𝗶𝗻𝗴", "❗ 𝗟𝗼𝗮𝗱𝗶𝗻𝗴.", "❗ 𝗟𝗼𝗮𝗱𝗶𝗻𝗴..", "❗ 𝗟𝗼𝗮𝗱𝗶𝗻𝗴..."]
+    # Check if loading is disabled by admin
+    try:
+        if get_setting("loading_anim_enabled", "true") == "false":
+            return None
+    except Exception:
+        pass
+
     msg = None
+
+    # Custom sticker (DB) or env TRANSITION_STICKER
+    try:
+        sticker_id = get_setting("loading_sticker_id", "") or TRANSITION_STICKER_ID
+        if sticker_id:
+            msg = await context.bot.send_sticker(chat_id, sticker_id)
+            _safety_anchors[chat_id] = msg.message_id
+            return msg
+    except Exception:
+        pass
+
+    # Default ❗ bold text animation
+    frames = ["❗", "❗ 𝗟𝗼𝗮𝗱𝗶𝗻𝗴", "❗ 𝗟𝗼𝗮𝗱𝗶𝗻𝗴.", "❗ 𝗟𝗼𝗮𝗱𝗶𝗻𝗴..", "❗ 𝗟𝗼𝗮𝗱𝗶𝗻𝗴..."]
     try:
         msg = await context.bot.send_message(chat_id, b(frames[0]), parse_mode=ParseMode.HTML)
-        _safety_anchors[chat_id] = msg.message_id   # register as anchor
+        _safety_anchors[chat_id] = msg.message_id
         for frame in frames[1:]:
             await asyncio.sleep(0.25)
             try:
@@ -3005,7 +3026,7 @@ async def show_category_settings_menu(
     wm = settings.get("watermark_text") or "None"
     logo = "✅ Set" if settings.get("logo_file_id") else "❌ Not set"
 
-    style = get_style() if _TEXT_STYLE_AVAILABLE else "normal"
+    style = _get_style() if _TEXT_STYLE_AVAILABLE else "normal"
     text = (
         f"{b(category.upper() + ' SETTINGS')}\n\n"
         + bq(
@@ -3099,9 +3120,25 @@ async def send_feature_flags_panel(
 
     markup = InlineKeyboardMarkup(keyboard)
     if query:
-        await safe_edit_text(query, text, reply_markup=markup)
-    else:
-        await safe_send_message(context.bot, chat_id, text, reply_markup=markup)
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+    # Send with panel image
+    img_url = None
+    if _PANEL_IMAGE_AVAILABLE:
+        try:
+            img_url = await get_panel_image_async("flags")
+        except Exception:
+            pass
+    if img_url:
+        try:
+            await context.bot.send_photo(chat_id, img_url, caption=text,
+                                         parse_mode=ParseMode.HTML, reply_markup=markup)
+            return
+        except Exception:
+            pass
+    await safe_send_message(context.bot, chat_id, text, reply_markup=markup)
 
 
 # ================================================================================
@@ -3889,7 +3926,19 @@ async def unban_user_command(
             await query.delete_message()
         except Exception:
             pass
-        await safe_send_message(context.bot, chat_id, text, reply_markup=InlineKeyboardMarkup(rows))
+        _img = None
+        if _PANEL_IMAGE_AVAILABLE:
+            try:
+                _img = await get_panel_image_async("users")
+            except Exception:
+                pass
+        if _img:
+            try:
+                await context.bot.send_photo(chat_id, _img, caption=text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
+            except Exception:
+                await safe_send_message(context.bot, chat_id, text, reply_markup=InlineKeyboardMarkup(rows))
+        else:
+            await safe_send_message(context.bot, chat_id, text, reply_markup=InlineKeyboardMarkup(rows))
         return
 
     if data == "user_search":
@@ -4203,6 +4252,67 @@ async def clones_command(
 
 
 @force_sub_required
+async def set_loader_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /set_loader — control the loading animation.
+    Usage:
+      • Forward a sticker to chat, then REPLY to it with /set_loader  → sets as loader sticker
+      • /set_loader off  → disables loading animation entirely
+      • /set_loader on   → restores default ❗ animation (clears custom sticker)
+    """
+    if update.effective_user.id not in (ADMIN_ID, OWNER_ID):
+        return
+    await delete_update_message(update, context)
+    reply = update.message.reply_to_message if update.message else None
+    args = context.args or []
+
+    if reply and reply.sticker:
+        # Set sticker as loader
+        sticker_id = reply.sticker.file_id
+        set_setting("loading_sticker_id", sticker_id)
+        set_setting("loading_anim_enabled", "true")
+        await safe_send_message(
+            context.bot, update.effective_chat.id,
+            "<b>✅ Custom loading sticker set!</b>\n\n"
+            "Every panel open will now show your sticker instead of ❗ animation.\n"
+            "Use /set_loader on to restore default, /set_loader off to disable.",
+            parse_mode="HTML",
+        )
+    elif args and args[0].lower() == "off":
+        set_setting("loading_anim_enabled", "false")
+        await safe_send_message(
+            context.bot, update.effective_chat.id,
+            "<b>✅ Loading animation disabled.</b>\n"
+            "Panels will appear without any loading message.",
+            parse_mode="HTML",
+        )
+    elif args and args[0].lower() == "on":
+        set_setting("loading_anim_enabled", "true")
+        set_setting("loading_sticker_id", "")
+        await safe_send_message(
+            context.bot, update.effective_chat.id,
+            "<b>✅ Loading animation restored to default ❗ style.</b>",
+            parse_mode="HTML",
+        )
+    else:
+        # Show current status
+        enabled = get_setting("loading_anim_enabled", "true") == "true"
+        sticker_id = get_setting("loading_sticker_id", "")
+        status = "🟢 Enabled" if enabled else "🔴 Disabled"
+        kind = f"Custom Sticker (<code>{sticker_id[:20]}…</code>)" if sticker_id else "Default ❗ Animation"
+        await safe_send_message(
+            context.bot, update.effective_chat.id,
+            f"<b>🎬 Loading Animation Settings</b>\n\n"
+            f"<b>Status:</b> {status}\n"
+            f"<b>Type:</b> {kind}\n\n"
+            f"<b>How to change:</b>\n"
+            f"• Forward a sticker here, then REPLY to it with <code>/set_loader</code>\n"
+            f"• <code>/set_loader off</code> — disable animation\n"
+            f"• <code>/set_loader on</code> — restore default ❗",
+            parse_mode="HTML",
+        )
+
+
 async def reload_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -4788,16 +4898,26 @@ async def show_upload_menu(
     )
     markup = get_upload_menu_markup()
 
-    try:
-        if edit_msg:
-            await context.bot.edit_message_text(
-                chat_id=chat_id, message_id=edit_msg.message_id,
-                text=text, parse_mode=ParseMode.HTML, reply_markup=markup,
-            )
-        else:
-            await safe_send_message(context.bot, chat_id, text, reply_markup=markup)
-    except Exception:
-        await safe_send_message(context.bot, chat_id, text, reply_markup=markup)
+    # Always send fresh with image (delete old if editing)
+    if edit_msg:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=edit_msg.message_id)
+        except Exception:
+            pass
+    img_url = None
+    if _PANEL_IMAGE_AVAILABLE:
+        try:
+            img_url = await get_panel_image_async("upload")
+        except Exception:
+            pass
+    if img_url:
+        try:
+            await context.bot.send_photo(chat_id, img_url, caption=text,
+                                         parse_mode=ParseMode.HTML, reply_markup=markup)
+            return
+        except Exception:
+            pass
+    await safe_send_message(context.bot, chat_id, text, reply_markup=markup)
 
 
 # ================================================================================
@@ -5420,6 +5540,7 @@ def _register_all_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("addclone", addclone_command, filters=admin_filter))
     app.add_handler(CommandHandler("clones", clones_command, filters=admin_filter))
     app.add_handler(CommandHandler("reload", reload_command, filters=admin_filter))
+    app.add_handler(CommandHandler("set_loader", set_loader_cmd, filters=admin_filter))
     app.add_handler(CommandHandler("restart", reload_command, filters=admin_filter))
     app.add_handler(CommandHandler("logs", logs_command, filters=admin_filter))
     app.add_handler(CommandHandler("connect", connect_command, filters=admin_filter))
@@ -5697,6 +5818,36 @@ async def post_init(application: Application) -> None:
             logger.info("✅ poster_cache table ready")
         except Exception as _e:
             logger.warning(f"poster_cache migration: {_e}")
+
+    # ── Apply missing DB migrations ────────────────────────────────────────────
+    try:
+        with db_manager.get_cursor() as _cur:
+            _cur.execute("""
+                CREATE TABLE IF NOT EXISTS manga_auto_updates (
+                    id SERIAL PRIMARY KEY,
+                    manga_title TEXT NOT NULL,
+                    manga_id TEXT,
+                    last_chapter TEXT,
+                    target_chat_id BIGINT,
+                    interval_minutes INTEGER DEFAULT 60,
+                    mode TEXT DEFAULT 'auto',
+                    watermark BOOLEAN DEFAULT FALSE,
+                    active BOOLEAN DEFAULT TRUE,
+                    last_checked TIMESTAMP DEFAULT NOW(),
+                    created_at TIMESTAMP DEFAULT NOW()
+                )""")
+            _cur.execute("""
+                ALTER TABLE bot_progress
+                ADD COLUMN IF NOT EXISTS anime_name TEXT DEFAULT 'Anime Name'
+            """)
+            _cur.execute("""
+                INSERT INTO bot_settings (key, value)
+                VALUES ('loading_sticker_id', ''), ('loading_anim_enabled', 'true')
+                ON CONFLICT (key) DO NOTHING
+            """)
+        logger.info("✅ DB migrations applied (manga_auto_updates, anime_name, loader)")
+    except Exception as _me:
+        logger.warning(f"DB migration warning: {_me}")
 
     # Initialize bot commands per authority level
     from bot_commands_setup import initialize_bot_commands
@@ -6277,7 +6428,19 @@ async def button_handler(
             await query.delete_message()
         except Exception:
             pass
-        await safe_send_message(context.bot, chat_id, text, reply_markup=markup)
+        _img = None
+        if _PANEL_IMAGE_AVAILABLE:
+            try:
+                _img = await get_panel_image_async("channels")
+            except Exception:
+                pass
+        if _img:
+            try:
+                await context.bot.send_photo(chat_id, _img, caption=text, parse_mode=ParseMode.HTML, reply_markup=markup)
+            except Exception:
+                await safe_send_message(context.bot, chat_id, text, reply_markup=markup)
+        else:
+            await safe_send_message(context.bot, chat_id, text, reply_markup=markup)
     if data == "fsub_add":
         if not is_admin:
             return
