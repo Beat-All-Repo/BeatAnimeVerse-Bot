@@ -130,13 +130,75 @@ def _cache_set(k: str, v: Any) -> None:
 # ── AniList ────────────────────────────────────────────────────────────────────
 _AL_URL = "https://graphql.anilist.co"
 _AL_ABBR = {
+    # Shortforms
     "aot": "attack on titan", "bnha": "my hero academia", "mha": "my hero academia",
     "hxh": "hunter x hunter", "dbs": "dragon ball super", "dbz": "dragon ball z",
     "op": "one piece", "fma": "fullmetal alchemist", "snk": "attack on titan",
     "jjk": "jujutsu kaisen", "csm": "chainsaw man",
+    # English → Romaji mappings to help AniList find correct result
+    "demon slayer": "Kimetsu no Yaiba",
+    "attack on titan": "Shingeki no Kyojin",
+    "my hero academia": "Boku no Hero Academia",
+    "jujutsu kaisen": "Jujutsu Kaisen",
+    "one punch man": "One Punch-Man",
+    "dr stone": "Dr. Stone",
+    "dr. stone": "Dr. Stone",
+    "promised neverland": "Yakusoku no Neverland",
+    "the promised neverland": "Yakusoku no Neverland",
+    "your lie in april": "Shigatsu wa Kimi no Uso",
+    "a silent voice": "Koe no Katachi",
+    "spirited away": "Sen to Chihiro no Kamikakushi",
+    "howls moving castle": "Howl no Ugoku Shiro",
+    "princess mononoke": "Mononoke Hime",
+    "violet evergarden": "Violet Evergarden",
+    "sword art online": "Sword Art Online",
+    "re zero": "Re:Zero kara Hajimeru Isekai Seikatsu",
+    "rezero": "Re:Zero kara Hajimeru Isekai Seikatsu",
+    "that time i got reincarnated as a slime": "Tensei shitara Slime Datta Ken",
+    "slime": "Tensei shitara Slime Datta Ken",
+    "black clover": "Black Clover",
+    "tokyo revengers": "Tokyo Revengers",
+    "blue lock": "Blue Lock",
+    "chainsaw man": "Chainsaw Man",
+    "spy x family": "Spy x Family",
+    "bleach": "Bleach",
+    "naruto": "Naruto",
+    "dragon ball": "Dragon Ball Z",
+    "made in abyss": "Made in Abyss",
+    "frieren": "Sousou no Frieren",
+    "oshi no ko": "Oshi no Ko",
+    "vinland saga": "Vinland Saga",
+    "mushoku tensei": "Mushoku Tensei: Jobless Reincarnation",
+    "overlord": "Overlord",
+    "no game no life": "No Game No Life",
+    "hunter x hunter": "Hunter x Hunter (2011)",
+    "fullmetal alchemist": "Fullmetal Alchemist: Brotherhood",
+    "fmab": "Fullmetal Alchemist: Brotherhood",
+    "steins gate": "Steins;Gate",
+    "death note": "Death Note",
+    "code geass": "Code Geass: Hangyaku no Lelouch",
+    "evangelion": "Neon Genesis Evangelion",
+    "nge": "Neon Genesis Evangelion",
+    "cowboy bebop": "Cowboy Bebop",
+    "one piece": "One Piece",
+    "fairy tail": "Fairy Tail",
+    "fate": "Fate/stay night: Unlimited Blade Works",
+    "danmachi": "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka",
+    "konosuba": "Kono Subarashii Sekai ni Shukufuku wo!",
+    "sao": "Sword Art Online",
+    "danganronpa": "Danganronpa",
+    "classroom of elite": "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e",
+    "cote": "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e",
+    "eminence in shadow": "Kage no Jitsuryokusha ni Naritakute!",
+    "tensura": "Tensei shitara Slime Datta Ken",
+    "shield hero": "Tate no Yuusha no Nariagari",
+    "rising of shield hero": "Tate no Yuusha no Nariagari",
+    "demon slayer swordsmith": "Kimetsu no Yaiba: Katanakaji no Sato-hen",
+    "kny": "Kimetsu no Yaiba",
+    "ds": "Kimetsu no Yaiba",
 }
 _ANIME_GQL = """
-query($s:String){Media(search:$s,type:ANIME){
+query($s:String){Media(search:$s,type:ANIME,sort:[SEARCH_MATCH,POPULARITY_DESC]){
   id siteUrl
   title{romaji english native}
   description(asHtml:false)
@@ -150,7 +212,7 @@ query($s:String){Media(search:$s,type:ANIME){
   countryOfOrigin isAdult
 }}"""
 _MANGA_GQL = """
-query($s:String){Media(search:$s,type:MANGA){
+query($s:String){Media(search:$s,type:MANGA,sort:[SEARCH_MATCH,POPULARITY_DESC]){
   id siteUrl
   title{romaji english native}
   description(asHtml:false)
@@ -163,41 +225,62 @@ query($s:String){Media(search:$s,type:MANGA){
 
 
 def _al_query(gql: str, search: str) -> Optional[Dict]:
+    """
+    Smart AniList search with multi-strategy fallback.
+    Prevents wrong results (e.g. 'Demon Slayer' returning 'Onigiri').
+    Strategy:
+      1. Try abbreviated/mapped query (e.g. 'demon slayer' → 'Kimetsu no Yaiba')
+      2. Try original query as-is
+      3. Try title-cased version
+    All use sort:[SEARCH_MATCH,POPULARITY_DESC] in GQL to prefer popular anime.
+    """
     key = "al:" + hashlib.md5(f"{gql}{search}".encode()).hexdigest()
     cached = _cache_get(key)
     if cached is not None:
         return cached
-    q = _AL_ABBR.get(search.lower().strip(), search)
-    try:
-        r = requests.post(
-            _AL_URL,
-            json={"query": gql, "variables": {"s": q}},
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
-            timeout=12,
-        )
-        if r.status_code == 200:
-            result = r.json().get("data", {}).get("Media")
-            if result:
-                _cache_set(key, result)
-            return result
-    except Exception as exc:
-        logger.debug(f"AniList query failed: {exc}")
-    # Retry with original query if abbreviation expanded
-    if q != search:
+
+    search_clean = search.strip()
+    # Map abbreviation or English → Romaji
+    q_mapped = _AL_ABBR.get(search_clean.lower(), search_clean)
+
+    # Build list of queries to try in order
+    queries_to_try = [q_mapped]
+    if q_mapped.lower() != search_clean.lower():
+        queries_to_try.append(search_clean)        # original
+    if search_clean != search_clean.title():
+        queries_to_try.append(search_clean.title()) # Title Case
+
+    for q in queries_to_try:
         try:
             r = requests.post(
                 _AL_URL,
-                json={"query": gql, "variables": {"s": search}},
-                headers={"Content-Type": "application/json"},
+                json={"query": gql, "variables": {"s": q}},
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
                 timeout=12,
             )
             if r.status_code == 200:
                 result = r.json().get("data", {}).get("Media")
                 if result:
+                    # Sanity check: verify result title loosely matches query
+                    # Prevents returning completely unrelated anime
+                    res_titles = [
+                        (result.get("title") or {}).get("english", "") or "",
+                        (result.get("title") or {}).get("romaji", "") or "",
+                        (result.get("title") or {}).get("native", "") or "",
+                    ]
+                    search_words = set(search_clean.lower().split())
+                    # If search has 2+ words, at least one must appear in result titles
+                    if len(search_words) >= 2:
+                        res_text = " ".join(res_titles).lower()
+                        word_match = any(w in res_text for w in search_words if len(w) > 3)
+                        if not word_match:
+                            logger.debug(f"AniList sanity check failed: '{q}' → '{res_titles[0]}', trying next")
+                            continue
                     _cache_set(key, result)
-                return result
-        except Exception:
-            pass
+                    return result
+        except Exception as exc:
+            logger.debug(f"AniList query failed for '{q}': {exc}")
+
     return None
 
 
@@ -1129,17 +1212,17 @@ async def cmd_plans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         bronze, silver, gold, free = 30, 40, 50, 20
 
-    await update.effective_message.reply_text(
-        f"<b>💎 BeatAniVerse Poster Plans</b>\n\n"
-        f"🆓 <b>Free</b> — {free} posters/day\n"
-        f"🥉 <b>Bronze</b> — {bronze} posters/day\n"
-        f"🥈 <b>Silver</b> — {silver} posters/day\n"
-        f"🥇 <b>Gold</b> — {gold} posters/day\n\n"
-        f"<i>Contact admin to upgrade your plan!</i>",
+await update.effective_message.reply_text(
+        f"<b> ʙᴇᴀᴛᴀɴɪᴠᴇʀsᴇ ᴘᴏsᴛᴇʀ ᴘʟᴀɴs</b>\n\n"
+        f" <b>ғʀᴇᴇ</b> — {free} ᴘᴏsᴛᴇʀs/ᴅᴀʏ\n"
+        f" <b>ʙʀᴏɴᴢᴇ</b> — {bronze} ᴘᴏsᴛᴇʀs/ᴅᴀʏ\n"
+        f" <b>sɪʟᴠᴇʀ</b> — {silver} ᴘᴏsᴛᴇʀs/ᴅᴀʏ\n"
+        f" <b>ɢᴏʟᴅ</b> — {gold} ᴘᴏsᴛᴇʀs/ᴅᴀʏ\n\n"
+        f"<i>ᴄᴏɴᴛᴀᴄᴛ ᴀᴅᴍɪɴ ᴛᴏ ᴜᴘɢʀᴀᴅᴇ ʏᴏᴜʀ ᴘʟᴀɴ!</i>",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("💬 Contact Admin", url=f"https://t.me/{os.getenv('ADMIN_CONTACT_USERNAME','Beat_Anime_Ocean')}")],
-            [InlineKeyboardButton("📢 BeatAnime", url=PUBLIC_ANIME_CHANNEL_URL)],
+            [InlineKeyboardButton(" ᴄᴏɴᴛᴀᴄᴛ ᴀᴅᴍɪɴ", url=f"https://t.me/{os.getenv('ADMIN_CONTACT_USERNAME','Beat_Anime_Ocean')}")],
+            [InlineKeyboardButton(" ʙᴇᴀᴛᴀɴɪᴍᴇ", url=PUBLIC_ANIME_CHANNEL_URL)],
         ]),
     )
 
@@ -1238,7 +1321,7 @@ async def cmd_remove_premium(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     try:
         await context.bot.send_message(
-            target, "<b>ℹ️ Your premium plan has been removed by the administrator.</b>",
+            target, "<b> Your premium plan has been removed by the administrator.</b>",
             parse_mode=ParseMode.HTML,
         )
     except Exception:
