@@ -1,4 +1,11 @@
-import speedtest
+# ====================================================================
+# PLACE AT: /app/modules/speed_test.py
+# ACTION: Replace existing file
+# ====================================================================
+try:
+    import speedtest
+except ImportError:
+    speedtest = None
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ParseMode, Update
 from telegram.ext import CallbackContext, CallbackQueryHandler
 
