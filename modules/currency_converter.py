@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/currency_converter.py
+# ACTION: Replace existing file
+# ====================================================================
 import requests
 from telegram import ParseMode, Update
 from telegram.ext import CallbackContext, CommandHandler
