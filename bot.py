@@ -2639,6 +2639,49 @@ async def generate_and_send_post(
         except Exception as exc:
             logger.debug(f"Watermark send failed: {exc}")
 
+    # ── Landscape poster via poster_engine (if PIL available) ─────────────────
+    try:
+        from poster_engine import (
+            _make_poster, _anilist_anime, _anilist_manga,
+            _build_anime_data, _build_manga_data,
+            _build_movie_data, _build_tv_data,
+            _get_settings as _pe_settings,
+        )
+        _pe_ok = True
+    except Exception:
+        _pe_ok = False
+
+    if _pe_ok and data:
+        try:
+            _pe_cat_map = {"anime":"ani","manga":"anim","movie":"net","tvshow":"net"}
+            _pe_tmpl = _pe_cat_map.get(category, "ani")
+            _pe_s    = _pe_settings(category)
+            _wm_txt  = _pe_s.get("watermark_text") or wm_text
+            _wm_pos  = _pe_s.get("watermark_position","center")
+
+            if category == "anime":
+                _t, _n, _st, _rows, _d, _cu, _sc = _build_anime_data(data)
+            elif category == "manga":
+                _t, _n, _st, _rows, _d, _cu, _sc = _build_manga_data(data)
+            elif category == "movie":
+                _t, _n, _st, _rows, _d, _cu, _sc = _build_movie_data(data)
+            else:
+                _t, _n, _st, _rows, _d, _cu, _sc = _build_tv_data(data)
+
+            _lp_buf = _make_poster(_pe_tmpl, _t, _n, _st, _rows, _d, _cu, _sc,
+                                   _wm_txt, _wm_pos, None, "bottom")
+            if _lp_buf:
+                await context.bot.send_photo(
+                    chat_id, _lp_buf,
+                    caption=caption_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=buttons_markup,
+                )
+                _cache_post(category, search_query or str(media_id), data)
+                return True
+        except Exception as _pe_exc:
+            logger.debug(f"Landscape poster failed, falling back: {_pe_exc}")
+
     # ── Send ──────────────────────────────────────────────────────────────────────
     if poster_url:
         sent = await safe_send_photo(
@@ -2843,10 +2886,24 @@ async def send_admin_menu(
         )
     )
 
-    # Main 3x3 + tools 3x3 + close row
+    # Main 3x3 + tools 3x3 + poster cmds + close row
     rows = _grid3(grid)
     rows.append([InlineKeyboardButton(math_bold("TOOLS"), callback_data="noop")])
     rows.extend(_grid3(tools))
+    # Poster commands grid
+    poster_cmds = [
+        _btn("🖼 ANI",    "poster_cmd_ani"),
+        _btn("🖼 NET",    "poster_cmd_net"),
+        _btn("🖼 CRUN",   "poster_cmd_crun"),
+        _btn("🖼 DARK",   "poster_cmd_dark"),
+        _btn("🖼 LIGHT",  "poster_cmd_light"),
+        _btn("🖼 MOD",    "poster_cmd_mod"),
+        _btn("🖼 DARKM",  "poster_cmd_darkm"),
+        _btn("🖼 NETM",   "poster_cmd_netm"),
+        _btn("🖼 MODM",   "poster_cmd_modm"),
+    ]
+    rows.append([InlineKeyboardButton(math_bold("POSTER CMDS"), callback_data="noop")])
+    rows.extend(_grid3(poster_cmds))
     rows.append([_close_btn()])
     markup = InlineKeyboardMarkup(rows)
 
@@ -5334,6 +5391,14 @@ def _register_all_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("manga", manga_command))
     app.add_handler(CommandHandler("movie", movie_command))
     app.add_handler(CommandHandler("tvshow", tvshow_command))
+    # ── Anime info commands (AniList, no jikanpy) ──────────────────────────────
+    try:
+        from modules.anime import airing_cmd, character_cmd
+        app.add_handler(CommandHandler("airing",    airing_cmd))
+        app.add_handler(CommandHandler("character", character_cmd))
+        logger.info("[anime] /airing and /character registered")
+    except Exception as _anime_err:
+        logger.warning(f"anime extras: {_anime_err}")
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("info", info_command))
     app.add_handler(CommandHandler("stats", stats_command, filters=admin_filter))
@@ -8234,6 +8299,25 @@ async def button_handler(
         if not is_admin:
             return
         await show_upload_menu(chat_id, context, query.message)
+        return
+
+    # ── Poster CMD buttons from admin panel ───────────────────────────────────
+    if data.startswith("poster_cmd_"):
+        if not is_admin:
+            return
+        tmpl = data.replace("poster_cmd_", "")
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+        await safe_send_message(
+            context.bot, chat_id,
+            f"<b>🖼 Poster Command:</b> <code>/{tmpl}</code>\n\n"
+            f"<b>Usage:</b> /{tmpl} &lt;title&gt;\n"
+            f"<b>Example:</b> <code>/{tmpl} Demon Slayer</code>\n\n"
+            f"<i>Sends a landscape 1280×720 poster.</i>",
+            parse_mode="HTML",
+        )
         return
 
     # ── Admin cmd list ─────────────────────────────────────────────────────────────
