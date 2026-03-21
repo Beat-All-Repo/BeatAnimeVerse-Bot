@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/get_common_chats.py
+# ACTION: Replace existing file
+# ====================================================================
 import os
 from time import sleep
 
