@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/truth_and_dare.py
+# ACTION: Replace existing file
+# ====================================================================
 import requests
 from telegram import Update
 from telegram.ext import CallbackContext
