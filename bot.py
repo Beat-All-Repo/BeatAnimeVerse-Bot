@@ -222,11 +222,11 @@ IMGBB_API_KEY: str = os.getenv("IMGBB_API_KEY", "")
 # Help info from env (what users see)
 HELP_TEXT_CUSTOM: str = os.getenv("HELP_TEXT_CUSTOM", "")
 HELP_CHANNEL_1_URL: str = os.getenv("HELP_CHANNEL_1_URL", "")
-HELP_CHANNEL_1_NAME: str = os.getenv("HELP_CHANNEL_1_NAME", "📢 Anime Channel")
+HELP_CHANNEL_1_NAME: str = os.getenv("HELP_CHANNEL_1_NAME", " ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ")
 HELP_CHANNEL_2_URL: str = os.getenv("HELP_CHANNEL_2_URL", "")
-HELP_CHANNEL_2_NAME: str = os.getenv("HELP_CHANNEL_2_NAME", "💬 Discussion")
+HELP_CHANNEL_2_NAME: str = os.getenv("HELP_CHANNEL_2_NAME", " ᴅɪsᴄᴜssɪᴏɴ")
 HELP_CHANNEL_3_URL: str = os.getenv("HELP_CHANNEL_3_URL", "")
-HELP_CHANNEL_3_NAME: str = os.getenv("HELP_CHANNEL_3_NAME", "🎬 Request")
+HELP_CHANNEL_3_NAME: str = os.getenv("HELP_CHANNEL_3_NAME", " ʀᴇǫᴜᴇsᴛ")
 
 # Timing
 LINK_EXPIRY_MINUTES: int = int(os.getenv("LINK_EXPIRY_MINUTES", "5"))
@@ -1065,7 +1065,7 @@ async def loading_animation_start(
         pass
 
     # Default ❗ bold text animation
-    frames = ["❗", "❗ 𝗟𝗼𝗮𝗱𝗶𝗻𝗴", "❗ 𝗟𝗼𝗮𝗱𝗶𝗻𝗴.", "❗ 𝗟𝗼𝗮𝗱𝗶𝗻𝗴..", "❗ 𝗟𝗼𝗮𝗱𝗶𝗻𝗴..."]
+    frames = ["!", "!!", "!!!", "!!!!", "!!!!!"]
     try:
         msg = await context.bot.send_message(chat_id, b(frames[0]), parse_mode=ParseMode.HTML)
         _safety_anchors[chat_id] = msg.message_id
@@ -1268,7 +1268,7 @@ async def _send_force_sub_screen(
         f"⚠️ {b(f'Hey {user_name}! You need to join {unjoined} channel(s).')}\n\n"
         + bq(
             b("Please join ALL the channels listed below,\n")
-            + b("then click the ✅ I've Joined button.")
+            + b("then click the  Try Again button.")
         )
         + f"\n\n<b>Total channels: {total} | Unjoined: {unjoined}</b>"
     )
@@ -1277,11 +1277,11 @@ async def _send_force_sub_screen(
     for uname, title, jbr in unsubscribed:
         clean = uname.lstrip("@")
         if jbr:
-            keyboard.append([InlineKeyboardButton(f"📝 {title} (Request)", url=f"https://t.me/{clean}")])
+            keyboard.append([InlineKeyboardButton(f" {title}", url=f"https://t.me/{clean}")])
         else:
-            keyboard.append([InlineKeyboardButton(f"📢 {title}", url=f"https://t.me/{clean}")])
+            keyboard.append([InlineKeyboardButton(f" {title}", url=f"https://t.me/{clean}")])
 
-    keyboard.append([bold_button("I've Joined — Check Again", callback_data="verify_subscription")])
+    keyboard.append([bold_button("♻️Try Again", callback_data="verify_subscription")])
     keyboard.append([bold_button("Help", callback_data="user_help")])
 
     markup = InlineKeyboardMarkup(keyboard)
@@ -1346,15 +1346,15 @@ def get_network_info() -> str:
 
 def get_system_stats_text() -> str:
     return (
-        b("💻 System Statistics") + "\n\n"
+        b(" System Statistics") + "\n\n"
         f"<b>⏱ Uptime:</b> {code(get_uptime())}\n"
-        f"<b>🖥 CPU:</b> {code(get_cpu_usage())}\n"
-        f"<b>🧠 Memory:</b> {code(get_memory_usage())}\n"
-        f"<b>💾 DB Size:</b> {code(get_db_size())}\n"
-        f"<b>💿 Disk:</b> {code(get_disk_usage())}\n"
-        f"<b>🌐 Network:</b> {code(get_network_info())}\n"
-        f"<b>🤖 Mode:</b> {code('Clone Bot' if I_AM_CLONE else 'Main Bot')}\n"
-        f"<b>🏷 Username:</b> @{e(BOT_USERNAME)}"
+        f"<b> CPU:</b> {code(get_cpu_usage())}\n"
+        f"<b> Memory:</b> {code(get_memory_usage())}\n"
+        f"<b> DB Size:</b> {code(get_db_size())}\n"
+        f"<b> Disk:</b> {code(get_disk_usage())}\n"
+        f"<b> Network:</b> {code(get_network_info())}\n"
+        f"<b> Mode:</b> {code('Clone Bot' if I_AM_CLONE else 'Main Bot')}\n"
+        f"<b> Username:</b> @{e(BOT_USERNAME)}"
     )
 
 
@@ -1817,23 +1817,23 @@ class TMDBClient:
         lines.append("")
 
         lines += [
-            f"<b>🎬 Released:</b> {code(release)}",
-            f"<b>⏱ Runtime:</b> {code(runtime_str)}",
-            f"<b>📊 Status:</b> {code(status)}",
-            f"<b>⭐ Rating:</b> {code(f'{rating:.1f}/10 ({format_number(vote_count)} votes)')}",
-            f"<b>🌍 Language:</b> {code(language)}",
-            f"<b>🎭 Genres:</b> {e(genres_str)}",
-            f"<b>🎥 Director:</b> {director_str}",
-            f"<b>⭐ Cast:</b> {top_cast}",
+            f"<b> Released:</b> {code(release)}",
+            f"<b> Runtime:</b> {code(runtime_str)}",
+            f"<b> Status:</b> {code(status)}",
+            f"<b> Rating:</b> {code(f'{rating:.1f}/10 ({format_number(vote_count)} votes)')}",
+            f"<b> Language:</b> {code(language)}",
+            f"<b> Genres:</b> {e(genres_str)}",
+            f"<b> Director:</b> {director_str}",
+            f"<b> Cast:</b> {top_cast}",
         ]
         if budget:
-            lines.append(f"<b>💰 Budget:</b> {code('$' + format_number(budget))}")
+            lines.append(f"<b> Budget:</b> {code('$' + format_number(budget))}")
         if revenue:
-            lines.append(f"<b>💵 Revenue:</b> {code('$' + format_number(revenue))}")
+            lines.append(f"<b> Revenue:</b> {code('$' + format_number(revenue))}")
         if kw_str:
             lines.append(f"<b>🏷 Keywords:</b> {e(kw_str)}")
         lines.append("")
-        lines.append(b("📖 Overview"))
+        lines.append(b(" Overview"))
         lines.append(bq(overview, expandable=True))
 
         if template:
@@ -1885,18 +1885,18 @@ class TMDBClient:
         lines.append("")
 
         lines += [
-            f"<b>📅 Aired:</b> {code(first_air + ' → ' + last_air)}",
-            f"<b>📊 Status:</b> {code(status)}",
-            f"<b>📺 Seasons:</b> {code(str(seasons))} | <b>Episodes:</b> {code(str(episodes))}",
-            f"<b>⭐ Rating:</b> {code(f'{rating:.1f}/10 ({format_number(vote_count)} votes)')}",
-            f"<b>🌍 Language:</b> {code(language)}",
-            f"<b>🎭 Genres:</b> {e(genres_str)}",
-            f"<b>📡 Network:</b> {network_str}",
-            f"<b>🎬 Created by:</b> {creators_str}",
-            f"<b>⭐ Cast:</b> {top_cast}",
+            f"<b> Aired:</b> {code(first_air + ' → ' + last_air)}",
+            f"<b> Status:</b> {code(status)}",
+            f"<b> Seasons:</b> {code(str(seasons))} | <b>Episodes:</b> {code(str(episodes))}",
+            f"<b> Rating:</b> {code(f'{rating:.1f}/10 ({format_number(vote_count)} votes)')}",
+            f"<b> Language:</b> {code(language)}",
+            f"<b> Genres:</b> {e(genres_str)}",
+            f"<b> Network:</b> {network_str}",
+            f"<b> Created by:</b> {creators_str}",
+            f"<b> Cast:</b> {top_cast}",
         ]
         lines.append("")
-        lines.append(b("📖 Overview"))
+        lines.append(b(" Overview"))
         lines.append(bq(overview, expandable=True))
 
         if template:
@@ -2090,18 +2090,18 @@ class MangaDexClient:
         lines.append("")
 
         lines += [
-            f"<b>📊 Status:</b> {code(status)}",
-            f"<b>📝 Chapters:</b> {code(str(chapters))}",
-            f"<b>📚 Volumes:</b> {code(str(volumes))}",
-            f"<b>📅 Year:</b> {code(str(year))}",
-            f"<b>🌍 Origin:</b> {code(lang_origin or 'N/A')}",
-            f"<b>🔞 Rating:</b> {code(content_rating)}",
-            f"<b>✍️ Author/Artist:</b> {authors}",
-            f"<b>🎭 Genres:</b> {e(genre_str)}",
+            f"<b> Status:</b> {code(status)}",
+            f"<b> Chapters:</b> {code(str(chapters))}",
+            f"<b> Volumes:</b> {code(str(volumes))}",
+            f"<b> Year:</b> {code(str(year))}",
+            f"<b> Origin:</b> {code(lang_origin or 'N/A')}",
+            f"<b> Rating:</b> {code(content_rating)}",
+            f"<b> Author/Artist:</b> {authors}",
+            f"<b> Genres:</b> {e(genre_str)}",
             "",
-            b("📖 Synopsis"),
+            b(" Synopsis"),
             bq(e(desc), expandable=True),
-            f"\n<b>🔗 MangaDex:</b> {site_url}",
+            f"\n<b> MangaDex:</b> {site_url}",
         ]
 
         info_text = "\n".join(str(l) for l in lines)
@@ -2137,11 +2137,11 @@ class MangaDexClient:
             parts.append(f" — <i>{e(title)}</i>")
         lines = [" ".join(parts), ""]
         lines += [
-            f"<b>📄 Pages:</b> {code(str(pages))}",
-            f"<b>🌐 Language:</b> {code(lang)}",
-            f"<b>👥 Group:</b> {group_str}",
-            f"<b>📅 Released:</b> {code(pub_at)}",
-            f"<b>🔗 Read:</b> https://mangadex.org/chapter/{ch_id}",
+            f"<b> Pages:</b> {code(str(pages))}",
+            f"<b> Language:</b> {code(lang)}",
+            f"<b> Group:</b> {group_str}",
+            f"<b> Released:</b> {code(pub_at)}",
+            f"<b> Read:</b> https://mangadex.org/chapter/{ch_id}",
         ]
         return "\n".join(lines)
 
@@ -2824,10 +2824,10 @@ def _btn(label: str, cb: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(_style_label(label), callback_data=cb)
 
 def _close_btn() -> InlineKeyboardButton:
-    return InlineKeyboardButton(_style_label("CLOSE"), callback_data="close_message")
+    return InlineKeyboardButton(_style_label("ᴄʟᴏsᴇ"), callback_data="close_message")
 
 def _back_btn(cb: str = "admin_back") -> InlineKeyboardButton:
-    return InlineKeyboardButton("🔙 " + _style_label("BACK"), callback_data=cb)
+    return InlineKeyboardButton("🔙 " + _style_label("ʙᴀᴄᴋ"), callback_data=cb)
 
 def bold_button(label: str, **kwargs) -> InlineKeyboardButton:
     """Styled button — respects BUTTON_STYLE setting."""
@@ -2961,39 +2961,39 @@ async def send_admin_menu(
 
     # ── Features: fun/anime interaction commands ───────────────────────────────
     features = [
-        _btn("💑 COUPLE",      "feat_couple"),
-        _btn("👊 SLAP",        "feat_slap"),
-        _btn("🤗 HUG",         "feat_hug"),
-        _btn("💋 KISS",        "feat_kiss"),
-        _btn("😊 PAT",         "feat_pat"),
-        _btn("🔍 INLINE",      "feat_inline_search"),
-        _btn("🎭 REACTIONS",   "feat_reactions"),
-        _btn("💬 CHATBOT",     "feat_chatbot"),
-        _btn("🎮 TRUTH/DARE",  "feat_truth_dare"),
-        _btn("📖 NOTES",       "feat_notes"),
-        _btn("⚠️ WARNS",       "feat_warns"),
-        _btn("🔇 MUTE",        "feat_muting"),
-        _btn("🚫 BANS",        "feat_bans"),
-        _btn("📋 RULES",       "feat_rules"),
-        _btn("🎌 AIRING",      "feat_airing"),
-        _btn("👤 CHARACTER",   "feat_character"),
-        _btn("📺 ANIME INFO",  "feat_anime_info"),
-        _btn("🌟 AFK",         "feat_afk"),
+        _btn(" COUPLE",      "feat_couple"),
+        _btn(" SLAP",        "feat_slap"),
+        _btn(" HUG",         "feat_hug"),
+        _btn(" KISS",        "feat_kiss"),
+        _btn(" PAT",         "feat_pat"),
+        _btn(" INLINE",      "feat_inline_search"),
+        _btn(" REACTIONS",   "feat_reactions"),
+        _btn(" CHATBOT",     "feat_chatbot"),
+        _btn(" TRUTH/DARE",  "feat_truth_dare"),
+        _btn(" NOTES",       "feat_notes"),
+        _btn(" WARNS",       "feat_warns"),
+        _btn(" MUTE",        "feat_muting"),
+        _btn(" BANS",        "feat_bans"),
+        _btn(" RULES",       "feat_rules"),
+        _btn(" AIRING",      "feat_airing"),
+        _btn(" CHARACTER",   "feat_character"),
+        _btn(" ANIME INFO",  "feat_anime_info"),
+        _btn(" AFK",         "feat_afk"),
     ]
     rows.append([InlineKeyboardButton(math_bold("FEATURES"), callback_data="noop")])
     rows.extend(_grid3(features))
 
     # ── Poster commands ────────────────────────────────────────────────────────
     poster_cmds = [
-        _btn("🖼 ANI",    "poster_cmd_ani"),
-        _btn("🖼 NET",    "poster_cmd_net"),
-        _btn("🖼 CRUN",   "poster_cmd_crun"),
-        _btn("🖼 DARK",   "poster_cmd_dark"),
-        _btn("🖼 LIGHT",  "poster_cmd_light"),
-        _btn("🖼 MOD",    "poster_cmd_mod"),
-        _btn("🖼 DARKM",  "poster_cmd_darkm"),
-        _btn("🖼 NETM",   "poster_cmd_netm"),
-        _btn("🖼 MODM",   "poster_cmd_modm"),
+        _btn(" ANI",    "poster_cmd_ani"),
+        _btn(" NET",    "poster_cmd_net"),
+        _btn(" CRUN",   "poster_cmd_crun"),
+        _btn(" DARK",   "poster_cmd_dark"),
+        _btn(" LIGHT",  "poster_cmd_light"),
+        _btn(" MOD",    "poster_cmd_mod"),
+        _btn(" DARKM",  "poster_cmd_darkm"),
+        _btn(" NETM",   "poster_cmd_netm"),
+        _btn(" MODM",   "poster_cmd_modm"),
     ]
     rows.append([InlineKeyboardButton(math_bold("POSTER CMDS"), callback_data="noop")])
     rows.extend(_grid3(poster_cmds))
@@ -3001,9 +3001,9 @@ async def send_admin_menu(
     # ── Import / Export ────────────────────────────────────────────────────────
     rows.append([InlineKeyboardButton(math_bold("IMPORT / EXPORT"), callback_data="noop")])
     rows.append([
-        _btn("📥 IMPORT USERS",  "admin_import_users"),
-        _btn("📥 IMPORT LINKS",  "admin_import_links"),
-        _btn("📤 EXPORT USERS",  "admin_export_users_quick"),
+        _btn("♻️ IMPORT USERS",  "admin_import_users"),
+        _btn("♻️ IMPORT LINKS",  "admin_import_links"),
+        _btn("♻️ EXPORT USERS",  "admin_export_users_quick"),
     ])
 
     rows.append([_close_btn()])
@@ -3045,15 +3045,15 @@ async def send_stats_panel(
         maint = "🔴 ON" if get_setting("maintenance_mode", "false") == "true" else "🟢 OFF"
 
         text = (
-            b("📊 Bot Statistics") + "\n\n"
-            f"<b>👥 Total Users:</b> {code(format_number(user_count))}\n"
-            f"<b>📢 Force-Sub Channels:</b> {code(str(channel_count))}\n"
-            f"<b>🔗 Generated Links:</b> {code(format_number(link_count))}\n"
-            f"<b>🤖 Active Clone Bots:</b> {code(str(len(clones)))}\n"
-            f"<b>🚫 Blocked Users:</b> {code(str(blocked))}\n"
-            f"<b>🔧 Maintenance:</b> {maint}\n"
-            f"<b>⏱ Link Expiry:</b> {code(str(LINK_EXPIRY_MINUTES) + ' min')}\n"
-            f"<b>⏳ Uptime:</b> {code(get_uptime())}"
+            b(" Bot Statistics") + "\n\n"
+            f"<b> Total Users:</b> {code(format_number(user_count))}\n"
+            f"<b> Force-Sub Channels:</b> {code(str(channel_count))}\n"
+            f"<b> Generated Links:</b> {code(format_number(link_count))}\n"
+            f"<b> Active Clone Bots:</b> {code(str(len(clones)))}\n"
+            f"<b> Blocked Users:</b> {code(str(blocked))}\n"
+            f"<b> Maintenance:</b> {maint}\n"
+            f"<b> Link Expiry:</b> {code(str(LINK_EXPIRY_MINUTES) + ' min')}\n"
+            f"<b> Uptime:</b> {code(get_uptime())}"
         )
     except Exception as exc:
         text = b("❌ Error loading stats: ") + code(e(str(exc)[:200]))
@@ -3169,13 +3169,13 @@ async def send_feature_flags_panel(
 ) -> None:
     """Show feature flags panel."""
     flags = [
-        ("maintenance_mode", "false", "🔧 Maintenance Mode"),
-        ("clone_redirect_enabled", "false", "🔀 Clone Redirect"),
-        ("error_dms_enabled", "1", "⚠️ Error DMs to Admin"),
-        ("force_sub_enabled", "true", "📢 Force Subscription"),
-        ("auto_delete_messages", "true", "🗑 Auto-Delete Messages"),
-        ("watermarks_enabled", "true", "💧 Watermarks"),
-        ("inline_search_enabled", "true", "🔍 Inline Search"),
+        ("maintenance_mode", "false", " Maintenance Mode"),
+        ("clone_redirect_enabled", "false", " Clone Redirect"),
+        ("error_dms_enabled", "1", " Error DMs to Admin"),
+        ("force_sub_enabled", "true", " Force Subscription"),
+        ("auto_delete_messages", "true", " Auto-Delete Messages"),
+        ("watermarks_enabled", "true", " Watermarks"),
+        ("inline_search_enabled", "true", " Inline Search"),
         ("group_commands_enabled", "true", "👥 Group Commands"),
     ]
 
@@ -3387,7 +3387,7 @@ async def handle_deep_link(
                         + b("💡 Tip: Tap the post button again to get a fresh link.")
                     ),
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("📢 Anime Channel", url=PUBLIC_ANIME_CHANNEL_URL)
+                        InlineKeyboardButton(" ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ", url=PUBLIC_ANIME_CHANNEL_URL)
                     ]]),
                 )
                 return
@@ -3428,7 +3428,7 @@ async def handle_deep_link(
             _here_link = HERE_IS_LINK_TEXT
             _join_text = JOIN_BTN_TEXT
         _link_msg = small_caps(
-            f"<blockquote><b>{_here_link}</b>\n\n</blockquote>"
+            f"<blockquote><b>{_here_link}</b>\n</blockquote>"
             "<b><u>Note: If the link is expired, please click the post link again to get a new one.</u></b>"
         )
         keyboard[0] = [bold_button(_join_text, url=invite.invite_link)]
@@ -3479,9 +3479,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         keyboard.append([InlineKeyboardButton(HELP_CHANNEL_3_NAME, url=HELP_CHANNEL_3_URL)])
     # Always add anime channel and contact admin
     if PUBLIC_ANIME_CHANNEL_URL and not any(PUBLIC_ANIME_CHANNEL_URL == r[0].url for r in keyboard if r):
-        keyboard.append([InlineKeyboardButton("🎌 Anime Channel", url=PUBLIC_ANIME_CHANNEL_URL)])
+        keyboard.append([InlineKeyboardButton("ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ", url=PUBLIC_ANIME_CHANNEL_URL)])
     if ADMIN_CONTACT_USERNAME:
-        keyboard.append([InlineKeyboardButton("💬 Contact Admin", url=f"https://t.me/{ADMIN_CONTACT_USERNAME}")])
+        keyboard.append([InlineKeyboardButton("💬 ᴄᴏɴᴛᴀᴄᴛ ᴀᴅᴍɪɴ", url=f"https://t.me/{ADMIN_CONTACT_USERNAME}")])
     keyboard.append([bold_button("CLOSE", callback_data="close_message")])
     markup = InlineKeyboardMarkup(keyboard)
 
@@ -3490,7 +3490,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         user_text = HELP_TEXT_CUSTOM if HELP_TEXT_CUSTOM else (
             b(f"ℹ️ {e(BOT_NAME)}") + "\n\n"
             + bq(
-                b("🎌 Your gateway to Anime, Manga & Movies!\n\n")
+                b(" Your gateway to Anime, Manga & Movies!\n\n")
                 + "Use the buttons below to join our channels."
             )
         )
@@ -3511,40 +3511,40 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     text = (
         b("📖 Admin Command Reference") + "\n\n"
         + bq(
-            b("🎌 Content Generation:\n")
+            b(" Content Generation:\n")
             + "<b>/anime</b> [name] — Anime post (AniList)\n"
             + "<b>/manga</b> [name] — Manga post (AniList + MangaDex)\n"
             + "<b>/movie</b> [name] — Movie post (TMDB)\n"
             + "<b>/tvshow</b> [name] — TV show post (TMDB)\n"
             + "<b>/search</b> [name] — Search all categories\n\n"
-            + b("🎨 Poster Templates (Admin only):\n")
+            + b(" Poster Templates (Admin only):\n")
             + "<b>/ani, /anim, /crun, /net, /netm</b>\n"
             + "<b>/light, /lightm, /dark, /darkm</b>\n"
             + "<b>/mod, /modm, /netcr</b> — Styled poster images\n\n"
-            + b("🔗 Link Provider:\n")
+            + b(" Link Provider:\n")
             + "<b>/addchannel</b> @id_or_username [Title] [jbr]\n"
             + "<b>/removechannel</b> @username_or_id\n"
             + "<b>/channel</b> — List force-sub channels\n"
             + "<b>/genlink</b> (via admin panel)\n\n"
-            + b("👥 User Management:\n")
+            + b(" User Management:\n")
             + "<b>/banuser, /unbanuser, /listusers</b>\n"
             + "<b>/deleteuser, /exportusers</b>\n\n"
-            + b("📣 Broadcast:\n")
+            + b(" Broadcast:\n")
             + "<b>/broadcast</b> (via /start panel)\n"
             + "<b>/broadcaststats</b> — Broadcast history\n\n"
-            + b("🤖 Clone Bots:\n")
+            + b(" Clone Bots:\n")
             + "<b>/addclone</b> TOKEN — Add clone\n"
             + "<b>/clones</b> — List clones\n\n"
-            + b("📤 Upload Manager:\n")
+            + b(" Upload Manager:\n")
             + "<b>/upload</b> — Open upload panel\n\n"
-            + b("⚙️ Settings & Tools:\n")
+            + b(" Settings & Tools:\n")
             + "<b>/settings</b> — Category settings\n"
             + "<b>/autoforward</b> — Auto-forward manager\n"
             + "<b>/autoupdate</b> — Manga chapter tracker\n"
             + "<b>/connect, /disconnect</b> — Group connections\n"
             + "<b>/stats, /sysstats, /users</b>\n"
             + "<b>/backup, /reload, /logs</b>\n\n"
-            + b("💎 Premium (Poster):\n")
+            + b(" Premium (Poster):\n")
             + "<b>/add_premium</b> id rank [duration]\n"
             + "<b>/remove_premium</b> id\n"
             + "<b>/premium_list</b> — List premium users",
@@ -3764,42 +3764,42 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     text = (
         b("📋 Admin Command Reference") + "\n\n"
         + bq(
-            b("📊 Statistics & Info:\n")
+            b(" Statistics & Info:\n")
             + "<b>/stats</b> — Bot stats\n"
             + "<b>/sysstats</b> — Server info\n"
             + "<b>/users</b> — User count\n"
             + "<b>/alive</b> — Online check\n"
             + "<b>/ping</b> — Response time\n\n"
-            + b("📣 Broadcast:\n")
+            + b(" Broadcast:\n")
             + "<b>/broadcast</b> — Start broadcast wizard\n"
             + "<b>/broadcaststats</b> — History\n\n"
-            + b("📢 Channels:\n")
+            + b(" Channels:\n")
             + "<b>/addchannel</b> @user Title — Add force-sub\n"
             + "<b>/removechannel</b> @user — Remove force-sub\n"
             + "<b>/channel</b> — List channels\n\n"
-            + b("👤 User Management:\n")
+            + b(" User Management:\n")
             + "<b>/listusers</b> [offset] — List users\n"
             + "<b>/banuser</b> @id — Ban user\n"
             + "<b>/unbanuser</b> @id — Unban user\n"
             + "<b>/deleteuser</b> id — Delete user\n"
             + "<b>/exportusers</b> — Export CSV\n"
             + "<b>/info</b> — User/chat details\n\n"
-            + b("🤖 Clone Bots:\n")
+            + b(" Clone Bots:\n")
             + "<b>/addclone</b> TOKEN — Register clone\n"
             + "<b>/clones</b> — List clones\n\n"
-            + b("🎨 Post Generation:\n")
+            + b(" Post Generation:\n")
             + "<b>/anime</b> name — Anime post\n"
             + "<b>/manga</b> name — Manga post\n"
             + "<b>/movie</b> name — Movie post\n"
             + "<b>/tvshow</b> name — TV show post\n"
             + "<b>/search</b> name — Multi-source search\n\n"
-            + b("⚙️ Configuration:\n")
+            + b(" Configuration:\n")
             + "<b>/settings</b> — Category settings\n"
             + "<b>/autoupdate</b> — Manga tracker\n"
             + "<b>/autoforward</b> — Auto-forward manager\n"
             + "<b>/upload</b> — Upload manager\n"
             + "<b>/reload</b> or <b>/restart</b> — Restart bot\n\n"
-            + b("🔗 Links:\n")
+            + b(" Links:\n")
             + "<b>/backup</b> — Generated links\n"
             + "<b>/id</b> — Get IDs\n"
             + "<b>/connect</b> group — Connect group\n"
@@ -3850,12 +3850,12 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await delete_bot_prompt(context, update.effective_chat.id)
 
     keyboard = [
-        [_btn("ANIME",   "cat_settings_anime"),   _btn("MANGA",  "cat_settings_manga")],
-        [_btn("MOVIE",   "cat_settings_movie"),   _btn("TV SHOW","cat_settings_tvshow")],
+        [_btn("ᴀɴɪᴍᴇ",   "cat_settings_anime"),   _btn("ᴍᴀɴɢᴀ",  "cat_settings_manga")],
+        [_btn("ᴍᴏᴠɪᴇ",   "cat_settings_movie"),   _btn("ᴛᴠ sʜᴏᴡ","cat_settings_tvshow")],
         [_back_btn("admin_back")],
     ]
-    text = b("⚙️ Category Settings") + "\n\n" + bq(b("Select a category to configure its template, buttons, watermarks, and more."))
-
+    text = b("⚙️ ᴄᴀᴛᴇɢᴏʀʏ sᴇᴛᴛɪɴɢs") + "\n\n" + bq(b("sᴇʟᴇᴄᴛ ᴀ ᴄᴀᴛᴇɢᴏʀʏ ᴛᴏ ᴄᴏɴғɪɢᴜʀᴇ ɪᴛs ᴛᴇᴍᴘʟᴀᴛᴇ, ʙᴜᴛᴛᴏɴs, ᴡᴀᴛᴇʀᴍᴀʀᴋs, ᴀɴᴅ ᴍᴏʀᴇ."))
+        
     if SETTINGS_IMAGE_URL:
         sent = await safe_send_photo(
             context.bot, update.effective_chat.id,
@@ -4023,7 +4023,7 @@ async def unban_user_command(
         user_states[uid] = "AWAITING_USER_SEARCH"
         await safe_edit_text(
             query,
-            b("SEARCH USER") + "\n\n" + bq("Send @username or numeric user ID:"),
+            b("sᴇᴀʀᴄʜ ᴜsᴇʀ") + "\n\n" + bq("sᴇɴᴅ @ᴜsᴇʀɴᴀᴍᴇ ᴏʀ ɴᴜᴍᴇʀɪᴄ ᴜsᴇʀ ɪᴅ:"),
             reply_markup=InlineKeyboardMarkup([[_back_btn("user_management"), _close_btn()]]),
         )
         return
@@ -4034,7 +4034,7 @@ async def unban_user_command(
         user_states[uid] = "AWAITING_BAN_USER"
         await safe_edit_text(
             query,
-            b("BAN USER") + "\n\n" + bq("Send @username or numeric user ID to ban:"),
+            b("ʙᴀɴ ᴜsᴇʀ") + "\n\n" + bq("sᴇɴᴅ @ᴜsᴇʀɴᴀᴍᴇ ᴏʀ ɴᴜᴍᴇʀɪᴄ ᴜsᴇʀ ɪᴅ ᴛᴏ ʙᴀɴ:"),
             reply_markup=InlineKeyboardMarkup([[_back_btn("user_management"), _close_btn()]]),
         )
         return
@@ -4045,7 +4045,7 @@ async def unban_user_command(
         user_states[uid] = "AWAITING_UNBAN_USER"
         await safe_edit_text(
             query,
-            b("UNBAN USER") + "\n\n" + bq("Send @username or numeric user ID to unban:"),
+            b("ᴜɴʙᴀɴ ᴜsᴇʀ") + "\n\n" + bq("sᴇɴᴅ @ᴜsᴇʀɴᴀᴍᴇ ᴏʀ ɴᴜᴍᴇʀɪᴄ ᴜsᴇʀ ɪᴅ ᴛᴏ ᴜɴʙᴀɴ:"),
             reply_markup=InlineKeyboardMarkup([[_back_btn("user_management"), _close_btn()]]),
         )
         return
@@ -4056,7 +4056,7 @@ async def unban_user_command(
         user_states[uid] = "AWAITING_DELETE_USER"
         await safe_edit_text(
             query,
-            b("DELETE USER") + "\n\n" + bq("Send numeric user ID to delete from database:"),
+            b("ᴅᴇʟᴇᴛᴇ ᴜsᴇʀ") + "\n\n" + bq("sᴇɴᴅ ɴᴜᴍᴇʀɪᴄ ᴜsᴇʀ ɪᴅ ᴛᴏ ᴅᴇʟᴇᴛᴇ ғʀᴏᴍ ᴅᴀᴛᴀʙᴀsᴇ:"),
             reply_markup=InlineKeyboardMarkup([[_back_btn("user_management"), _close_btn()]]),
         )
         return
@@ -4066,17 +4066,17 @@ async def unban_user_command(
             return
         users = get_all_users()
         banned = [(u[0], u[1], u[2]) for u in users if u[5]]
-        text = b(f"BLOCKED USERS ({len(banned)})") + "\n\n"
+        text = b(f"ʙʟᴏᴄᴋᴇᴅ ᴜsᴇʀs ({len(banned)})") + "\n\n"
         for uid2, uname, fname in banned[:20]:
             text += f"🔴 <code>{uid2}</code> @{e(uname or '')} {e(fname or '')}\n"
         if len(banned) > 20:
-            text += f"\n<i>...and {len(banned)-20} more</i>"
+            text += f"\n<i>...ᴀɴᴅ {len(banned)-20} ᴍᴏʀᴇ</i>"
         await safe_edit_text(
             query, text,
             reply_markup=InlineKeyboardMarkup([[_back_btn("user_management"), _close_btn()]]),
         )
         return
-
+            
 # STATE HANDLERS for user management inputs
 # These are handled in handle_admin_message:
 #   AWAITING_USER_SEARCH → search and display
@@ -4117,9 +4117,9 @@ async def listusers_command(
 
     nav = []
     if offset > 0:
-        nav.append(bold_button("PREV", callback_data=f"user_page_{max(0, offset - 10)}"))
+        nav.append(bold_button("🔙PREV", callback_data=f"user_page_{max(0, offset - 10)}"))
     if total > offset + 10:
-        nav.append(bold_button("NEXT", callback_data=f"user_page_{offset + 10}"))
+        nav.append(bold_button("NEXT🔜", callback_data=f"user_page_{offset + 10}"))
     if nav:
         keyboard_rows.append(nav)
     keyboard_rows.append([_back_btn("user_management")])
