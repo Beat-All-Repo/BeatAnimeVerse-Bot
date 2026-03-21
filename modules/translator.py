@@ -1,4 +1,28 @@
-from gpytranslate import SyncTranslator
+# ====================================================================
+# PLACE AT: /app/modules/translator.py
+# ACTION: Replace existing file
+# ====================================================================
+try:
+    from gpytranslate import SyncTranslator
+except ImportError:
+    try:
+        from deep_translator import GoogleTranslator as _GT
+        class SyncTranslator:
+            def __call__(self, text, sourcelang="auto", targetlang="en"):
+                class _R:
+                    pass
+                r = _R()
+                try:
+                    r.text = _GT(source=sourcelang, target=targetlang).translate(text)
+                except Exception:
+                    r.text = text
+                return r
+    except ImportError:
+        class SyncTranslator:
+            def __call__(self, text, sourcelang="auto", targetlang="en"):
+                class _R:
+                    text = text
+                return _R()
 from telegram import ParseMode, Update
 from telegram.ext import CallbackContext
 
