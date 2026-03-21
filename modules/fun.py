@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/fun.py
+# ACTION: Replace existing file
+# ====================================================================
 """
 fun.py — random fun commands.
 
@@ -14,7 +18,10 @@ from telegram import ChatPermissions, ParseMode, Update
 from telegram.error import BadRequest
 from telegram.ext import CallbackContext
 
-import BeatVerseProbot.modules.fun_strings as fun_strings
+try:
+    import BeatVerseProbot.modules.fun_strings as fun_strings
+except ImportError:
+    from modules import fun_strings
 from beataniversebot_compat import dispatcher
 from modules.disable import DisableAbleCommandHandler
 from modules.helper_funcs.chat_status import is_user_admin
