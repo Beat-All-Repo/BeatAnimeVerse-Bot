@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/locks.py
+# ACTION: Replace existing file
+# ====================================================================
 from typing import Optional
 import html
 import unicodedata as ud
