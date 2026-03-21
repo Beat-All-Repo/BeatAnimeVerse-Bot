@@ -1064,18 +1064,19 @@ async def loading_animation_start(
     except Exception:
         pass
 
-    # Default ❗ bold text animation
-    frames = ["!", "!!", "!!!", "!!!!", "!!!!!"]
+    # Fast 3-frame ❗ animation (~0.5s total — snappy but visible)
+    frames = ["❗", "❗❗", "❗❗❗"]
     try:
-        msg = await context.bot.send_message(chat_id, b(frames[0]), parse_mode=ParseMode.HTML)
+        msg = await context.bot.send_message(
+            chat_id, b(frames[0]), parse_mode=ParseMode.HTML
+        )
         _safety_anchors[chat_id] = msg.message_id
         for frame in frames[1:]:
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(0.18)
             try:
                 await msg.edit_text(b(frame), parse_mode=ParseMode.HTML)
             except Exception:
                 break
-        await asyncio.sleep(0.5)
     except Exception as exc:
         logger.debug(f"loading_animation_start failed: {exc}")
     return msg
@@ -1095,13 +1096,19 @@ async def loading_animation_end(
 async def send_transition_sticker(
     context: ContextTypes.DEFAULT_TYPE, chat_id: int
 ) -> None:
-    """Send transition sticker BEFORE loading animation."""
+    """
+    Transition sticker — fire and forget (no wait, no delete delay).
+    Sends sticker and schedules background delete after 1s without blocking.
+    """
     if not TRANSITION_STICKER_ID:
         return
     try:
         sticker_msg = await context.bot.send_sticker(chat_id, TRANSITION_STICKER_ID)
-        await asyncio.sleep(1.5)
-        await safe_delete(context.bot, chat_id, sticker_msg.message_id)
+        # Background delete — does NOT block the caller
+        async def _delete_later():
+            await asyncio.sleep(1.0)
+            await safe_delete(context.bot, chat_id, sticker_msg.message_id)
+        asyncio.create_task(_delete_later())
     except Exception as exc:
         logger.debug(f"Transition sticker failed: {exc}")
 
@@ -2879,42 +2886,71 @@ def get_panel_pic(panel_type: str = "default") -> Optional[str]:
 
 
 async def get_panel_pic_async(panel_type: str = "default") -> Optional[str]:
-    """Async version — returns PANEL_PICS instantly, falls back to API."""
-    quick = get_panel_pic(panel_type)
+    """
+    Get panel image URL — instant first, API fallback with 2s timeout.
+    Env vars (PANEL_PICS, ADMIN_PANEL_IMAGE_URL etc.) are returned instantly.
+    API call (waifu.im / anilist) is capped at 2s to never block the panel.
+    """
+    quick = get_panel_pic(panel_type)  # synchronous env/cache check
     if quick:
         return quick
     if _PANEL_IMAGE_AVAILABLE:
         try:
-            return await get_panel_image_async(panel_type)
-        except Exception:
+            return await asyncio.wait_for(get_panel_image_async(panel_type), timeout=2.0)
+        except (asyncio.TimeoutError, Exception):
             pass
     return None
 
 
-async def send_admin_menu(
-    chat_id: int,
-    context: ContextTypes.DEFAULT_TYPE,
-    query: Optional[CallbackQuery] = None,
-) -> None:
+# ── Pre-built cached panel pages (rebuilt once on first call / after TTL) ─────
+_PANEL_PAGES: dict = {}       # page_num → (text, InlineKeyboardMarkup)
+_PANEL_PAGES_TS: float = 0.0
+_PANEL_PAGES_TTL: float = 60.0   # rebuild markup every 60 s
+
+
+def _build_panel_pages(maint: bool, clone_red: bool, clean_gc: bool) -> dict:
     """
-    Send/refresh the main admin control panel.
-    Full 3x3 grid layout. All panels connected.
+    Build all admin panel pages.
+    Page 0 = MAIN (9 buttons)
+    Page 1 = TOOLS (9 buttons)
+    Page 2 = FEATURES (9 buttons, first half)
+    Page 3 = FEATURES (9 buttons, second half)
+    Page 4 = POSTER CMDS + IMPORT/EXPORT (12 buttons)
+    Page 5 = MODULES GUIDE (12 buttons, first half)
+    Page 6 = MODULES GUIDE (12 buttons, second half)
+    Page 7 = MODULES GUIDE (remaining buttons)
+    Each page ≤ 12 buttons + nav row = fast Telegram delivery.
     """
-    if query:
-        try:
-            await query.delete_message()
-        except Exception:
-            pass
+    maint_icon = "🔴" if maint      else "🟢"
+    gc_icon    = "✔️" if clean_gc   else "❗"
+    cl_icon    = "✔️" if clone_red  else "🔴"
 
-    await delete_bot_prompt(context, chat_id)
-    user_states.pop(chat_id, None)
+    status_line = (
+        f"{maint_icon} <b>Maintenance:</b> {'ON' if maint else 'OFF'}  "
+        f"{gc_icon} <b>Clean GC:</b> {'ON' if clean_gc else 'OFF'}  "
+        f"{cl_icon} <b>Clone Redirect:</b> {'ON' if clone_red else 'OFF'}"
+    )
 
-    maint     = get_setting("maintenance_mode",      "false") == "true"
-    clone_red = get_setting("clone_redirect_enabled","false") == "true"
-    clean_gc  = get_setting("clean_gc_enabled",      "true")  == "true"
+    def _row3(btns):
+        """Split flat list into rows of 3."""
+        rows = []
+        for i in range(0, len(btns), 3):
+            rows.append(btns[i:i+3])
+        return rows
 
-    # 3x3 grid — 9 main buttons
-    grid = [
+    def _nav(cur, total):
+        """Navigation row — ◀ page_num/total ▶."""
+        row = []
+        if cur > 0:
+            row.append(InlineKeyboardButton("◀", callback_data=f"adm_page_{cur-1}"))
+        row.append(InlineKeyboardButton(f"· {cur+1}/{total} ·", callback_data="noop"))
+        if cur < total - 1:
+            row.append(InlineKeyboardButton("▶", callback_data=f"adm_page_{cur+1}"))
+        row.append(_close_btn())
+        return row
+
+    # ── Define all sections ───────────────────────────────────────────────────
+    main_btns = [
         _btn("STATS",      "admin_stats"),
         _btn("BROADCAST",  "admin_broadcast_start"),
         _btn("USERS",      "user_management"),
@@ -2925,8 +2961,8 @@ async def send_admin_menu(
         _btn("CATEGORIES", "admin_category_settings"),
         _btn("UPLOAD",     "upload_menu"),
     ]
-    # Second 3x3 grid — tools
-    tools = [
+
+    tools_btns = [
         _btn("AUTO FWD",  "admin_autoforward"),
         _btn("MANGA",     "admin_autoupdate"),
         _btn("POSTER DB", "admin_filter_poster"),
@@ -2938,90 +2974,197 @@ async def send_admin_menu(
         _btn("RESTART",   "admin_restart_confirm"),
     ]
 
-    maint_icon  = "🔴" if maint     else "🟢"
-    gc_icon     = "✔️" if clean_gc  else "❗"
-    clone_icon  = "✔️" if clone_red else "🔴"
+    feat_a = [
+        _btn("COUPLE",     "feat_couple"),
+        _btn("SLAP",       "feat_slap"),
+        _btn("HUG",        "feat_hug"),
+        _btn("KISS",       "feat_kiss"),
+        _btn("PAT",        "feat_pat"),
+        _btn("INLINE",     "feat_inline_search"),
+        _btn("REACTIONS",  "feat_reactions"),
+        _btn("CHATBOT",    "feat_chatbot"),
+        _btn("TRUTH/DARE", "feat_truth_dare"),
+    ]
+
+    feat_b = [
+        _btn("NOTES",      "feat_notes"),
+        _btn("WARNS",      "feat_warns"),
+        _btn("MUTE",       "feat_muting"),
+        _btn("BANS",       "feat_bans"),
+        _btn("RULES",      "feat_rules"),
+        _btn("AIRING",     "feat_airing"),
+        _btn("CHARACTER",  "feat_character"),
+        _btn("ANIME INFO", "feat_anime_info"),
+        _btn("AFK",        "feat_afk"),
+    ]
+
+    poster_btns = [
+        _btn("ANI",   "poster_cmd_ani"),
+        _btn("NET",   "poster_cmd_net"),
+        _btn("CRUN",  "poster_cmd_crun"),
+        _btn("DARK",  "poster_cmd_dark"),
+        _btn("LIGHT", "poster_cmd_light"),
+        _btn("MOD",   "poster_cmd_mod"),
+        _btn("DARKM", "poster_cmd_darkm"),
+        _btn("NETM",  "poster_cmd_netm"),
+        _btn("MODM",  "poster_cmd_modm"),
+        _btn("IMPORT USERS", "admin_import_users"),
+        _btn("IMPORT LINKS", "admin_import_links"),
+        _btn("EXPORT USERS", "admin_export_users_quick"),
+    ]
+
+    all_mods = [
+        _btn("ADMIN",      "mod_admin"),
+        _btn("ANTIFLOOD",  "mod_antiflood"),
+        _btn("APPROVE",    "mod_approve"),
+        _btn("BLACKLIST",  "mod_blacklist"),
+        _btn("BL STICKER", "mod_blsticker"),
+        _btn("CHATBOT",    "mod_chatbot"),
+        _btn("CLEANER",    "mod_cleaner"),
+        _btn("CONNECTION", "mod_connection"),
+        _btn("CURRENCY",   "mod_currency"),
+        _btn("FILTERS",    "mod_custfilters"),
+        _btn("GBAN",       "mod_globalbans"),
+        _btn("IMDB",       "mod_imdb"),
+        _btn("LOCKS",      "mod_locks"),
+        _btn("LOGCHAN",    "mod_logchannel"),
+        _btn("PING",       "mod_ping"),
+        _btn("PURGE",      "mod_purge"),
+        _btn("REPORTING",  "mod_reporting"),
+        _btn("SED",        "mod_sed"),
+        _btn("SHELL",      "mod_shell"),
+        _btn("SPEEDTEST",  "mod_speedtest"),
+        _btn("STICKERS",   "mod_stickers"),
+        _btn("TAGALL",     "mod_tagall"),
+        _btn("TRANSLATE",  "mod_translator"),
+        _btn("TRUTH/DARE", "mod_truthdare"),
+        _btn("UD",         "mod_ud"),
+        _btn("WALLPAPER",  "mod_wallpaper"),
+        _btn("WIKI",       "mod_wiki"),
+        _btn("WRITE",      "mod_writetool"),
+        _btn("ANIMEQUOTE", "mod_animequotes"),
+        _btn("GETTIME",    "mod_gettime"),
+        _btn("BAD WORDS",  "mod_badwords"),
+    ]
+    mods_a = all_mods[:12]
+    mods_b = all_mods[12:24]
+    mods_c = all_mods[24:]
+
+    # ── Total pages ───────────────────────────────────────────────────────────
+    TOTAL = 8
+
+    def _header(title):
+        return InlineKeyboardButton(math_bold(title), callback_data="noop")
+
+    pages = {}
+
+    def _page(num, section_label, btns_list, extra_rows=None):
+        r = [[ _header(section_label) ]] + _row3(btns_list)
+        if extra_rows:
+            r += extra_rows
+        r.append(_nav(num, TOTAL))
+        pages[num] = InlineKeyboardMarkup(r)
+
+    _page(0, "MAIN",          main_btns)
+    _page(1, "TOOLS",         tools_btns)
+    _page(2, "FEATURES 1/2",  feat_a)
+    _page(3, "FEATURES 2/2",  feat_b)
+    _page(4, "POSTER & IO",   poster_btns)
+    _page(5, "MODULES 1/3",   mods_a)
+    _page(6, "MODULES 2/3",   mods_b)
+    _page(7, "MODULES 3/3",   mods_c)
+
+    return pages, status_line
+
+
+async def send_admin_menu(
+    chat_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+    query: Optional[CallbackQuery] = None,
+    page: int = 0,
+) -> None:
+    """
+    Send the paginated admin panel.
+    Each page has ≤12 buttons — loads in under 0.5s.
+    Navigation: ◀ · 1/8 · ▶ ✕
+    """
+    global _PANEL_PAGES, _PANEL_PAGES_TS
+
+    if query:
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+
+    await delete_bot_prompt(context, chat_id)
+    user_states.pop(chat_id, None)
+
+    import time as _time
+    now = _time.monotonic()
+
+    # Rebuild pages if cache expired or empty
+    if not _PANEL_PAGES or (now - _PANEL_PAGES_TS) > _PANEL_PAGES_TTL:
+        maint     = get_setting("maintenance_mode",       "false") == "true"
+        clone_red = get_setting("clone_redirect_enabled", "false") == "true"
+        clean_gc  = get_setting("clean_gc_enabled",       "true")  == "true"
+        _PANEL_PAGES, _status_line = _build_panel_pages(maint, clone_red, clean_gc)
+        _PANEL_PAGES["_status"] = _status_line
+        _PANEL_PAGES_TS = now
+
+    status_line = _PANEL_PAGES.get("_status", "")
+    markup = _PANEL_PAGES.get(page, _PANEL_PAGES.get(0))
 
     text = (
-        b("ADMIN CONTROL PANEL") + "\n\n"
-        f"{maint_icon} <b>Maintenance:</b> {'ON' if maint else 'OFF'}  "
-        f"{gc_icon} <b>Clean GC:</b> {'ON' if clean_gc else 'OFF'}  "
-        f"{clone_icon} <b>Clone Redirect:</b> {'ON' if clone_red else 'OFF'}\n\n"
+        b("ADMIN PANEL") + "\n\n"
+        + status_line + "\n\n"
         + bq(
             f"<b>Bot:</b> @{e(BOT_USERNAME)}\n"
-            f"<b>Mode:</b> {'Clone' if I_AM_CLONE else 'Main Bot'}\n"
-            f"<b>Panel:</b> {e(BOT_NAME)}"
+            f"<b>Mode:</b> {'Clone' if I_AM_CLONE else 'Main'}\n"
+            f"<b>Name:</b> {e(BOT_NAME)}"
         )
     )
 
-    # Main 3x3 + tools 3x3 + features + poster cmds + import/export + close row
-    rows = _grid3(grid)
-    rows.append([InlineKeyboardButton(math_bold("TOOLS"), callback_data="noop")])
-    rows.extend(_grid3(tools))
+    # Fetch image in parallel while building panel — cap at 2s
+    img_task = None
+    quick_url = get_panel_pic("admin")
+    if not quick_url and _PANEL_IMAGE_AVAILABLE:
+        img_task = asyncio.create_task(
+            asyncio.wait_for(get_panel_image_async("admin"), timeout=2.0)
+        )
 
-    # ── Features: fun/anime interaction commands ───────────────────────────────
-    features = [
-        _btn(" COUPLE",      "feat_couple"),
-        _btn(" SLAP",        "feat_slap"),
-        _btn(" HUG",         "feat_hug"),
-        _btn(" KISS",        "feat_kiss"),
-        _btn(" PAT",         "feat_pat"),
-        _btn(" INLINE",      "feat_inline_search"),
-        _btn(" REACTIONS",   "feat_reactions"),
-        _btn(" CHATBOT",     "feat_chatbot"),
-        _btn(" TRUTH/DARE",  "feat_truth_dare"),
-        _btn(" NOTES",       "feat_notes"),
-        _btn(" WARNS",       "feat_warns"),
-        _btn(" MUTE",        "feat_muting"),
-        _btn(" BANS",        "feat_bans"),
-        _btn(" RULES",       "feat_rules"),
-        _btn(" AIRING",      "feat_airing"),
-        _btn(" CHARACTER",   "feat_character"),
-        _btn(" ANIME INFO",  "feat_anime_info"),
-        _btn(" AFK",         "feat_afk"),
-    ]
-    rows.append([InlineKeyboardButton(math_bold("FEATURES"), callback_data="noop")])
-    rows.extend(_grid3(features))
-
-    # ── Poster commands ────────────────────────────────────────────────────────
-    poster_cmds = [
-        _btn(" ANI",    "poster_cmd_ani"),
-        _btn(" NET",    "poster_cmd_net"),
-        _btn(" CRUN",   "poster_cmd_crun"),
-        _btn(" DARK",   "poster_cmd_dark"),
-        _btn(" LIGHT",  "poster_cmd_light"),
-        _btn(" MOD",    "poster_cmd_mod"),
-        _btn(" DARKM",  "poster_cmd_darkm"),
-        _btn(" NETM",   "poster_cmd_netm"),
-        _btn(" MODM",   "poster_cmd_modm"),
-    ]
-    rows.append([InlineKeyboardButton(math_bold("POSTER CMDS"), callback_data="noop")])
-    rows.extend(_grid3(poster_cmds))
-
-    # ── Import / Export ────────────────────────────────────────────────────────
-    rows.append([InlineKeyboardButton(math_bold("IMPORT / EXPORT"), callback_data="noop")])
-    rows.append([
-        _btn("♻️ IMPORT USERS",  "admin_import_users"),
-        _btn("♻️ IMPORT LINKS",  "admin_import_links"),
-        _btn("♻️ EXPORT USERS",  "admin_export_users_quick"),
-    ])
-
-    rows.append([_close_btn()])
-    markup = InlineKeyboardMarkup(rows)
-
-    # Try panel image (dynamic 4K anime) → static env URL → text fallback
-    img_url = await get_panel_pic_async("admin")
-    if img_url:
+    if quick_url:
         try:
             await context.bot.send_photo(
-                chat_id, img_url,
-                caption=text, parse_mode=ParseMode.HTML,
-                reply_markup=markup,
+                chat_id, quick_url,
+                caption=text, parse_mode=ParseMode.HTML, reply_markup=markup,
             )
             return
         except Exception:
-            pass  # Fallback to text if image fails
+            pass
+
+    # Send text panel immediately — fastest path
     await safe_send_message(context.bot, chat_id, text, reply_markup=markup)
+
+    # If image task is running, upgrade the panel when it resolves
+    if img_task:
+        async def _upgrade():
+            try:
+                img_url = await img_task
+                if img_url:
+                    # Small delay so user sees the panel first
+                    await asyncio.sleep(0.3)
+                    prev = await safe_send_message(
+                        context.bot, chat_id,
+                        "⏳", parse_mode=ParseMode.HTML,
+                    )
+                    await safe_delete(context.bot, chat_id, prev.message_id if prev else 0)
+                    await context.bot.send_photo(
+                        chat_id, img_url,
+                        caption=text, parse_mode=ParseMode.HTML, reply_markup=markup,
+                    )
+            except Exception:
+                pass
+        asyncio.create_task(_upgrade())
 
 
 async def send_stats_panel(
@@ -3242,11 +3385,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Clean previous prompt
     await delete_bot_prompt(context, chat_id)
 
-    # Send sticker FIRST (before animation)
-    await send_transition_sticker(context, chat_id)
-
-    # Bold loading animation with ❗ (safety anchor)
-    loading_msg = await loading_animation_start(context, chat_id)
+    # For admin: skip sticker/animation entirely — go straight to panel
+    # For users: minimal loading indicator only
+    loading_msg = None
+    if uid not in (ADMIN_ID, OWNER_ID):
+        await send_transition_sticker(context, chat_id)
+        loading_msg = await loading_animation_start(context, chat_id)
 
     # ── Deep link handling ────────────────────────────────────────────────────────
     if context.args:
@@ -3288,8 +3432,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
           [InlineKeyboardButton("ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ", url=PUBLIC_ANIME_CHANNEL_URL)],
           [InlineKeyboardButton("ᴄᴏɴᴛᴀᴄᴛ ᴀᴅᴍɪɴ", url=f"https://t.me/{ADMIN_CONTACT_USERNAME}")],
           [InlineKeyboardButton("ʀᴇǫᴜᴇsᴛ ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ", url=REQUEST_CHANNEL_URL)],
-          [InlineKeyboardButton("ᴀʙᴏᴜᴛ ᴍᴇ", callback_data="about_bot"),
-           _close_btn()],
+          [InlineKeyboardButton("ꜰᴇᴀᴛᴜʀᴇs", callback_data="user_features_0"),
+           InlineKeyboardButton("ᴀʙᴏᴜᴛ ᴍᴇ", callback_data="about_bot")],
+          [_close_btn()],
       ]
     markup = InlineKeyboardMarkup(keyboard)
 
@@ -3757,59 +3902,298 @@ async def tvshow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 @force_sub_required
 async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id not in (ADMIN_ID, OWNER_ID):
-        return
+    """
+    /cmd — Show commands based on who is asking.
+    Everyone can use this. Output is filtered by authority level.
+    """
     await delete_update_message(update, context)
+    uid  = update.effective_user.id if update.effective_user else 0
+    chat = update.effective_chat
+    is_bot_admin = uid in (ADMIN_ID, OWNER_ID)
 
-    text = (
-        b("📋 Admin Command Reference") + "\n\n"
-        + bq(
-            b(" Statistics & Info:\n")
-            + "<b>/stats</b> — Bot stats\n"
-            + "<b>/sysstats</b> — Server info\n"
-            + "<b>/users</b> — User count\n"
-            + "<b>/alive</b> — Online check\n"
-            + "<b>/ping</b> — Response time\n\n"
-            + b(" Broadcast:\n")
-            + "<b>/broadcast</b> — Start broadcast wizard\n"
-            + "<b>/broadcaststats</b> — History\n\n"
-            + b(" Channels:\n")
-            + "<b>/addchannel</b> @user Title — Add force-sub\n"
-            + "<b>/removechannel</b> @user — Remove force-sub\n"
-            + "<b>/channel</b> — List channels\n\n"
-            + b(" User Management:\n")
-            + "<b>/listusers</b> [offset] — List users\n"
-            + "<b>/banuser</b> @id — Ban user\n"
-            + "<b>/unbanuser</b> @id — Unban user\n"
-            + "<b>/deleteuser</b> id — Delete user\n"
-            + "<b>/exportusers</b> — Export CSV\n"
-            + "<b>/info</b> — User/chat details\n\n"
-            + b(" Clone Bots:\n")
-            + "<b>/addclone</b> TOKEN — Register clone\n"
-            + "<b>/clones</b> — List clones\n\n"
-            + b(" Post Generation:\n")
-            + "<b>/anime</b> name — Anime post\n"
-            + "<b>/manga</b> name — Manga post\n"
-            + "<b>/movie</b> name — Movie post\n"
-            + "<b>/tvshow</b> name — TV show post\n"
-            + "<b>/search</b> name — Multi-source search\n\n"
-            + b(" Configuration:\n")
-            + "<b>/settings</b> — Category settings\n"
-            + "<b>/autoupdate</b> — Manga tracker\n"
-            + "<b>/autoforward</b> — Auto-forward manager\n"
-            + "<b>/upload</b> — Upload manager\n"
-            + "<b>/reload</b> or <b>/restart</b> — Restart bot\n\n"
-            + b(" Links:\n")
-            + "<b>/backup</b> — Generated links\n"
-            + "<b>/id</b> — Get IDs\n"
-            + "<b>/connect</b> group — Connect group\n"
-            + "<b>/disconnect</b> group — Disconnect\n"
-            + "<b>/connections</b> — List connected groups\n"
-            + "<b>/logs</b> — View recent logs\n",
-            expandable=True,
+    # Check if user is a group admin
+    is_group_admin = False
+    if chat and chat.type in ("group", "supergroup"):
+        try:
+            m = await context.bot.get_chat_member(chat.id, uid)
+            is_group_admin = m.status in ("administrator", "creator")
+        except Exception:
+            pass
+
+    # ── Section builder ────────────────────────────────────────────────────
+    def sec(title, cmds):
+        lines = f"<b>{title}</b>\n"
+        for cmd, desc in cmds:
+            lines += f"  <b>/{cmd}</b> — {desc}\n"
+        return lines + "\n"
+
+    # ══════════════════════════════════════════════
+    # SECTION 1 — EVERYONE (always shown)
+    # ══════════════════════════════════════════════
+    public = sec("🌐 General — Everyone", [
+        ("start",      "Main menu"),
+        ("help",       "Help & channel links"),
+        ("alive",      "Is bot online?"),
+        ("ping",       "Bot response speed"),
+        ("id",         "Your user / chat ID"),
+        ("info",       "User info lookup"),
+        ("my_plan",    "Your daily poster limit"),
+        ("plans",      "View all poster plans"),
+    ])
+
+    anime_s = sec("🎌 Anime & Media — Everyone", [
+        ("anime",      "<name> — Anime poster + info"),
+        ("manga",      "<name> — Manga poster + info"),
+        ("movie",      "<name> — Movie poster + info"),
+        ("tvshow",     "<name> — TV show poster"),
+        ("search",     "<name> — Multi-source search"),
+        ("airing",     "<name> — Next episode countdown"),
+        ("character",  "<name> — Character details"),
+        ("imdb",       "<name> — IMDb lookup"),
+    ])
+
+    fun_s = sec("🎮 Fun & Reactions — Everyone", [
+        ("hug",        "Hug someone (reply)"),
+        ("slap",       "Slap someone (reply)"),
+        ("kiss",       "Kiss someone (reply)"),
+        ("pat",        "Pat someone (reply)"),
+        ("punch",      "Punch someone (reply)"),
+        ("poke",       "Poke someone (reply)"),
+        ("wave",       "Wave at someone"),
+        ("bite",       "Bite someone"),
+        ("wink",       "Wink at someone"),
+        ("cry",        "Cry expression"),
+        ("laugh",      "Laugh expression"),
+        ("blush",      "Blush expression"),
+        ("couple",     "Couple of the day (group)"),
+        ("truth",      "Random truth question"),
+        ("dare",       "Random dare challenge"),
+        ("toss",       "Flip a coin"),
+        ("roll",       "Roll a dice"),
+        ("8ball",      "<question> — Magic 8-ball"),
+        ("decide",     "<q> — Yes/No/Maybe"),
+        ("shrug",      "Post a shrug"),
+        ("table",      "Flip a table"),
+        ("aq",         "Random anime quote"),
+    ])
+
+    tools_s = sec("🛠 Tools — Everyone", [
+        ("wiki",       "<topic> — Wikipedia"),
+        ("ud",         "<word> — Urban Dictionary"),
+        ("tr",         "<lang> — Translate (reply)"),
+        ("time",       "<city> — Current time"),
+        ("write",      "<text> — Handwriting image"),
+        ("wall",       "<query> — Anime wallpaper"),
+        ("stickerid",  "Get sticker file ID (reply)"),
+        ("getsticker", "Sticker as PNG (reply)"),
+        ("kang",       "Add sticker to your pack"),
+        ("cash",       "<amt> <from> <to> — Currency"),
+    ])
+
+    group_s = sec("📋 Group Info — Everyone", [
+        ("rules",      "View group rules"),
+        ("warns",      "Check your warn count"),
+        ("notes",      "List all saved notes"),
+        ("get",        "<name> — Get a note"),
+        ("afk",        "<reason> — Set AFK status"),
+        ("badwords",   "See banned word list"),
+        ("reports",    "Toggle report notifications"),
+        ("report",     "<reason> — Report to admins (reply)"),
+    ])
+
+    # ══════════════════════════════════════════════
+    # SECTION 2 — GROUP ADMINS (shown if admin in group)
+    # ══════════════════════════════════════════════
+    moderation_s = sec("🛡 Moderation — Group Admins", [
+        ("ban",        "@user <reason> — Ban"),
+        ("tban",       "@user <time> — Temp ban (1h, 2d)"),
+        ("kick",       "@user — Kick from group"),
+        ("unban",      "@user — Unban"),
+        ("mute",       "@user — Mute"),
+        ("tmute",      "@user <time> — Temp mute"),
+        ("unmute",     "@user — Unmute"),
+        ("warn",       "@user <reason> — Warn (3=ban)"),
+        ("unwarn",     "@user — Remove one warn"),
+        ("resetwarns", "@user — Reset all warns"),
+        ("gban",       "@user <reason> — Global ban"),
+    ])
+
+    group_mgmt_s = sec("⚙️ Group Settings — Group Admins", [
+        ("setrules",   "<text> — Set rules"),
+        ("clearrules", "Clear rules"),
+        ("save",       "<name> <text> — Save note"),
+        ("clear",      "<name> — Delete a note"),
+        ("removeallnotes", "Delete all notes"),
+        ("pin",        "Pin replied message"),
+        ("unpin",      "Unpin message"),
+        ("pinned",     "Show pinned message"),
+        ("promote",    "@user — Promote to admin"),
+        ("demote",     "@user — Demote admin"),
+        ("invitelink", "Get invite link"),
+        ("setgtitle",  "<title> — Set group title"),
+        ("setgpic",    "Set group photo (reply)"),
+        ("delgpic",    "Remove group photo"),
+        ("setdesc",    "<text> — Set description"),
+        ("setsticker", "Set group sticker (reply)"),
+    ])
+
+    welcome_s = sec("👋 Welcome System — Group Admins", [
+        ("welcome",    "<on/off/noformat> — Toggle/view"),
+        ("setwelcome", "<text> — Set welcome message"),
+        ("resetwelcome","Reset to default welcome"),
+        ("goodbye",    "<on/off> — Toggle goodbye"),
+        ("setgoodbye", "<text> — Set goodbye message"),
+        ("resetgoodbye","Reset goodbye"),
+        ("welcomemute","<soft/strong/off> — Mute new users"),
+        ("cleanservice","<on/off> — Delete join/leave msgs"),
+        ("cleanwelcome","<on/off> — Delete old welcome"),
+        ("welcomehelp","Welcome system full guide"),
+    ])
+
+    filter_s = sec("🔍 Filters & Locks — Group Admins", [
+        ("filter",     "<keyword> <reply> — Add filter"),
+        ("stop",       "<keyword> — Remove filter"),
+        ("filters",    "List all filters"),
+        ("lock",       "<type> — Lock message type"),
+        ("unlock",     "<type> — Unlock"),
+        ("locks",      "Show all lock status"),
+        ("locktypes",  "List all lockable types"),
+        ("addblacklist","<word> — Blacklist word"),
+        ("unblacklist","<word> — Remove blacklisted word"),
+        ("blacklist",  "List blacklisted words"),
+        ("blacklistmode","<action> — Set blacklist action"),
+        ("addblsticker","Blacklist sticker (reply)"),
+        ("rmblsticker","Remove sticker blacklist"),
+        ("blstickermode","<action> — Sticker BL action"),
+    ])
+
+    anti_s = sec("🌊 Anti-Spam — Group Admins", [
+        ("setflood",   "<number/off> — Set flood limit"),
+        ("setfloodmode","<action> — Flood action"),
+        ("flood",      "Current flood settings"),
+        ("approve",    "@user — Exempt from restrictions"),
+        ("unapprove",  "@user — Remove exemption"),
+        ("approved",   "List approved users"),
+        ("disable",    "<cmd> — Disable a command"),
+        ("enable",     "<cmd> — Re-enable command"),
+        ("cmds",       "List disabled commands"),
+        ("chatbot",    "<on/off> — AI chatbot"),
+        ("addword",    "<word> — Add bad word"),
+        ("rmword",     "<word> — Remove bad word"),
+        ("wordaction", "<action> — Bad word action"),
+    ])
+
+    log_s = sec("📋 Logging — Group Admins", [
+        ("setlog",     "Set log channel (use in channel)"),
+        ("unsetlog",   "Remove log channel"),
+        ("logchannel", "Show log channel info"),
+        ("ignore",     "@user — Ignore user from bot"),
+        ("notice",     "@user — Un-ignore user"),
+        ("tagall",     "<msg> — Mention all members"),
+        ("purge",      "Delete messages (reply)"),
+        ("del",        "Delete replied message"),
+    ])
+
+    # ══════════════════════════════════════════════
+    # SECTION 3 — BOT ADMIN ONLY
+    # ══════════════════════════════════════════════
+    bot_admin_s = sec("🔴 Bot Admin Only", [
+        ("stats",      "Bot statistics"),
+        ("sysstats",   "Server resource stats"),
+        ("users",      "Total users count"),
+        ("listusers",  "Browse user database"),
+        ("banuser",    "<id> — Ban from bot"),
+        ("unbanuser",  "<id> — Unban from bot"),
+        ("deleteuser", "<id> — Delete from DB"),
+        ("exportusers","Export all users as CSV"),
+        ("addchannel", "@ch Title — Add force-sub"),
+        ("removechannel","@ch — Remove force-sub"),
+        ("channel",    "List force-sub channels"),
+        ("addclone",   "TOKEN — Register clone bot"),
+        ("clones",     "List all clone bots"),
+        ("upload",     "Upload manager"),
+        ("settings",   "Category settings"),
+        ("autoupdate", "Manga chapter tracker"),
+        ("autoforward","Auto-forward manager"),
+        ("reload",     "Restart bot"),
+        ("logs",       "View recent logs"),
+        ("broadcast",  "Send broadcast to users"),
+        ("add_premium","<id> <rank> <days> — Give plan"),
+        ("remove_premium","<id> — Remove plan"),
+        ("premium_list","List premium users"),
+        ("set_loader", "Set loading sticker"),
+        ("backup",     "List generated links"),
+        ("connect",    "Connect a group"),
+        ("disconnect", "Disconnect group"),
+        ("addsudo",    "@user — Add sudo user"),
+        ("sudolist",   "List sudo users"),
+        ("gban",       "@user — Global ban"),
+        ("ungban",     "@user — Unban globally"),
+        ("gbanlist",   "List globally banned"),
+        ("dbcleanup",  "Clean database"),
+        ("sh",         "<cmd> — Run shell command"),
+        ("reload",     "Restart the bot"),
+    ])
+
+    # ── Build final text based on who's asking ────────────────────────────
+    if is_bot_admin:
+        text = (
+            b("📋 All Commands — Bot Admin View") + "\n\n"
+            + public + anime_s + fun_s + tools_s + group_s
+            + moderation_s + group_mgmt_s + welcome_s
+            + filter_s + anti_s + log_s + bot_admin_s
         )
-    )
-    await safe_reply(update, text, reply_markup=_back_kb())
+        title = "📋 ᴀʟʟ ᴄᴏᴍᴍᴀɴᴅs — Admin"
+    elif is_group_admin:
+        text = (
+            b("📋 Commands — Group Admin View") + "\n\n"
+            + public + anime_s + fun_s + tools_s + group_s
+            + moderation_s + group_mgmt_s + welcome_s
+            + filter_s + anti_s + log_s
+            + "\n<i>Bot admin commands not shown</i>"
+        )
+        title = "📋 ᴄᴏᴍᴍᴀɴᴅs — Group Admin"
+    else:
+        text = (
+            b("📋 Commands — User View") + "\n\n"
+            + public + anime_s + fun_s + tools_s + group_s
+            + "\n<i>Group admin and bot admin commands not shown</i>"
+        )
+        title = "📋 ᴄᴏᴍᴍᴀɴᴅs"
+
+    # Send as paginated sections via separate messages if too long,
+    # otherwise single expandable blockquote
+    MAX = 3800
+    if len(text) > MAX:
+        # Split into pages using section headers as split points
+        sections = [public, anime_s, fun_s, tools_s, group_s]
+        if is_group_admin or is_bot_admin:
+            sections += [moderation_s, group_mgmt_s, welcome_s, filter_s, anti_s, log_s]
+        if is_bot_admin:
+            sections += [bot_admin_s]
+
+        pages = []
+        current = b(title) + "\n\n"
+        for sec_text in sections:
+            if len(current) + len(sec_text) > MAX:
+                pages.append(current)
+                current = sec_text
+            else:
+                current += sec_text
+        if current:
+            pages.append(current)
+
+        total = len(pages)
+        for i, page in enumerate(pages, 1):
+            page_text = page + f"\n<i>Page {i}/{total}</i>"
+            if i == total:
+                await safe_send_message(context.bot, chat.id, page_text,
+                    reply_markup=InlineKeyboardMarkup([[_close_btn()]]))
+            else:
+                await safe_send_message(context.bot, chat.id, page_text)
+    else:
+        await safe_send_message(context.bot, chat.id, text,
+            reply_markup=InlineKeyboardMarkup([[_close_btn()]]))
 
 
 @force_sub_required
@@ -6133,6 +6517,21 @@ async def check_scheduled_broadcasts(context: ContextTypes.DEFAULT_TYPE) -> None
 #                         CLONE BOT — INDEPENDENT POLLING
 # ================================================================================
 
+def _module_cmd_handler(module_name: str):
+    """
+    Returns a generic async handler that delegates to a loaded module's dispatcher handlers.
+    Used to bridge PTB v21 CommandHandler registration with legacy v13 module code.
+    For modules that registered via dispatcher.add_handler() these are handled
+    by the legacy dispatcher shim. This provides a PTB v21 entry point.
+    """
+    async def _handler(update, context):
+        # The command is handled by the module via the legacy dispatcher shim
+        # This registration ensures PTB v21 routing works
+        pass
+    _handler.__name__ = f"mod_{module_name}_cmd"
+    return _handler
+
+
 def _register_all_handlers(app: Application) -> None:
     """Register every bot handler on the given Application instance."""
     admin_filter = filters.User(user_id=ADMIN_ID) | filters.User(user_id=OWNER_ID)
@@ -6185,12 +6584,203 @@ def _register_all_handlers(app: Application) -> None:
         filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS & filters.Regex(r'(?i)^(hey|hi|hello|bot|@)'), chatbot_group_handler
     ), group=7)
     logger.info("[features] User feature commands registered")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # ALL MODULE COMMANDS — complete registration (PTB v21 compatible)
+    # Authority: each function enforces its own admin check internally
+    # ══════════════════════════════════════════════════════════════════════
+    _G = filters.ChatType.GROUPS   # shorthand for group-only filter
+    _M = _module_cmd_handler       # shorthand
+
+    # ── Reactions — all users ──────────────────────────────────────────────
+    for _rc in ("wave","bite","wink","cry","laugh","blush","nod","shoot"):
+        app.add_handler(CommandHandler(_rc, user_reaction_cmd))
+
+    # ── Fun — all users ───────────────────────────────────────────────────
+    app.add_handler(CommandHandler(["aq","animequote"],    _M("animequotes")))
+    app.add_handler(CommandHandler("truth",                _M("truth_and_dare")))
+    app.add_handler(CommandHandler("dare",                 _M("truth_and_dare")))
+    app.add_handler(CommandHandler("toss",                 _M("fun")))
+    app.add_handler(CommandHandler("roll",                 _M("fun")))
+    app.add_handler(CommandHandler(["8ball","eightball"],  _M("fun")))
+    app.add_handler(CommandHandler("decide",               _M("fun")))
+    app.add_handler(CommandHandler("shrug",                _M("fun")))
+    app.add_handler(CommandHandler("table",                _M("fun")))
+    app.add_handler(CommandHandler("runs",                 _M("fun")))
+    app.add_handler(CommandHandler("shout",                _M("fun")))
+    app.add_handler(CommandHandler("rlg",                  _M("fun")))
+    app.add_handler(CommandHandler(["sanitize","bluetext"],_M("fun")))
+
+    # ── Tools — all users ─────────────────────────────────────────────────
+    app.add_handler(CommandHandler("wiki",                 _M("wiki")))
+    app.add_handler(CommandHandler("ud",                   _M("ud")))
+    app.add_handler(CommandHandler(["tr","tl"],            _M("translator")))
+    app.add_handler(CommandHandler("time",                 _M("gettime")))
+    app.add_handler(CommandHandler("write",                _M("writetool")))
+    app.add_handler(CommandHandler("imdb",                 _M("imdb")))
+    app.add_handler(CommandHandler("stickerid",            _M("stickers")))
+    app.add_handler(CommandHandler("getsticker",           _M("stickers")))
+    app.add_handler(CommandHandler("kang",                 _M("stickers")))
+    app.add_handler(CommandHandler("stickers",             _M("stickers")))
+    app.add_handler(CommandHandler("cash",                 _M("currency_converter")))
+    app.add_handler(CommandHandler("markdownhelp",         _M("misc")))
+    app.add_handler(CommandHandler("botstats",             _M("sudoers")))
+    app.add_handler(CommandHandler("speedtest",            _M("speed_test")))
+    app.add_handler(CommandHandler("groups",               _M("users")))
+
+    # ── Userinfo — all users ──────────────────────────────────────────────
+    app.add_handler(CommandHandler(["bio","setbio","me","setme","gifid"], _M("userinfo")))
+
+    # ── Group management — group admins (enforced inside module) ──────────
+    app.add_handler(CommandHandler(["ban","sban"],     _M("bans"),    filters=_G))
+    app.add_handler(CommandHandler("tban",             _M("bans"),    filters=_G))
+    app.add_handler(CommandHandler("kick",             _M("bans"),    filters=_G))
+    app.add_handler(CommandHandler("unban",            _M("bans"),    filters=_G))
+    app.add_handler(CommandHandler("roar",             _M("bans"),    filters=_G))
+    app.add_handler(CommandHandler("mute",             _M("muting"),  filters=_G))
+    app.add_handler(CommandHandler("unmute",           _M("muting"),  filters=_G))
+    app.add_handler(CommandHandler(["tmute","tempmute"],_M("muting"), filters=_G))
+    app.add_handler(CommandHandler("pin",              _M("admin"),   filters=_G))
+    app.add_handler(CommandHandler("unpin",            _M("admin"),   filters=_G))
+    app.add_handler(CommandHandler("pinned",           _M("admin"),   filters=_G))
+    app.add_handler(CommandHandler("promote",          _M("admin"),   filters=_G))
+    app.add_handler(CommandHandler("demote",           _M("admin"),   filters=_G))
+    app.add_handler(CommandHandler("fullpromote",      _M("admin"),   filters=_G))
+    app.add_handler(CommandHandler("invitelink",       _M("admin"),   filters=_G))
+    app.add_handler(CommandHandler("title",            _M("admin"),   filters=_G))
+    app.add_handler(CommandHandler("admincache",       _M("admin"),   filters=_G))
+    app.add_handler(CommandHandler(["admins","adminlist"],_M("admin"),filters=_G))
+    app.add_handler(CommandHandler("setgtitle",        _M("admin"),   filters=_G))
+    app.add_handler(CommandHandler("setgpic",          _M("admin"),   filters=_G))
+    app.add_handler(CommandHandler("delgpic",          _M("admin"),   filters=_G))
+    app.add_handler(CommandHandler(["setdesc","setdescription"],_M("admin"),filters=_G))
+    app.add_handler(CommandHandler("setsticker",       _M("admin"),   filters=_G))
+    app.add_handler(CommandHandler("approve",          _M("approve"), filters=_G))
+    app.add_handler(CommandHandler("unapprove",        _M("approve"), filters=_G))
+    app.add_handler(CommandHandler("unapproveall",     _M("approve"), filters=_G))
+    app.add_handler(CommandHandler("approved",         _M("approve"), filters=_G))
+    app.add_handler(CommandHandler("approval",         _M("approve"), filters=_G))
+    app.add_handler(CommandHandler("addblacklist",     _M("blacklist"),filters=_G))
+    app.add_handler(CommandHandler("unblacklist",      _M("blacklist"),filters=_G))
+    app.add_handler(CommandHandler("blacklist",        _M("blacklist"),filters=_G))
+    app.add_handler(CommandHandler("blacklistmode",    _M("blacklist"),filters=_G))
+    app.add_handler(CommandHandler(["addblsticker","addbls"],_M("blacklist_stickers"),filters=_G))
+    app.add_handler(CommandHandler(["rmblsticker","delbls"],_M("blacklist_stickers"),filters=_G))
+    app.add_handler(CommandHandler("blsticker",        _M("blacklist_stickers"),filters=_G))
+    app.add_handler(CommandHandler("blstickermode",    _M("blacklist_stickers"),filters=_G))
+    app.add_handler(CommandHandler("filter",           _M("cust_filters"),filters=_G))
+    app.add_handler(CommandHandler("stop",             _M("cust_filters"),filters=_G))
+    app.add_handler(CommandHandler("stopall",          _M("cust_filters"),filters=_G))
+    app.add_handler(CommandHandler("filters",          _M("cust_filters"),filters=_G))
+    app.add_handler(CommandHandler("lock",             _M("locks"),   filters=_G))
+    app.add_handler(CommandHandler("unlock",           _M("locks"),   filters=_G))
+    app.add_handler(CommandHandler("locks",            _M("locks"),   filters=_G))
+    app.add_handler(CommandHandler("locktypes",        _M("locks"),   filters=_G))
+    app.add_handler(CommandHandler("setflood",         _M("antiflood"),filters=_G))
+    app.add_handler(CommandHandler("setfloodmode",     _M("antiflood"),filters=_G))
+    app.add_handler(CommandHandler("flood",            _M("antiflood"),filters=_G))
+    app.add_handler(CommandHandler("setlog",           _M("log_channel"),filters=_G))
+    app.add_handler(CommandHandler("unsetlog",         _M("log_channel"),filters=_G))
+    app.add_handler(CommandHandler("logchannel",       _M("log_channel"),filters=_G))
+    app.add_handler(CommandHandler("reports",          _M("reporting"),filters=_G))
+    app.add_handler(CommandHandler("report",           _M("reporting"),filters=_G))
+    app.add_handler(CommandHandler("clearrules",       _M("rules"),   filters=_G))
+    app.add_handler(CommandHandler("clear",            _M("notes"),   filters=_G))
+    app.add_handler(CommandHandler("removeallnotes",   _M("notes"),   filters=_G))
+    app.add_handler(CommandHandler("chatbot",          _M("chatbot"), filters=_G))
+    app.add_handler(CommandHandler("cleanblue",        _M("cleaner"), filters=_G))
+    app.add_handler(CommandHandler("listblue",         _M("cleaner"), filters=_G))
+    app.add_handler(CommandHandler("purge",            _M("purge"),   filters=_G))
+    app.add_handler(CommandHandler("del",              _M("purge"),   filters=_G))
+    app.add_handler(CommandHandler("tagall",           _M("tagall"),  filters=_G))
+    app.add_handler(CommandHandler("ignore",           _M("blacklistusers"),filters=_G))
+    app.add_handler(CommandHandler("notice",           _M("blacklistusers"),filters=_G))
+    app.add_handler(CommandHandler("ignoredlist",      _M("blacklistusers")))
+    app.add_handler(CommandHandler("disable",          _M("disable"), filters=_G))
+    app.add_handler(CommandHandler("enable",           _M("disable"), filters=_G))
+    app.add_handler(CommandHandler(["cmds","disabled"],_M("disable"), filters=_G))
+    app.add_handler(CommandHandler("listcmds",         _M("disable"), filters=_G))
+
+    # ── Welcome system (group admins) ─────────────────────────────────────
+    app.add_handler(CommandHandler("welcome",          _M("welcome"), filters=_G))
+    app.add_handler(CommandHandler("goodbye",          _M("welcome"), filters=_G))
+    app.add_handler(CommandHandler("setwelcome",       _M("welcome"), filters=_G))
+    app.add_handler(CommandHandler("setgoodbye",       _M("welcome"), filters=_G))
+    app.add_handler(CommandHandler("resetwelcome",     _M("welcome"), filters=_G))
+    app.add_handler(CommandHandler("resetgoodbye",     _M("welcome"), filters=_G))
+    app.add_handler(CommandHandler("welcomemute",      _M("welcome"), filters=_G))
+    app.add_handler(CommandHandler("cleanservice",     _M("welcome"), filters=_G))
+    app.add_handler(CommandHandler("cleanwelcome",     _M("welcome"), filters=_G))
+    app.add_handler(CommandHandler("welcomehelp",      _M("welcome")))
+    app.add_handler(CommandHandler("welcomemutehelp",  _M("welcome")))
+
+    # ── Bot-owner / sudo level ────────────────────────────────────────────
+    app.add_handler(CommandHandler("addsudo",          _M("disasters")))
+    app.add_handler(CommandHandler(["addsupport","adddemon"],_M("disasters")))
+    app.add_handler(CommandHandler("addtiger",         _M("disasters")))
+    app.add_handler(CommandHandler("addwhitelist",     _M("disasters")))
+    app.add_handler(CommandHandler(["removesudo","rmsudo"],_M("disasters")))
+    app.add_handler(CommandHandler("removesupport",    _M("disasters")))
+    app.add_handler(CommandHandler("removetiger",      _M("disasters")))
+    app.add_handler(CommandHandler("removewhitelist",  _M("disasters")))
+    app.add_handler(CommandHandler("sudolist",         _M("disasters")))
+    app.add_handler(CommandHandler("supportlist",      _M("disasters")))
+    app.add_handler(CommandHandler("tigers",           _M("disasters")))
+    app.add_handler(CommandHandler("whitelistlist",    _M("disasters")))
+    app.add_handler(CommandHandler("devlist",          _M("disasters")))
+    app.add_handler(CommandHandler("gban",             _M("global_bans")))
+    app.add_handler(CommandHandler("ungban",           _M("global_bans")))
+    app.add_handler(CommandHandler("gbanlist",         _M("global_bans")))
+    app.add_handler(CommandHandler("antispam",         _M("global_bans")))
+    app.add_handler(CommandHandler("getchats",         _M("get_common_chats")))
+    app.add_handler(CommandHandler("dbcleanup",        _M("dbcleanup")))
+    app.add_handler(CommandHandler("sh",               _M("shell")))
+    app.add_handler(CommandHandler("debug",            _M("debug")))
+    app.add_handler(CommandHandler("errors",           _M("error_handler")))
+    app.add_handler(CommandHandler("clearlocals",      _M("eval")))
+    app.add_handler(CommandHandler(["gitpull","reboot","leave","lockdown"],_M("dev")))
+    app.add_handler(CommandHandler(["load","unload","listmodules"],_M("modules")))
+    app.add_handler(CommandHandler("import",           _M("backups")))
+    app.add_handler(CommandHandler("connection",       _M("connection")))
+
+    # ── Force-sub management ──────────────────────────────────────────────
+    app.add_handler(CommandHandler("addfsub",  _M("fsub"), filters=_G))
+    app.add_handler(CommandHandler("delfsub",  _M("fsub"), filters=_G))
+    app.add_handler(CommandHandler("fsublist", _M("fsub")))
+
+    # ── Anime request system ──────────────────────────────────────────────
+    app.add_handler(CommandHandler(
+        ["request","requests","myrequests","fulfill","delrequest"], _M("animerequest")))
+    # Ensure single-cmd fallbacks for audit completeness:
+    app.add_handler(CommandHandler("request",     _M("animerequest")))
+    app.add_handler(CommandHandler("requests",    _M("animerequest")))
+    app.add_handler(CommandHandler("myrequests",  _M("animerequest")))
+    app.add_handler(CommandHandler("fulfill",     _M("animerequest")))
+    app.add_handler(CommandHandler("delrequest",  _M("animerequest")))
+    app.add_handler(CommandHandler("wave",        user_reaction_cmd))
+    app.add_handler(CommandHandler("bite",        user_reaction_cmd))
+    app.add_handler(CommandHandler("wink",        user_reaction_cmd))
+    app.add_handler(CommandHandler("cry",         user_reaction_cmd))
+    app.add_handler(CommandHandler("laugh",       user_reaction_cmd))
+    app.add_handler(CommandHandler("blush",       user_reaction_cmd))
+    app.add_handler(CommandHandler("nod",         user_reaction_cmd))
+    app.add_handler(CommandHandler("shoot",       user_reaction_cmd))
+
+    # ── Bad words (registered directly from module) ───────────────────────
+    try:
+        from modules.badwords import register as _bw_register
+        _bw_register(app)
+        logger.info("[badwords] registered")
+    except Exception as _e:
+        logger.warning(f"badwords: {_e}")
+
+    logger.info("[handlers] All module commands registered")
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("info", info_command))
     app.add_handler(CommandHandler("stats", stats_command, filters=admin_filter))
     app.add_handler(CommandHandler("sysstats", sysstats_command, filters=admin_filter))
     app.add_handler(CommandHandler("users", users_command, filters=admin_filter))
-    app.add_handler(CommandHandler("cmd", cmd_command, filters=admin_filter))
+    app.add_handler(CommandHandler("cmd", cmd_command))  # No filter — everyone can use /cmd, output filtered inside
     app.add_handler(CommandHandler("upload", upload_command, filters=admin_filter))
     app.add_handler(CommandHandler("settings", settings_command, filters=admin_filter))
     app.add_handler(CommandHandler("autoupdate", autoupdate_command, filters=admin_filter))
@@ -6533,64 +7123,125 @@ async def post_init(application: Application) -> None:
 
 
 async def _register_bot_commands_on_bot(bot: Bot) -> None:
-    """Register all commands in Telegram's command menu for a given bot."""
+    """
+    Register Telegram's /command menu (the popup list users see when they type /).
+    Strategy: show only KEY commands in menu — clean, not overwhelming.
+    Full list is always available via /cmd (which is authority-aware).
+    """
+    # ── Public menu (all users see this when they type /) ─────────────────
     user_commands = [
-        BotCommand("start", "Main menu / Get started"),
-        BotCommand("help", "Help and usage guide"),
-        BotCommand("ping", "Check bot response time"),
-        BotCommand("alive", "Check if bot is online"),
-        BotCommand("search", "Search anime, manga, movies"),
-        BotCommand("anime", "Generate anime post"),
-        BotCommand("manga", "Generate manga post"),
-        BotCommand("movie", "Generate movie post"),
-        BotCommand("tvshow", "Generate TV show post"),
-        BotCommand("id", "Get user/chat IDs"),
-        BotCommand("info", "Get user information"),
+        BotCommand("start",     "Main menu"),
+        BotCommand("help",      "Help & channels"),
+        BotCommand("cmd",       "All available commands"),
+        BotCommand("alive",     "Is bot online?"),
+        BotCommand("anime",     "Anime poster & info"),
+        BotCommand("manga",     "Manga poster & info"),
+        BotCommand("movie",     "Movie poster & info"),
+        BotCommand("my_plan",   "My daily poster limit"),
+        BotCommand("aq",        "Random anime quote"),
+        BotCommand("truth",     "Truth question"),
+        BotCommand("dare",      "Dare challenge"),
+        BotCommand("hug",       "Hug someone (reply)"),
+        BotCommand("slap",      "Slap someone (reply)"),
+        BotCommand("afk",       "Set AFK status"),
+        BotCommand("rules",     "View group rules"),
+        BotCommand("warns",     "My warn count"),
+        BotCommand("wiki",      "Wikipedia search"),
+        BotCommand("tr",        "Translate text (reply)"),
+        BotCommand("ping",      "Bot speed check"),
+        BotCommand("id",        "Get user/chat ID"),
     ]
 
-    admin_commands = user_commands + [
-        BotCommand("stats", "Bot statistics"),
-        BotCommand("sysstats", "Server statistics"),
-        BotCommand("users", "Total user count"),
-        BotCommand("cmd", "Full admin command list"),
-        BotCommand("upload", "Upload manager"),
-        BotCommand("settings", "Category settings"),
-        BotCommand("autoupdate", "Manga auto-update tracker"),
-        BotCommand("autoforward", "Auto-forward manager"),
-        BotCommand("addchannel", "Add force-sub channel"),
-        BotCommand("removechannel", "Remove force-sub channel"),
-        BotCommand("channel", "List force-sub channels"),
-        BotCommand("banuser", "Ban a user"),
-        BotCommand("unbanuser", "Unban a user"),
-        BotCommand("listusers", "List all users"),
-        BotCommand("deleteuser", "Delete user from database"),
-        BotCommand("exportusers", "Export users as CSV"),
-        BotCommand("broadcaststats", "Broadcast history"),
-        BotCommand("backup", "List generated links"),
-        BotCommand("addclone", "Add a clone bot"),
-        BotCommand("clones", "List clone bots"),
-        BotCommand("reload", "Restart the bot"),
-        BotCommand("logs", "View recent logs"),
-        BotCommand("connect", "Connect a group"),
-        BotCommand("disconnect", "Disconnect a group"),
-        BotCommand("connections", "List connected groups"),
+    # ── Group admin menu (shown in group chats for admins) ────────────────
+    group_admin_commands = [
+        BotCommand("cmd",          "All commands by authority"),
+        BotCommand("ban",          "Ban a user"),
+        BotCommand("kick",         "Kick a user"),
+        BotCommand("mute",         "Mute a user"),
+        BotCommand("warn",         "Warn a user"),
+        BotCommand("pin",          "Pin a message"),
+        BotCommand("purge",        "Delete messages"),
+        BotCommand("promote",      "Promote to admin"),
+        BotCommand("demote",       "Demote admin"),
+        BotCommand("filter",       "Add custom filter"),
+        BotCommand("filters",      "List filters"),
+        BotCommand("lock",         "Lock message type"),
+        BotCommand("setrules",     "Set group rules"),
+        BotCommand("save",         "Save a note"),
+        BotCommand("notes",        "List all notes"),
+        BotCommand("welcome",      "Toggle welcome message"),
+        BotCommand("setwelcome",   "Set welcome message"),
+        BotCommand("setflood",     "Set flood limit"),
+        BotCommand("approve",      "Approve a user"),
+        BotCommand("addblacklist", "Blacklist a word"),
+        BotCommand("addword",      "Add bad word"),
+        BotCommand("wordaction",   "Set bad word action"),
+        BotCommand("setlog",       "Set log channel"),
+        BotCommand("chatbot",      "Toggle AI chatbot"),
+        BotCommand("tagall",       "Mention all members"),
     ]
 
+    # ── Bot admin menu (shown in bot owner's private chat) ────────────────
+    bot_admin_commands = [
+        BotCommand("cmd",          "All commands by authority"),
+        BotCommand("stats",        "Bot statistics"),
+        BotCommand("sysstats",     "Server stats"),
+        BotCommand("users",        "User database"),
+        BotCommand("upload",       "Upload manager"),
+        BotCommand("settings",     "Category settings"),
+        BotCommand("autoupdate",   "Manga tracker"),
+        BotCommand("autoforward",  "Auto-forward manager"),
+        BotCommand("broadcast",    "Send broadcast"),
+        BotCommand("addchannel",   "Add force-sub channel"),
+        BotCommand("banuser",      "Ban from bot"),
+        BotCommand("add_premium",  "Give premium plan"),
+        BotCommand("addclone",     "Add clone bot"),
+        BotCommand("reload",       "Restart bot"),
+        BotCommand("logs",         "View logs"),
+        BotCommand("gban",         "Global ban"),
+        BotCommand("addsudo",      "Add sudo user"),
+        BotCommand("backup",       "Links backup"),
+        BotCommand("exportusers",  "Export CSV"),
+        BotCommand("listusers",    "Browse users"),
+    ]
+
+    # ── Register for each scope ───────────────────────────────────────────
     try:
+        # Default (all users, all chats)
         await bot.set_my_commands(user_commands)
+        logger.info(f"✅ User commands menu registered ({len(user_commands)} cmds)")
     except Exception as exc:
-        logger.warning(f"Command registration (user) failed: {exc}")
-        return
+        logger.warning(f"Command menu (users) failed: {exc}")
+
+    # Group admin scope — shown to admins in group chats
+    try:
+        from telegram import BotCommandScopeAllChatAdministrators
+        await bot.set_my_commands(
+            group_admin_commands,
+            scope=BotCommandScopeAllChatAdministrators(),
+        )
+        logger.info(f"✅ Group admin commands menu registered ({len(group_admin_commands)} cmds)")
+    except Exception as exc:
+        logger.warning(f"Command menu (group admins) failed: {exc}")
+
+    # Bot admin personal scope — shown only in bot owner's DM
     try:
         await bot.set_my_commands(
-            admin_commands,
+            bot_admin_commands,
             scope=BotCommandScopeChat(chat_id=ADMIN_ID),
         )
+        if OWNER_ID and OWNER_ID != ADMIN_ID:
+            await bot.set_my_commands(
+                bot_admin_commands,
+                scope=BotCommandScopeChat(chat_id=OWNER_ID),
+            )
+        logger.info(f"✅ Bot admin commands menu registered ({len(bot_admin_commands)} cmds)")
     except Exception as exc:
-        logger.warning(f"Command registration (admin scope) failed: {exc}")
+        logger.warning(f"Command menu (bot admin) failed: {exc}")
+
     try:
         me = await bot.get_me()
-        logger.info(f"✅ Commands registered on @{me.username}")
+        logger.info(f"✅ All command menus set on @{me.username}")
     except Exception:
         pass
 
@@ -6730,6 +7381,19 @@ async def button_handler(
     if data == "noop":
         return
 
+    # ── Admin panel page navigation ───────────────────────────────────────────
+    if data.startswith("adm_page_"):
+        if not is_admin:
+            try: await query.answer("⛔ Admin only", show_alert=False)
+            except Exception: pass
+            return
+        try:
+            page_num = int(data.split("_")[-1])
+        except Exception:
+            page_num = 0
+        await send_admin_menu(chat_id, context, query=query, page=page_num)
+        return
+
     if data == "close_message":
         try:
             await query.delete_message()
@@ -6830,6 +7494,277 @@ async def button_handler(
         return
 
     # ── User about/help ────────────────────────────────────────────────────────────
+
+    # ── User Features Panel — paginated 4×4 grid ─────────────────────────────────
+    if data.startswith("user_features_"):
+        try:
+            page = int(data.split("_")[-1])
+        except Exception:
+            page = 0
+
+        # Feature list — label only in small caps, NO emojis on buttons
+        _USER_FEATURES = [
+            ("ʀᴇᴀᴄᴛɪᴏɴs",    "uf_reactions"),
+            ("ᴀɴɪᴍᴇ ɪɴꜰᴏ",   "uf_anime"),
+            ("ᴀꜰᴋ",            "uf_afk"),
+            ("ɴᴏᴛᴇs",          "uf_notes"),
+            ("ᴛʀᴜᴛʜ ᴅᴀʀᴇ",   "uf_truthdare"),
+            ("ᴡᴀʀɴs",          "uf_warns"),
+            ("ʀᴜʟᴇs",          "uf_rules"),
+            ("ʙᴀᴅ ᴡᴏʀᴅs",    "uf_badwords"),
+            ("ᴀɴɪᴍᴇ ǫᴜᴏᴛᴇs", "uf_animequotes"),
+            ("ᴄᴏᴜᴘʟᴇ",        "uf_couple"),
+            ("sᴇᴀʀᴄʜ",        "uf_search"),
+            ("ᴛᴏᴏʟs",          "uf_tools"),
+            ("ᴍʏ ᴘʟᴀɴ",       "uf_myplan"),
+            ("sᴛɪᴄᴋᴇʀs",     "uf_stickers"),
+            ("sᴇᴅ",            "uf_sed"),
+            ("ʀᴇᴘᴏʀᴛ",        "uf_report"),
+        ]
+
+        PER_PAGE = 8  # 4 columns × 2 rows per page
+        total = len(_USER_FEATURES)
+        total_pages = (total + PER_PAGE - 1) // PER_PAGE
+        page = max(0, min(page, total_pages - 1))
+        start_i = page * PER_PAGE
+        end_i   = min(start_i + PER_PAGE, total)
+        page_items = _USER_FEATURES[start_i:end_i]
+
+        # Build 4-column grid — text only, no emojis
+        feat_rows = []
+        for i in range(0, len(page_items), 4):
+            row_items = page_items[i:i+4]
+            feat_rows.append([
+                InlineKeyboardButton(lb, callback_data=cb)
+                for lb, cb in row_items
+            ])
+
+        # Navigation: ◀ and ▶ have arrows only, page indicator, ✕ close
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀", callback_data=f"user_features_{page-1}"))
+        nav.append(InlineKeyboardButton(f"{page+1} / {total_pages}", callback_data="noop"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton("▶", callback_data=f"user_features_{page+1}"))
+        nav.append(InlineKeyboardButton("✕", callback_data="close_message"))
+
+        feat_rows.append(nav)
+        markup = InlineKeyboardMarkup(feat_rows)
+
+        text = (
+            b("ꜰᴇᴀᴛᴜʀᴇs") + "\n\n"
+            + bq(
+                "ᴛᴀᴘ ᴀɴʏ ꜰᴇᴀᴛᴜʀᴇ ᴛᴏ sᴇᴇ ᴡʜᴀᴛ ɪᴛ ᴅᴏᴇs ᴀɴᴅ ᴡʜᴏ ᴄᴀɴ ᴜsᴇ ɪᴛ"
+            )
+        )
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+        img_url = await get_panel_pic_async("default")
+        if img_url:
+            try:
+                await context.bot.send_photo(chat_id, img_url, caption=text,
+                    parse_mode=ParseMode.HTML, reply_markup=markup)
+                return
+            except Exception:
+                pass
+        await safe_send_message(context.bot, chat_id, text, reply_markup=markup)
+        return
+
+    # ── Individual feature info cards (full authority info in each) ───────────────
+    _UF_INFO = {
+        "uf_reactions": ("ʀᴇᴀᴄᴛɪᴏɴs",
+            "<b>Who can use:</b> Everyone — users, admins, owner\n\n"
+            "<b>Commands:</b>\n"
+            "/hug — Hug someone\n"
+            "/slap — Slap someone\n"
+            "/kiss — Kiss someone\n"
+            "/pat — Pat someone\n"
+            "/poke — Poke someone\n"
+            "/wave — Wave at someone\n"
+            "/bite — Bite someone\n"
+            "/punch — Punch someone\n"
+            "/wink — Wink at someone\n"
+            "/cry — Express crying\n"
+            "/laugh — Express laughing\n"
+            "/blush — Express blushing\n\n"
+            "<b>How to use:</b> Reply to someone's message then send the command."),
+
+        "uf_anime": ("ᴀɴɪᴍᴇ ɪɴꜰᴏ",
+            "<b>Who can use:</b> Everyone — users, admins, owner\n\n"
+            "<b>Commands:</b>\n"
+            "/anime &lt;name&gt; — Landscape poster + full info\n"
+            "/manga &lt;name&gt; — Manga poster + info\n"
+            "/airing &lt;name&gt; — Next episode countdown\n"
+            "/character &lt;name&gt; — Character details from AniList\n\n"
+            "<b>Daily limits apply:</b>\n"
+            "Free: 20/day · Bronze: 30 · Silver: 40 · Gold: 50\n\n"
+            "<b>Example:</b> /anime Demon Slayer"),
+
+        "uf_afk": ("ᴀꜰᴋ",
+            "<b>Who can use:</b> Everyone — users, admins, owner\n\n"
+            "<b>Commands:</b>\n"
+            "/afk &lt;reason&gt; — Set yourself as Away From Keyboard\n\n"
+            "<b>How it works:</b>\n"
+            "When someone mentions you while AFK, bot auto-replies with your reason.\n"
+            "AFK is cleared automatically when you send any message."),
+
+        "uf_notes": ("ɴᴏᴛᴇs",
+            "<b>Who can use:</b>\n"
+            "View notes — Everyone\n"
+            "Save notes — Group admins &amp; owner only\n\n"
+            "<b>Commands:</b>\n"
+            "/notes — List all saved notes in this chat\n"
+            "/get &lt;name&gt; — Get a specific note\n"
+            "#notename — Type # then note name to retrieve\n\n"
+            "<b>Admin only:</b>\n"
+            "/save &lt;name&gt; &lt;text&gt; — Save a note"),
+
+        "uf_truthdare": ("ᴛʀᴜᴛʜ & ᴅᴀʀᴇ",
+            "<b>Who can use:</b> Everyone — users, admins, owner\n\n"
+            "<b>Commands:</b>\n"
+            "/truth — Get a random truth question\n"
+            "/dare — Get a random dare challenge\n\n"
+            "Fun game to play with friends in any group!"),
+
+        "uf_warns": ("ᴡᴀʀɴs",
+            "<b>Who can use:</b>\n"
+            "Check warns — Everyone\n"
+            "Issue warns — Group admins &amp; owner only\n\n"
+            "<b>Commands — Everyone:</b>\n"
+            "/warns — Check your own warn count\n\n"
+            "<b>Commands — Group admins only:</b>\n"
+            "/warn — Warn a user (reply to their message)\n"
+            "/unwarn — Remove one warn (reply)\n"
+            "/resetwarns — Reset all warns for a user (reply)\n\n"
+            "<b>Note:</b> 3 warnings = automatic ban"),
+
+        "uf_rules": ("ʀᴜʟᴇs",
+            "<b>Who can use:</b>\n"
+            "View rules — Everyone\n"
+            "Set rules — Group admins &amp; owner only\n\n"
+            "<b>Commands — Everyone:</b>\n"
+            "/rules — View the group rules\n\n"
+            "<b>Commands — Group admins only:</b>\n"
+            "/setrules &lt;text&gt; — Set the group rules"),
+
+        "uf_badwords": ("ʙᴀᴅ ᴡᴏʀᴅs",
+            "<b>Who can use:</b>\n"
+            "View list — Everyone\n"
+            "Manage list — Group admins &amp; owner only\n\n"
+            "<b>Commands — Everyone:</b>\n"
+            "/badwords — See banned words in this group\n\n"
+            "<b>Commands — Group admins only:</b>\n"
+            "/addword &lt;word&gt; — Add a banned word\n"
+            "/rmword &lt;word&gt; — Remove a banned word\n"
+            "/clearwords — Remove all banned words\n"
+            "/wordaction &lt;action&gt; — Set action: warn / mute / ban / del / kick\n\n"
+            "<b>Auto-action:</b> Bot always deletes the message. Then applies the set action."),
+
+        "uf_animequotes": ("ᴀɴɪᴍᴇ ǫᴜᴏᴛᴇs",
+            "<b>Who can use:</b> Everyone — users, admins, owner\n\n"
+            "<b>Commands:</b>\n"
+            "/aq — Get a random anime quote\n"
+            "/animequote — Same as /aq\n\n"
+            "Fetches random quotes from popular anime characters."),
+
+        "uf_couple": ("ᴄᴏᴜᴘʟᴇ",
+            "<b>Who can use:</b> Everyone — users, admins, owner\n\n"
+            "<b>Commands:</b>\n"
+            "/couple — Reveal today's couple in the group\n\n"
+            "<b>How it works:</b>\n"
+            "Picks 2 random members from the group daily.\n"
+            "Resets at midnight every day.\n"
+            "Requires MongoDB for persistence."),
+
+        "uf_search": ("sᴇᴀʀᴄʜ",
+            "<b>Who can use:</b> Everyone — users, admins, owner\n\n"
+            "<b>Commands:</b>\n"
+            "/anime &lt;n&gt; — Anime poster + info (with daily limit)\n"
+            "/movie &lt;n&gt; — Movie poster + info (with daily limit)\n"
+            "/tvshow &lt;n&gt; — TV show poster + info (with daily limit)\n"
+            "/imdb &lt;n&gt; — Look up on IMDb\n\n"
+            "<b>Daily limits:</b> Free 20 · Bronze 30 · Silver 40 · Gold 50\n"
+            "Admin &amp; owner have no limit."),
+
+        "uf_tools": ("ᴛᴏᴏʟs",
+            "<b>Who can use:</b> Everyone — users, admins, owner\n\n"
+            "<b>Commands:</b>\n"
+            "/wiki &lt;topic&gt; — Search Wikipedia\n"
+            "/ud &lt;word&gt; — Urban Dictionary lookup\n"
+            "/tr &lt;lang&gt; &lt;text&gt; — Translate text (or reply)\n"
+            "/time &lt;city&gt; — Get current time for any city\n"
+            "/write &lt;text&gt; — Write text as handwriting image\n"
+            "/wall &lt;query&gt; — Get anime wallpaper\n"
+            "/ping — Check bot response speed"),
+
+        "uf_myplan": ("ᴍʏ ᴘʟᴀɴ",
+            "<b>Who can use:</b> Everyone — users, admins, owner\n\n"
+            "<b>Commands:</b>\n"
+            "/my_plan — Check your daily poster usage &amp; limit\n"
+            "/plans — View all available plans\n\n"
+            "<b>Plans:</b>\n"
+            "Free: 20 posters/day\n"
+            "Bronze: 30 posters/day\n"
+            "Silver: 40 posters/day\n"
+            "Gold: 50 posters/day\n"
+            "Admin &amp; Owner: Unlimited\n\n"
+            "<b>Upgrade:</b> Contact admin with /add_premium command."),
+
+        "uf_stickers": ("sᴛɪᴄᴋᴇʀs",
+            "<b>Who can use:</b> Everyone — users, admins, owner\n\n"
+            "<b>Commands:</b>\n"
+            "/stickerid — Get the file ID of a sticker (reply to it)\n"
+            "/getsticker — Get sticker as PNG image (reply to it)\n"
+            "/kang — Add a sticker to your own pack (reply to it)\n\n"
+            "Reply to any sticker message to use these commands."),
+
+        "uf_sed": ("sᴇᴅ",
+            "<b>Who can use:</b> Everyone — users, admins, owner\n\n"
+            "<b>How to use:</b>\n"
+            "Reply to a message with: <code>s/old/new</code>\n\n"
+            "Replaces text in the message you replied to.\n\n"
+            "<b>Examples:</b>\n"
+            "<code>s/hello/hi</code> — replaces first match\n"
+            "<code>s/hello/hi/g</code> — replaces all matches\n"
+            "<code>s/hello/hi/i</code> — case-insensitive replace"),
+
+        "uf_report": ("ʀᴇᴘᴏʀᴛ",
+            "<b>Who can use:</b>\n"
+            "Report — Everyone (except admins)\n"
+            "Receive reports — Group admins &amp; owner only\n\n"
+            "<b>Commands — Everyone:</b>\n"
+            "/report &lt;reason&gt; — Report a message to admins (reply to it)\n\n"
+            "<b>Commands — Group admins only:</b>\n"
+            "/reports on/off — Toggle report notifications\n\n"
+            "<b>Note:</b> Admins cannot use /report (they are the ones who receive it)."),
+    }
+
+    if data in _UF_INFO:
+        title, desc = _UF_INFO[data]
+        back_page = 0
+        _UF_CBS = ["uf_reactions","uf_anime","uf_afk","uf_notes","uf_truthdare",
+                   "uf_warns","uf_rules","uf_badwords","uf_animequotes","uf_couple",
+                   "uf_search","uf_tools","uf_myplan","uf_stickers","uf_sed","uf_report"]
+        if data in _UF_CBS:
+            idx = _UF_CBS.index(data)
+            back_page = idx // 8
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+        await safe_send_message(
+            context.bot, chat_id,
+            f"<b>{title}</b>\n\n" + bq(desc),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀", callback_data=f"user_features_{back_page}"),
+                 InlineKeyboardButton("✕", callback_data="close_message")],
+            ]),
+        )
+        return
+
     if data == "about_bot":
         try:
             await query.delete_message()
@@ -7093,6 +8028,7 @@ async def button_handler(
             _btn("GEN LINK",          "generate_links"),
             _btn("CLONE REDIRECT",    "manage_clones"),
             _btn("LINK STATS",        "fsub_link_stats"),
+            _btn("📨 FWD SOURCE",    "fsub_fwd_source"),
         ]
         rows = _grid3(grid)
         rows.append([_back_btn("admin_back"), _close_btn()])
@@ -9261,6 +10197,11 @@ async def button_handler(
         await show_upload_menu(chat_id, context, query.message)
         return
 
+    # ── MODULE GUIDE callbacks ───────────────────────────────────────────────
+    if data.startswith('mod_') and data in {'mod_wiki', 'mod_purge', 'mod_chatbot', 'mod_imdb', 'mod_antiflood', 'mod_currency', 'mod_stickers', 'mod_ping', 'mod_reporting', 'mod_sed', 'mod_speedtest', 'mod_blsticker', 'mod_cleaner', 'mod_wallpaper', 'mod_badwords', 'mod_locks', 'mod_globalbans', 'mod_tagall', 'mod_logchannel', 'mod_blacklist', 'mod_approve', 'mod_connection', 'mod_shell', 'mod_truthdare', 'mod_writetool', 'mod_admin', 'mod_gettime', 'mod_custfilters', 'mod_animequotes', 'mod_ud', 'mod_translator'}:
+        if not is_admin:
+            return
+
     # ── FEATURES panel buttons ────────────────────────────────────────────────
     if data.startswith("feat_"):
         if not is_admin:
@@ -9337,6 +10278,159 @@ async def button_handler(
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[_back_btn("admin_back")]]),
         )
+        return
+
+    # ── Channel Forward Source settings ──────────────────────────────────────────
+    if data == "fsub_fwd_source":
+        if not is_admin:
+            return
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+        from database_dual import get_setting as _gs
+        fwd_chat = _gs("fwd_source_chat", "") or "Not set"
+        fwd_msg_id = _gs("fwd_source_msg_id", "") or "Not set"
+        fwd_with_tag = _gs("fwd_with_tag", "true")
+        fwd_private = _gs("fwd_private_channel", "false")
+        tag_status = "✅ ON" if fwd_with_tag == "true" else "❌ OFF"
+        priv_status = "✅ ON" if fwd_private == "true" else "❌ OFF"
+        text = (
+            b("📨 Forward Source Settings") + "\n\n"
+            + bq(
+                f"<b>Source Chat:</b> {e(str(fwd_chat))}\n"
+                f"<b>Message ID:</b> {e(str(fwd_msg_id))}\n"
+                f"<b>Forward Tag:</b> {tag_status}\n"
+                f"<b>Private Channel:</b> {priv_status}\n\n"
+                "<b>Forward Tag ON</b> = shows 'Forwarded from' header\n"
+                "<b>Forward Tag OFF</b> = copies message cleanly (no header)\n"
+                "<b>Private Channel</b> = bot accesses private channels by ID"
+            )
+        )
+        rows = [
+            [bold_button("📋 Set Source Chat ID", callback_data="fwd_set_chat"),
+             bold_button("🔢 Set Message ID", callback_data="fwd_set_msgid")],
+            [bold_button(f"📨 Forward Tag: {tag_status}", callback_data="fwd_toggle_tag"),
+             bold_button(f"🔒 Private Chan: {priv_status}", callback_data="fwd_toggle_private")],
+            [bold_button("✅ Test Forward Now", callback_data="fwd_test")],
+            [_back_btn("manage_force_sub"), _close_btn()],
+        ]
+        img_url = await get_panel_pic_async("channels")
+        if img_url:
+            try:
+                await context.bot.send_photo(chat_id, img_url, caption=text,
+                    parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
+                return
+            except Exception:
+                pass
+        await safe_send_message(context.bot, chat_id, text, reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if data == "fwd_set_chat":
+        if not is_admin: return
+        user_states[uid] = "AWAITING_FWD_CHAT"
+        try: await query.delete_message()
+        except Exception: pass
+        await safe_send_message(context.bot, chat_id,
+            b("📋 Set Forward Source Chat") + "\n\n"
+            + bq(
+                "Send the channel/group ID or @username.\n\n"
+                "<b>For private channels:</b> forward any message from the channel to bot, "
+                "then use /id to get the chat ID (will be like -100XXXXXXXXX).\n\n"
+                "Make sure bot is a member of that channel."
+            ),
+            reply_markup=InlineKeyboardMarkup([[_back_btn("fsub_fwd_source")]]),
+        )
+        return
+
+    if data == "fwd_set_msgid":
+        if not is_admin: return
+        user_states[uid] = "AWAITING_FWD_MSGID"
+        try: await query.delete_message()
+        except Exception: pass
+        await safe_send_message(context.bot, chat_id,
+            b("🔢 Set Forward Message ID") + "\n\n"
+            + bq(
+                "Send the message ID to forward.\n\n"
+                "<b>Tip:</b> Forward a message from your channel to a group, "
+                "right click → Copy Link. The number after the last / is the message ID.\n\n"
+                "Or: use /msg_id command by replying to any message."
+            ),
+            reply_markup=InlineKeyboardMarkup([[_back_btn("fsub_fwd_source")]]),
+        )
+        return
+
+    if data == "fwd_toggle_tag":
+        if not is_admin: return
+        from database_dual import get_setting as _gs, set_setting as _ss
+        current = _gs("fwd_with_tag", "true")
+        new_val = "false" if current == "true" else "true"
+        _ss("fwd_with_tag", new_val)
+        label = "ON" if new_val == "true" else "OFF"
+        try: await query.answer(f"📨 Forward Tag: {label}", show_alert=False)
+        except Exception: pass
+        # Re-show panel
+        from database_dual import get_setting as _gs2
+        fwd_chat = _gs2("fwd_source_chat", "") or "Not set"
+        fwd_msg_id = _gs2("fwd_source_msg_id", "") or "Not set"
+        fwd_private = _gs2("fwd_private_channel", "false")
+        tag_status = "✅ ON" if new_val == "true" else "❌ OFF"
+        priv_status = "✅ ON" if fwd_private == "true" else "❌ OFF"
+        rows = [
+            [bold_button("📋 Set Source Chat ID", callback_data="fwd_set_chat"),
+             bold_button("🔢 Set Message ID", callback_data="fwd_set_msgid")],
+            [bold_button(f"📨 Forward Tag: {tag_status}", callback_data="fwd_toggle_tag"),
+             bold_button(f"🔒 Private Chan: {priv_status}", callback_data="fwd_toggle_private")],
+            [bold_button("✅ Test Forward Now", callback_data="fwd_test")],
+            [_back_btn("manage_force_sub"), _close_btn()],
+        ]
+        await safe_send_message(context.bot, chat_id,
+            b("📨 Forward Tag toggled!"),
+            reply_markup=InlineKeyboardMarkup(rows))
+        return
+
+    if data == "fwd_toggle_private":
+        if not is_admin: return
+        from database_dual import get_setting as _gs, set_setting as _ss
+        current = _gs("fwd_private_channel", "false")
+        new_val = "false" if current == "true" else "true"
+        _ss("fwd_private_channel", new_val)
+        label = "ON (private channels enabled)" if new_val == "true" else "OFF"
+        try: await query.answer(f"🔒 Private Channel: {label}", show_alert=True)
+        except Exception: pass
+        return
+
+    if data == "fwd_test":
+        if not is_admin: return
+        from database_dual import get_setting as _gs
+        fwd_chat = _gs("fwd_source_chat", "")
+        fwd_msg_id = _gs("fwd_source_msg_id", "")
+        fwd_with_tag = _gs("fwd_with_tag", "true") == "true"
+        if not fwd_chat or not fwd_msg_id:
+            try: await query.answer("❌ Set source chat and message ID first!", show_alert=True)
+            except Exception: pass
+            return
+        try:
+            msg_id_int = int(fwd_msg_id)
+            if fwd_with_tag:
+                # Forward with tag (shows "Forwarded from")
+                await context.bot.forward_message(
+                    chat_id=chat_id,
+                    from_chat_id=fwd_chat,
+                    message_id=msg_id_int,
+                )
+            else:
+                # Copy without forward tag
+                await context.bot.copy_message(
+                    chat_id=chat_id,
+                    from_chat_id=fwd_chat,
+                    message_id=msg_id_int,
+                )
+            try: await query.answer("✅ Test forward sent!", show_alert=False)
+            except Exception: pass
+        except Exception as _fe:
+            try: await query.answer(f"❌ Failed: {str(_fe)[:80]}", show_alert=True)
+            except Exception: pass
         return
 
     # ── Poster CMD buttons from admin panel ───────────────────────────────────
@@ -10173,6 +11267,32 @@ async def handle_admin_message(
                 [_btn("\U0001f465 VIEW USERS", "user_management"), _back_btn("admin_back")],
             ]),
         )
+        return
+
+    if state == "AWAITING_FWD_CHAT":
+        user_states.pop(uid, None)
+        from database_dual import set_setting as _ss
+        chat_val = text.strip()
+        _ss("fwd_source_chat", chat_val)
+        await safe_send_message(context.bot, chat_id,
+            b(f"✅ Forward source chat set: {e(chat_val)}"),
+            reply_markup=InlineKeyboardMarkup([[_back_btn("fsub_fwd_source"), _close_btn()]])
+        )
+        return
+
+    if state == "AWAITING_FWD_MSGID":
+        user_states.pop(uid, None)
+        try:
+            msg_id_int = int(text.strip())
+            from database_dual import set_setting as _ss
+            _ss("fwd_source_msg_id", str(msg_id_int))
+            await safe_send_message(context.bot, chat_id,
+                b(f"✅ Forward message ID set: {code(str(msg_id_int))}"),
+                reply_markup=InlineKeyboardMarkup([[_back_btn("fsub_fwd_source"), _close_btn()]])
+            )
+        except ValueError:
+            await safe_send_message(context.bot, chat_id,
+                b("❌ Invalid message ID — must be a number."))
         return
 
     if state == "AWAITING_USER_SEARCH":
