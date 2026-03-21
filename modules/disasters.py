@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/disasters.py
+# ACTION: Replace existing file
+# ====================================================================
 import html
 import json
 import os
