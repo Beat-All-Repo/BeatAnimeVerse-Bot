@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/shell.py
+# ACTION: Replace existing file
+# ====================================================================
 import subprocess
 
 from telegram import ParseMode, Update
