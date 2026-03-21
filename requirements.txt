@@ -24,7 +24,7 @@ aiohttp==3.9.5
 aiofiles==24.1.0
 
 # ── HTML / XML parsing ────────────────────────────────────────────────────────
-beautifulsoup4==4.12.3
+beautifulsoup4==4.14.3
 bs4==0.0.2
 lxml==4.9.4
 bleach==6.3.0
