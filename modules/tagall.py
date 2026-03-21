@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/tagall.py
+# ACTION: Replace existing file
+# ====================================================================
 import asyncio
 
 from telethon import events
