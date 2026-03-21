@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/logo.py
+# ACTION: Replace existing file
+# ====================================================================
 import glob
 import io
 import os
@@ -7,7 +11,12 @@ import requests
 from PIL import Image, ImageDraw, ImageFont
 
 from beataniversebot_compat import BOT_NAME, BOT_USERNAME, OWNER_ID, telethn
-from BeatVerseProbot.events import register
+try:
+    from BeatVerseProbot.events import register
+except ImportError:
+    def register(*a,**k):
+        def d(f): return f
+        return a[0] if a and callable(a[0]) else d
 
 LOGO_LINKS = [
     "https://telegra.ph/file/d1838efdafce9fe611d0c.jpg",
