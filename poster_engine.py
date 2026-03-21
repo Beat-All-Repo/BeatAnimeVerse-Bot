@@ -337,7 +337,7 @@ TEMPLATES = {
 
 # ── LAYERED POSTER GENERATION ──────────────────────────────────────────────────
 
-W, H = 800, 1200   # poster dimensions
+W, H = 1280, 720   # landscape (YouTube-thumbnail) dimensions
 
 
 def _make_poster(
@@ -354,6 +354,188 @@ def _make_poster(
     logo_file_id: Optional[str],
     logo_pos: str,
 ) -> Optional[BytesIO]:
+    """
+    Landscape poster generator — 1280×720 (YouTube thumbnail ratio).
+    Layout mirrors the reference image:
+      LEFT  — blurred full-bleed BG, genre tags, big title, description, action buttons
+      RIGHT — cover art with fade, episode/score card (bottom-right), channel branding (top-right)
+    """
+    if not PIL_OK:
+        return None
+
+    t = TEMPLATES.get(template, TEMPLATES["ani"])
+    bg_rgb  = t["bg"]
+    acc_rgb = t["accent"]
+    txt_rgb = t["text"]
+
+    # ── Layer 0: Solid dark background ────────────────────────────────────────
+    img = Image.new("RGBA", (W, H), (*bg_rgb, 255))
+
+    # ── Layer 1: Blurred full-bleed cover as BG ───────────────────────────────
+    cover_raw = _dl(cover_url)
+    if cover_raw:
+        try:
+            bg_c = cover_raw.copy().resize((W, H), Image.LANCZOS)
+            bg_c = bg_c.filter(ImageFilter.GaussianBlur(radius=32))
+            dark = Image.new("RGBA", (W, H), (0, 0, 0, 185))
+            img  = Image.alpha_composite(img, bg_c.convert("RGBA"))
+            img  = Image.alpha_composite(img, dark)
+        except Exception:
+            pass
+
+    # ── Layer 2: Left-side gradient (darken left half for text readability) ───
+    fade = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    fd   = ImageDraw.Draw(fade)
+    FADE_W = 750
+    for x in range(FADE_W):
+        alpha = int(145 * (1 - x / FADE_W))
+        fd.line([(x, 0), (x, H)], fill=(0, 0, 0, alpha))
+    img  = Image.alpha_composite(img, fade)
+    draw = ImageDraw.Draw(img)
+
+    # ── Layer 3: Cover art on RIGHT side (fills right portion, fades left) ────
+    RIGHT_START = 630
+    CW, CH = W - RIGHT_START, H
+    if cover_raw:
+        try:
+            cov = cover_raw.copy()
+            cw, ch = cov.size
+            scale = max(CW / cw, CH / ch)
+            cov   = cov.resize((int(cw * scale), int(ch * scale)), Image.LANCZOS)
+            lft   = (cov.width  - CW) // 2
+            top   = (cov.height - CH) // 2
+            cov   = cov.crop((lft, top, lft + CW, top + CH))
+
+            # Fade mask — hard transparent on left edge → fully opaque on right
+            mask = Image.new("L", (CW, CH), 255)
+            md   = ImageDraw.Draw(mask)
+            FADE_EDGE = 260
+            for x in range(FADE_EDGE):
+                md.line([(x, 0), (x, CH)], fill=int(255 * (x / FADE_EDGE)))
+
+            img.paste(cov.convert("RGBA"), (RIGHT_START, 0), mask)
+            draw = ImageDraw.Draw(img)
+        except Exception:
+            pass
+
+    # ── Layer 4: Accent left bar ──────────────────────────────────────────────
+    draw.rectangle([(0, 0), (5, H)], fill=(*acc_rgb, 255))
+
+    # ── Layer 5: Genre tag line ───────────────────────────────────────────────
+    genres_val = next((v for lb, v in info_rows if lb in ("Genres", "Genre")), "")
+    if genres_val:
+        tags = [g.strip() for g in genres_val.split(",")[:4]]
+        genre_str = "  •  ".join(tags)
+        draw.text((60, 88), genre_str,
+                  fill=(190, 190, 190, 230),
+                  font=_font("poppins-regular", 21))
+
+    # ── Layer 6: BIG title (Bebas Neue, uppercase) ────────────────────────────
+    ty = 140
+    title_up    = title.upper()
+    title_lines = _wrap(title_up, 20)          # ~20 chars per line for 82pt font
+    for ln in title_lines[:3]:
+        draw.text((55, ty), ln,
+                  fill=(255, 255, 255, 255),
+                  font=_font("bebas-neue-bold", 82))
+        ty += 92
+    ty += 6
+
+    # ── Layer 7: Native title (smaller, accent colour) ────────────────────────
+    if native_title and native_title != title:
+        draw.text((60, ty), native_title[:36],
+                  fill=(*acc_rgb, 200),
+                  font=_font("poppins-regular", 22))
+        ty += 34
+
+    # ── Layer 8: Description (soft white) ────────────────────────────────────
+    desc_font  = _font("poppins-regular", 21)
+    desc_lines = _wrap(desc, 50)
+    for ln in desc_lines[:4]:
+        draw.text((60, ty), ln, fill=(210, 210, 210, 210), font=desc_font)
+        ty += 30
+    ty += 14
+
+    # ── Layer 9: Action buttons (Download / Watch Now) ────────────────────────
+    if ty < H - 100:
+        bty = min(ty, H - 88)
+        BH  = 52
+        # DOWNLOAD — white outline
+        draw.rectangle([(58, bty), (258, bty + BH)],
+                        outline=(255, 255, 255, 240), width=3)
+        draw.text((158, bty + BH // 2), "DOWNLOAD",
+                  fill=(255, 255, 255),
+                  font=_font("poppins-bold", 18), anchor="mm")
+        # WATCH NOW — accent fill
+        draw.rectangle([(276, bty), (486, bty + BH)],
+                        fill=(*acc_rgb, 255))
+        draw.text((381, bty + BH // 2), "WATCH NOW",
+                  fill=(255, 255, 255),
+                  font=_font("poppins-bold", 18), anchor="mm")
+
+    # ── Layer 10: Info card (bottom-right corner) ─────────────────────────────
+    ep_val  = next((v for lb, v in info_rows if "Episode" in lb), "?")
+    sea_val = next((v for lb, v in info_rows if "Season" in lb), "?")
+    dur_val = next((v for lb, v in info_rows if lb in ("Runtime", "Duration")), "?")
+    sc_val  = next((v for lb, v in info_rows if lb in ("Score", "Rating")), str(score) if score else "?")
+
+    CX, CY, CRW, CRH = RIGHT_START + 8, H - 152, 630, 142
+    draw.rounded_rectangle([(CX, CY), (CX + CRW, CY + CRH)],
+                            radius=10, fill=(10, 10, 10, 210))
+    draw.rounded_rectangle([(CX, CY), (CX + CRW, CY + CRH)],
+                            radius=10, outline=(*acc_rgb, 80), width=1)
+
+    draw.text((CX + 18, CY + 14),  f"Episode — {ep_val}",
+              fill=(255, 255, 255), font=_font("poppins-bold", 26))
+    draw.text((CX + 18, CY + 56),  f"Season  — {sea_val}",
+              fill=(175, 175, 175), font=_font("poppins-regular", 20))
+    draw.text((CX + 18, CY + 84),  f"Score   — {sc_val}",
+              fill=(175, 175, 175), font=_font("poppins-regular", 20))
+    draw.text((CX + 18, CY + 112), f"Status  — {status}",
+              fill=(130, 130, 130), font=_font("poppins-regular", 18))
+
+    # ── Layer 11: Channel branding top-right ──────────────────────────────────
+    brand = watermark_text or "@BeatAnime"
+    bx    = W - 18
+    try:
+        bbox = draw.textbbox((0, 0), brand, font=_font("poppins-bold", 22))
+        bw   = bbox[2] - bbox[0]
+    except Exception:
+        bw = len(brand) * 14
+    draw.rounded_rectangle([(bx - bw - 30, 14), (bx, 58)],
+                            radius=6, fill=(0, 0, 0, 170))
+    draw.line([(bx - bw - 32, 14), (bx - bw - 32, 58)],
+              fill=(*acc_rgb, 255), width=4)
+    draw.text((bx - 10, 36), brand,
+              fill=(255, 255, 255), font=_font("poppins-bold", 22), anchor="rm")
+
+    # ── Layer 12: Template logo (e.g. Netflix / Crunchyroll) ──────────────────
+    logo_key = t.get("logo")
+    if logo_key:
+        logo_img = _dl_icon(logo_key)
+        if logo_img:
+            try:
+                LW, LH = 80, 36
+                logo_img = logo_img.resize((LW, LH), Image.LANCZOS)
+                logo_alpha = logo_img.split()[3] if logo_img.mode == "RGBA" else None
+                img.paste(logo_img, (W - LW - 24, 68), logo_alpha)
+                draw = ImageDraw.Draw(img)
+            except Exception:
+                pass
+
+    # ── Layer 13: Secondary watermark (if different from branding) ────────────
+    if watermark_text and watermark_text != brand:
+        _apply_watermark(img, draw, watermark_text, watermark_pos, txt_rgb)
+
+    # ── Export ────────────────────────────────────────────────────────────────
+    buf = BytesIO()
+    img.convert("RGB").save(buf, format="JPEG", quality=93, optimize=True)
+    buf.seek(0)
+    buf.name = f"poster_{template}_{title[:20].replace(' ', '_')}.jpg"
+    return buf
+
+
+
     if not PIL_OK:
         return None
 
