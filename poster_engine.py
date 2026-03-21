@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/poster_engine.py
+# ACTION: Replace existing file
+# ====================================================================
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -892,11 +896,37 @@ async def _poster_cmd(
 ) -> None:
     """
     Generic handler for all poster commands.
-    ALL poster commands are ADMIN-ONLY. Users see nothing (silent return).
+    Admin: unlimited.
+    Users: daily limit based on plan (Free=20, Bronze=30, Silver=40, Gold=50).
+    /my_plan and /plans are visible to all users.
     """
     uid = update.effective_user.id if update.effective_user else 0
-    if not _is_admin(uid):
-        return   # Silent — users don't know this command exists
+    is_admin_user = _is_admin(uid)
+
+    if not is_admin_user:
+        # Check user daily limit
+        try:
+            from database_dual import (
+                is_poster_premium, get_poster_rank,
+                check_and_update_poster_usage, get_poster_usage_today,
+                POSTER_TASK_LIMITS,
+            )
+            rank = get_poster_rank(uid) if is_poster_premium(uid) else "default"
+            limit = POSTER_TASK_LIMITS.get(rank, 20)
+            used = get_poster_usage_today(uid)
+            if used >= limit:
+                await update.effective_message.reply_text(
+                    f"<b>⚠️ Daily Limit Reached</b>\n\n"
+                    f"You have used <b>{used}/{limit}</b> posters today.\n"
+                    f"Your plan: <b>{rank.title()}</b>\n\n"
+                    f"<i>Use /my_plan to check your plan or /plans to upgrade.</i>",
+                    parse_mode="HTML",
+                )
+                return
+            # Count this usage
+            check_and_update_poster_usage(uid, limit)
+        except Exception:
+            pass  # If DB fails, allow the request
 
     if not context.args:
         await update.effective_message.reply_text(
@@ -1041,7 +1071,7 @@ async def poster_modm(u, c):  await _poster_cmd(u, c, "modm",   "MANGA")
 # ── PREMIUM COMMANDS ──────────────────────────────────────────────────────────
 
 async def cmd_my_plan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/my_plan — anyone can check their own plan."""
+    """/my_plan — anyone can check their own plan (no admin check)."""
     uid = update.effective_user.id if update.effective_user else 0
     try:
         from database_dual import (is_poster_premium, get_poster_rank,
