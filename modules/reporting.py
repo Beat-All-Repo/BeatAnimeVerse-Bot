@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/reporting.py
+# ACTION: Replace existing file
+# ====================================================================
 import html
 
 from telegram import Chat, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode, Update
