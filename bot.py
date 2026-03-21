@@ -253,6 +253,11 @@ ADMIN_PANEL_IMAGE_URL: str = os.getenv("ADMIN_PANEL_IMAGE_URL", "")
 WELCOME_IMAGE_URL: str = os.getenv("WELCOME_IMAGE_URL", "")
 BROADCAST_PANEL_IMAGE_URL: str = os.getenv("BROADCAST_PANEL_IMAGE_URL", "")
 
+# ── PANEL_PICS: comma-separated image URLs used randomly for all panels ───────
+# Set this env variable with URLs like: https://i.imgur.com/abc.jpg,https://...
+_PANEL_PICS_RAW: str = os.getenv("PANEL_PICS", "")
+PANEL_PICS: list = [u.strip() for u in _PANEL_PICS_RAW.split(",") if u.strip().startswith("http")]
+
 # Sticker
 TRANSITION_STICKER_ID: str = os.getenv("TRANSITION_STICKER", "")
 
@@ -2844,6 +2849,44 @@ def _panel_kb(grid_items: list, back_cb: str = "admin_back",
     return InlineKeyboardMarkup(rows)
 
 
+def get_panel_pic(panel_type: str = "default") -> Optional[str]:
+    """
+    Get panel image URL:
+      1. PANEL_PICS env (comma-separated) — pick random
+      2. Per-panel env vars (ADMIN_PANEL_IMAGE_URL etc.)
+      3. panel_image API (waifu.im / anilist — pre-cached for instant return)
+    """
+    import random
+    if PANEL_PICS:
+        return random.choice(PANEL_PICS)
+    # Per-panel env fallback
+    _per_panel = {
+        "admin":     ADMIN_PANEL_IMAGE_URL,
+        "stats":     STATS_IMAGE_URL,
+        "settings":  SETTINGS_IMAGE_URL,
+        "broadcast": BROADCAST_PANEL_IMAGE_URL,
+        "help":      HELP_IMAGE_URL,
+        "welcome":   WELCOME_IMAGE_URL,
+    }
+    env_url = _per_panel.get(panel_type, "")
+    if env_url:
+        return env_url
+    return None   # Caller will use panel_image API
+
+
+async def get_panel_pic_async(panel_type: str = "default") -> Optional[str]:
+    """Async version — returns PANEL_PICS instantly, falls back to API."""
+    quick = get_panel_pic(panel_type)
+    if quick:
+        return quick
+    if _PANEL_IMAGE_AVAILABLE:
+        try:
+            return await get_panel_image_async(panel_type)
+        except Exception:
+            pass
+    return None
+
+
 async def send_admin_menu(
     chat_id: int,
     context: ContextTypes.DEFAULT_TYPE,
@@ -2907,11 +2950,36 @@ async def send_admin_menu(
         )
     )
 
-    # Main 3x3 + tools 3x3 + poster cmds + close row
+    # Main 3x3 + tools 3x3 + features + poster cmds + import/export + close row
     rows = _grid3(grid)
     rows.append([InlineKeyboardButton(math_bold("TOOLS"), callback_data="noop")])
     rows.extend(_grid3(tools))
-    # Poster commands grid
+
+    # ── Features: fun/anime interaction commands ───────────────────────────────
+    features = [
+        _btn("💑 COUPLE",      "feat_couple"),
+        _btn("👊 SLAP",        "feat_slap"),
+        _btn("🤗 HUG",         "feat_hug"),
+        _btn("💋 KISS",        "feat_kiss"),
+        _btn("😊 PAT",         "feat_pat"),
+        _btn("🔍 INLINE",      "feat_inline_search"),
+        _btn("🎭 REACTIONS",   "feat_reactions"),
+        _btn("💬 CHATBOT",     "feat_chatbot"),
+        _btn("🎮 TRUTH/DARE",  "feat_truth_dare"),
+        _btn("📖 NOTES",       "feat_notes"),
+        _btn("⚠️ WARNS",       "feat_warns"),
+        _btn("🔇 MUTE",        "feat_muting"),
+        _btn("🚫 BANS",        "feat_bans"),
+        _btn("📋 RULES",       "feat_rules"),
+        _btn("🎌 AIRING",      "feat_airing"),
+        _btn("👤 CHARACTER",   "feat_character"),
+        _btn("📺 ANIME INFO",  "feat_anime_info"),
+        _btn("🌟 AFK",         "feat_afk"),
+    ]
+    rows.append([InlineKeyboardButton(math_bold("FEATURES"), callback_data="noop")])
+    rows.extend(_grid3(features))
+
+    # ── Poster commands ────────────────────────────────────────────────────────
     poster_cmds = [
         _btn("🖼 ANI",    "poster_cmd_ani"),
         _btn("🖼 NET",    "poster_cmd_net"),
@@ -2925,16 +2993,20 @@ async def send_admin_menu(
     ]
     rows.append([InlineKeyboardButton(math_bold("POSTER CMDS"), callback_data="noop")])
     rows.extend(_grid3(poster_cmds))
+
+    # ── Import / Export ────────────────────────────────────────────────────────
+    rows.append([InlineKeyboardButton(math_bold("IMPORT / EXPORT"), callback_data="noop")])
+    rows.append([
+        _btn("📥 IMPORT USERS",  "admin_import_users"),
+        _btn("📥 IMPORT LINKS",  "admin_import_links"),
+        _btn("📤 EXPORT USERS",  "admin_export_users_quick"),
+    ])
+
     rows.append([_close_btn()])
     markup = InlineKeyboardMarkup(rows)
 
     # Try panel image (dynamic 4K anime) → static env URL → text fallback
-    img_url = ADMIN_PANEL_IMAGE_URL
-    if not img_url and _PANEL_IMAGE_AVAILABLE:
-        try:
-            img_url = await get_panel_image_async("admin")
-        except Exception:
-            pass
+    img_url = await get_panel_pic_async("admin")
     if img_url:
         try:
             await context.bot.send_photo(
@@ -2997,7 +3069,7 @@ async def send_stats_panel(
     img_url = STATS_IMAGE_URL
     if not img_url and _PANEL_IMAGE_AVAILABLE:
         try:
-            img_url = await get_panel_image_async("stats")
+            img_url = await get_panel_pic_async("stats")
         except Exception:
             pass
     if img_url:
@@ -3064,7 +3136,7 @@ async def show_category_settings_menu(
         img_url = None
         if _PANEL_IMAGE_AVAILABLE:
             try:
-                img_url = await get_panel_image_async("categories")
+                img_url = await get_panel_pic_async("categories")
             except Exception:
                 pass
         if img_url:
@@ -3076,7 +3148,7 @@ async def show_category_settings_menu(
         img_url = None
         if _PANEL_IMAGE_AVAILABLE:
             try:
-                img_url = await get_panel_image_async("categories")
+                img_url = await get_panel_pic_async("categories")
             except Exception:
                 pass
         if img_url:
@@ -3128,7 +3200,7 @@ async def send_feature_flags_panel(
     img_url = None
     if _PANEL_IMAGE_AVAILABLE:
         try:
-            img_url = await get_panel_image_async("flags")
+            img_url = await get_panel_pic_async("flags")
         except Exception:
             pass
     if img_url:
@@ -3929,7 +4001,7 @@ async def unban_user_command(
         _img = None
         if _PANEL_IMAGE_AVAILABLE:
             try:
-                _img = await get_panel_image_async("users")
+                _img = await get_panel_pic_async("users")
             except Exception:
                 pass
         if _img:
@@ -4251,7 +4323,491 @@ async def clones_command(
     await safe_reply(update, text)
 
 
-@force_sub_required
+
+# ================================================================================
+#                    USER FEATURE COMMANDS (available to all users)
+# ================================================================================
+
+# ── Reaction GIFs via nekos.best API ─────────────────────────────────────────
+_REACTION_API = {
+    "slap":  "https://nekos.best/api/v2/slap",
+    "hug":   "https://nekos.best/api/v2/hug",
+    "kiss":  "https://nekos.best/api/v2/kiss",
+    "pat":   "https://nekos.best/api/v2/pat",
+    "punch": "https://nekos.best/api/v2/punch",
+    "poke":  "https://nekos.best/api/v2/poke",
+}
+_REACTION_TEXTS = {
+    "slap":  ("{sender} slapped {target}! 👋", "{sender} slapped themselves??? 🤔"),
+    "hug":   ("{sender} hugged {target}! 🤗", "{sender} wants a hug 🥺"),
+    "kiss":  ("{sender} kissed {target}! 💋", "{sender} sent a flying kiss 💋"),
+    "pat":   ("{sender} patted {target}! 😊", "{sender} pats themselves 😅"),
+    "punch": ("{sender} punched {target}! 👊", "{sender} punched the air 💨"),
+    "poke":  ("{sender} poked {target}! 👉", "{sender} pokes around 👀"),
+}
+
+async def user_reaction_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Generic reaction GIF command — /slap /hug /kiss /pat etc."""
+    if not update.message or not update.effective_user:
+        return
+    cmd = (update.message.text or "").split()[0].lstrip("/").split("@")[0].lower()
+    sender_name = update.effective_user.first_name or "Someone"
+    target_name = None
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        target_name = update.message.reply_to_message.from_user.first_name
+    elif context.args:
+        target_name = " ".join(context.args)
+
+    templates = _REACTION_TEXTS.get(cmd, ("{sender} uses {cmd}!", "{sender}!"))
+    if target_name:
+        caption = templates[0].format(sender=sender_name, target=target_name, cmd=cmd)
+    else:
+        caption = templates[1].format(sender=sender_name, cmd=cmd)
+
+    # Fetch GIF from nekos.best
+    gif_url = None
+    api_url = _REACTION_API.get(cmd)
+    if api_url:
+        try:
+            r = requests.get(api_url, timeout=5)
+            if r.status_code == 200:
+                results = r.json().get("results", [])
+                if results:
+                    gif_url = results[0].get("url")
+        except Exception:
+            pass
+
+    try:
+        if gif_url:
+            await update.message.reply_animation(
+                animation=gif_url,
+                caption=f"<b>{html.escape(caption)}</b>",
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await update.message.reply_text(
+                f"<b>{html.escape(caption)}</b>",
+                parse_mode=ParseMode.HTML,
+            )
+    except Exception as exc:
+        logger.debug(f"reaction cmd error: {exc}")
+
+
+# ── Couple command ─────────────────────────────────────────────────────────────
+async def couple_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/couple — randomly pick or set two users as a couple in the group."""
+    if not update.message or not update.effective_user or not update.effective_chat:
+        return
+    chat = update.effective_chat
+    sender = update.effective_user
+
+    if context.args and len(context.args) >= 1:
+        # Admin setting: /couple @user1 @user2
+        partner_name = " ".join(context.args)
+        caption = (
+            f"💑 <b>{html.escape(sender.first_name)}</b> "
+            f"and <b>{html.escape(partner_name)}</b> are now a couple!"
+        )
+    elif update.message.reply_to_message and update.message.reply_to_message.from_user:
+        partner = update.message.reply_to_message.from_user
+        caption = (
+            f"💑 <b>{html.escape(sender.first_name)}</b> "
+            f"and <b>{html.escape(partner.first_name)}</b> are a couple! 💕"
+        )
+    else:
+        caption = f"💑 <b>{html.escape(sender.first_name)}</b> is looking for their other half! 💕"
+
+    try:
+        gif_url = None
+        try:
+            r = requests.get("https://nekos.best/api/v2/kiss", timeout=5)
+            if r.status_code == 200:
+                results = r.json().get("results", [])
+                if results:
+                    gif_url = results[0].get("url")
+        except Exception:
+            pass
+        if gif_url:
+            await update.message.reply_animation(animation=gif_url, caption=caption, parse_mode=ParseMode.HTML)
+        else:
+            await update.message.reply_text(caption, parse_mode=ParseMode.HTML)
+    except Exception as exc:
+        logger.debug(f"couple_cmd error: {exc}")
+
+
+# ── AFK system ─────────────────────────────────────────────────────────────────
+_afk_users: Dict[int, Dict] = {}  # uid → {reason, time}
+
+async def afk_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/afk [reason] — set AFK status."""
+    if not update.effective_user or not update.message:
+        return
+    uid = update.effective_user.id
+    reason = " ".join(context.args) if context.args else "AFK"
+    _afk_users[uid] = {"reason": reason, "time": datetime.now(timezone.utc)}
+    await update.message.reply_text(
+        f"<b>{html.escape(update.effective_user.first_name)}</b> is now AFK: <i>{html.escape(reason)}</i>",
+        parse_mode=ParseMode.HTML,
+    )
+
+async def afk_check_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Auto-reply when AFK user is mentioned, and clear AFK when they speak."""
+    if not update.message or not update.effective_user:
+        return
+    uid = update.effective_user.id
+    msg = update.message
+
+    # Clear AFK if the user themselves sends a message
+    if uid in _afk_users:
+        afk_data = _afk_users.pop(uid)
+        elapsed = datetime.now(timezone.utc) - afk_data["time"]
+        mins = int(elapsed.total_seconds() // 60)
+        time_str = f"{mins} min" if mins < 60 else f"{mins // 60}h {mins % 60}m"
+        try:
+            await msg.reply_text(
+                f"<b>{html.escape(update.effective_user.first_name)}</b> is back! (was AFK for {time_str})",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+        return
+
+    # Check if any mentioned user is AFK
+    if msg.entities:
+        for entity in msg.entities:
+            if entity.type == "mention":
+                try:
+                    mention_text = msg.text[entity.offset + 1:entity.offset + entity.length]
+                    for afk_uid, afk_data in _afk_users.items():
+                        member = await context.bot.get_chat_member(msg.chat_id, afk_uid)
+                        if member and hasattr(member, "user") and member.user.username == mention_text:
+                            elapsed = datetime.now(timezone.utc) - afk_data["time"]
+                            mins = int(elapsed.total_seconds() // 60)
+                            await msg.reply_text(
+                                f"<b>{html.escape(member.user.first_name)}</b> is AFK: "
+                                f"<i>{html.escape(afk_data['reason'])}</i> ({mins}m ago)",
+                                parse_mode=ParseMode.HTML,
+                            )
+                except Exception:
+                    pass
+
+
+# ── Notes system ───────────────────────────────────────────────────────────────
+_notes_db: Dict[int, Dict[str, str]] = {}  # chat_id → {name: content}
+
+def _get_notes(chat_id: int) -> Dict[str, str]:
+    try:
+        val = get_setting(f"notes_{chat_id}", "")
+        if val:
+            import json as _json
+            return _json.loads(val)
+    except Exception:
+        pass
+    return _notes_db.get(chat_id, {})
+
+def _save_notes(chat_id: int, notes: Dict) -> None:
+    import json as _json
+    try:
+        set_setting(f"notes_{chat_id}", _json.dumps(notes))
+    except Exception:
+        pass
+    _notes_db[chat_id] = notes
+
+async def note_save_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/save notename content — save a note."""
+    if not update.message or not update.effective_chat:
+        return
+    # Only admins/mods can save notes
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("<b>Usage:</b> /save notename your note content", parse_mode=ParseMode.HTML)
+        return
+    name = context.args[0].lower()
+    text_content = " ".join(context.args[1:])
+    chat_id = update.effective_chat.id
+    notes = _get_notes(chat_id)
+    notes[name] = text_content
+    _save_notes(chat_id, notes)
+    await update.message.reply_text(f"<b>📝 Note saved:</b> #{html.escape(name)}", parse_mode=ParseMode.HTML)
+
+async def note_get_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/get notename — retrieve a note."""
+    if not update.message or not update.effective_chat:
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /get notename", parse_mode=ParseMode.HTML)
+        return
+    name = context.args[0].lower()
+    chat_id = update.effective_chat.id
+    notes = _get_notes(chat_id)
+    content = notes.get(name)
+    if content:
+        await update.message.reply_text(f"<b>#{html.escape(name)}:</b>\n{html.escape(content)}", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text(f"<b>No note named #{html.escape(name)}</b>", parse_mode=ParseMode.HTML)
+
+async def notes_list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/notes — list all notes in this chat."""
+    if not update.message or not update.effective_chat:
+        return
+    chat_id = update.effective_chat.id
+    notes = _get_notes(chat_id)
+    if not notes:
+        await update.message.reply_text("<b>No notes saved in this chat.</b>", parse_mode=ParseMode.HTML)
+        return
+    text = "<b>📝 Notes in this chat:</b>\n" + "\n".join(f"• #{html.escape(n)}" for n in notes)
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+async def note_trigger_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle #notename messages to retrieve notes."""
+    if not update.message or not update.effective_chat:
+        return
+    text = update.message.text or ""
+    import re as _re
+    match = _re.match(r"^#([\w]+)", text.strip())
+    if not match:
+        return
+    name = match.group(1).lower()
+    chat_id = update.effective_chat.id
+    notes = _get_notes(chat_id)
+    content = notes.get(name)
+    if content:
+        await update.message.reply_text(f"<b>#{html.escape(name)}:</b>\n{html.escape(content)}", parse_mode=ParseMode.HTML)
+
+
+# ── Warns system ───────────────────────────────────────────────────────────────
+_warns_db: Dict[str, int] = {}  # "chat_id:user_id" → count
+
+def _warn_key(chat_id: int, uid: int) -> str:
+    return f"warn_{chat_id}_{uid}"
+
+def _get_warns(chat_id: int, uid: int) -> int:
+    try:
+        return int(get_setting(_warn_key(chat_id, uid), "0") or "0")
+    except Exception:
+        return _warns_db.get(f"{chat_id}:{uid}", 0)
+
+def _set_warns(chat_id: int, uid: int, count: int) -> None:
+    try:
+        set_setting(_warn_key(chat_id, uid), str(count))
+    except Exception:
+        pass
+    _warns_db[f"{chat_id}:{uid}"] = count
+
+async def warn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/warn — warn a user (reply or @mention)."""
+    if not update.message or not update.effective_chat or not update.effective_user:
+        return
+    # Check if sender is admin
+    try:
+        member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
+        if member.status not in ("administrator", "creator"):
+            return
+    except Exception:
+        return
+    target = None
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        target = update.message.reply_to_message.from_user
+    if not target:
+        await update.message.reply_text("Reply to a user to warn them.", parse_mode=ParseMode.HTML)
+        return
+    reason = " ".join(context.args) if context.args else "No reason given"
+    chat_id = update.effective_chat.id
+    count = _get_warns(chat_id, target.id) + 1
+    _set_warns(chat_id, target.id, count)
+    warn_limit = int(get_setting("warn_limit", "3") or "3")
+    await update.message.reply_text(
+        f"⚠️ <b>{html.escape(target.first_name)}</b> warned ({count}/{warn_limit})\nReason: {html.escape(reason)}",
+        parse_mode=ParseMode.HTML,
+    )
+    if count >= warn_limit:
+        try:
+            await context.bot.ban_chat_member(chat_id, target.id)
+            _set_warns(chat_id, target.id, 0)
+            await update.message.reply_text(
+                f"🔴 <b>{html.escape(target.first_name)}</b> has been banned after {warn_limit} warnings.",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+
+async def unwarn_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/unwarn — remove one warn."""
+    if not update.message or not update.effective_chat:
+        return
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Reply to a user to remove their warn.")
+        return
+    target = update.message.reply_to_message.from_user
+    chat_id = update.effective_chat.id
+    count = max(0, _get_warns(chat_id, target.id) - 1)
+    _set_warns(chat_id, target.id, count)
+    await update.message.reply_text(
+        f"✅ Removed 1 warn from <b>{html.escape(target.first_name)}</b>. Now at {count} warns.",
+        parse_mode=ParseMode.HTML,
+    )
+
+async def warns_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/warns — check warns for a user."""
+    if not update.message or not update.effective_chat:
+        return
+    target = None
+    if update.message.reply_to_message and update.message.reply_to_message.from_user:
+        target = update.message.reply_to_message.from_user
+    else:
+        target = update.effective_user
+    chat_id = update.effective_chat.id
+    count = _get_warns(chat_id, target.id)
+    warn_limit = int(get_setting("warn_limit", "3") or "3")
+    await update.message.reply_text(
+        f"⚠️ <b>{html.escape(target.first_name)}</b> has <b>{count}/{warn_limit}</b> warns.",
+        parse_mode=ParseMode.HTML,
+    )
+
+async def resetwarns_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/resetwarns — reset warns for replied user."""
+    if not update.message or not update.effective_chat:
+        return
+    if not update.message.reply_to_message:
+        await update.message.reply_text("Reply to a user to reset their warns.")
+        return
+    target = update.message.reply_to_message.from_user
+    _set_warns(update.effective_chat.id, target.id, 0)
+    await update.message.reply_text(
+        f"✅ Warns reset for <b>{html.escape(target.first_name)}</b>.", parse_mode=ParseMode.HTML
+    )
+
+
+# ── Rules system ───────────────────────────────────────────────────────────────
+async def rules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/rules — show group rules."""
+    if not update.message or not update.effective_chat:
+        return
+    chat_id = update.effective_chat.id
+    rules = get_setting(f"rules_{chat_id}", "")
+    if rules:
+        await update.message.reply_text(
+            f"<b>📋 Group Rules:</b>\n\n{html.escape(rules)}", parse_mode=ParseMode.HTML
+        )
+    else:
+        await update.message.reply_text("<b>No rules set for this group yet.</b>", parse_mode=ParseMode.HTML)
+
+async def setrules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/setrules — set group rules (admin only)."""
+    if not update.message or not update.effective_chat or not update.effective_user:
+        return
+    try:
+        member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
+        if member.status not in ("administrator", "creator"):
+            return
+    except Exception:
+        return
+    if not context.args:
+        await update.message.reply_text("<b>Usage:</b> /setrules your rules text here", parse_mode=ParseMode.HTML)
+        return
+    rules_text = " ".join(context.args)
+    set_setting(f"rules_{update.effective_chat.id}", rules_text)
+    await update.message.reply_text("<b>✅ Rules saved!</b>\nUsers can now use /rules to see them.", parse_mode=ParseMode.HTML)
+
+
+# ── Chatbot (users talk directly, not admin-only) ──────────────────────────────
+_chatbot_conv: Dict[int, list] = {}  # chat_id → message history
+
+async def _chatbot_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str) -> None:
+    """Send a chatbot reply using Anthropic API or simple fallback."""
+    chat_id = update.effective_chat.id
+    user_msg = text.strip()
+    if not user_msg:
+        return
+
+    # Check if chatbot is enabled for this chat
+    enabled = get_setting(f"chatbot_{chat_id}", "true")
+    if enabled == "false":
+        return
+
+    history = _chatbot_conv.get(chat_id, [])
+    history.append({"role": "user", "content": user_msg})
+    if len(history) > 20:
+        history = history[-20:]
+
+    typing_task = None
+    try:
+        await context.bot.send_chat_action(chat_id, "typing")
+    except Exception:
+        pass
+
+    reply_text = None
+    try:
+        import aiohttp
+        payload = {
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 300,
+            "system": (
+                "You are an anime-loving chatbot assistant for a Telegram group. "
+                "Be friendly, fun, and helpful. Keep replies short (1-3 sentences). "
+                "You love anime and can recommend shows, discuss characters, etc."
+            ),
+            "messages": history,
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "https://api.anthropic.com/v1/messages",
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    content = data.get("content", [])
+                    for block in content:
+                        if block.get("type") == "text":
+                            reply_text = block["text"].strip()
+                            break
+    except Exception as exc:
+        logger.debug(f"Chatbot API error: {exc}")
+
+    if not reply_text:
+        # Simple fallback responses
+        import random
+        fallbacks = [
+            "Interesting! Tell me more! 🎌",
+            "That's cool! What anime are you watching? 📺",
+            "I'm here to chat! What's on your mind? 😊",
+            "Nice! Have you seen Demon Slayer? It's amazing! ⚔️",
+        ]
+        reply_text = random.choice(fallbacks)
+
+    history.append({"role": "assistant", "content": reply_text})
+    _chatbot_conv[chat_id] = history[-20:]
+
+    try:
+        await update.message.reply_text(reply_text, parse_mode=ParseMode.HTML)
+    except Exception:
+        try:
+            await update.message.reply_text(reply_text)
+        except Exception:
+            pass
+
+async def chatbot_private_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle chatbot messages in private chats — all users."""
+    if not update.message or not update.message.text:
+        return
+    await _chatbot_reply(update, context, update.message.text)
+
+async def chatbot_group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle chatbot trigger in groups (when bot is mentioned or specific trigger words used)."""
+    if not update.message or not update.message.text:
+        return
+    text = update.message.text.strip()
+    bot_username = context.bot.username or ""
+    # Only respond if bot is @mentioned or message starts with trigger words
+    if f"@{bot_username}" in text:
+        text = text.replace(f"@{bot_username}", "").strip()
+        await _chatbot_reply(update, context, text)
+    elif update.message.reply_to_message and update.message.reply_to_message.from_user:
+        if update.message.reply_to_message.from_user.id == context.bot.id:
+            await _chatbot_reply(update, context, text)
+
+
 async def set_loader_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /set_loader — control the loading animation.
@@ -4907,7 +5463,7 @@ async def show_upload_menu(
     img_url = None
     if _PANEL_IMAGE_AVAILABLE:
         try:
-            img_url = await get_panel_image_async("upload")
+            img_url = await get_panel_pic_async("upload")
         except Exception:
             pass
     if img_url:
@@ -5409,33 +5965,108 @@ async def handle_channel_post(
 async def handle_admin_photo(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle photo sent by admin when setting category logo."""
+    """
+    Handle photo/sticker/document sent by admin.
+    Handles:
+      - SET_CATEGORY_LOGO state → saves as logo file_id
+      - AWAITING_WATERMARK_xxx state → saves sticker/image as visual watermark
+      - AWAITING_LOGO_xxx state → saves as logo for that category
+    """
     if not update.effective_user or update.effective_user.id not in (ADMIN_ID, OWNER_ID):
         return
     uid = update.effective_user.id
     state = user_states.get(uid)
-    if state != SET_CATEGORY_LOGO:
-        return
     if not update.message:
         return
 
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-    elif update.message.document and update.message.document.mime_type and "image" in update.message.document.mime_type:
-        file_id = update.message.document.file_id
-    else:
-        await update.message.reply_text(b("❌ Please send an image file."), parse_mode=ParseMode.HTML)
+    # ── Extract file_id and type from whatever was sent ───────────────────────
+    msg = update.message
+    file_id = None
+    file_type = "image"
+
+    if msg.sticker:
+        file_id = msg.sticker.file_id
+        file_type = "sticker"
+    elif msg.photo:
+        file_id = msg.photo[-1].file_id
+        file_type = "image"
+    elif msg.document:
+        mime = msg.document.mime_type or ""
+        if "image" in mime or "pdf" in mime or msg.document.file_name.lower().endswith((".jpg",".jpeg",".png",".webp",".gif",".pdf")):
+            file_id = msg.document.file_id
+            file_type = "pdf" if "pdf" in mime else "image"
+        else:
+            # Not an image type we can use
+            return
+    elif msg.animation:
+        file_id = msg.animation.file_id
+        file_type = "animation"
+
+    if not file_id:
         return
 
-    category = context.user_data.get("editing_category")
-    if category:
-        update_category_field(category, "logo_file_id", file_id)
-        await update.message.reply_text(
-            b(f"✅ Logo updated for {e(category)}!"), parse_mode=ParseMode.HTML
+    # ── WATERMARK states: save sticker/image as visual watermark overlay ──────
+    if isinstance(state, str) and state.startswith("AWAITING_WATERMARK_"):
+        cat = state[len("AWAITING_WATERMARK_"):].lower()
+        user_states.pop(uid, None)
+        # Save as both watermark_logo (visual layer) and keep text watermark if set
+        update_category_field(cat, "logo_file_id", file_id)
+        update_category_field(cat, "logo_position", "bottom-right")
+        kind = {"sticker": "Sticker", "image": "Image", "pdf": "Document", "animation": "GIF"}.get(file_type, "File")
+        await msg.reply_text(
+            b(f"✅ {kind} watermark set for {cat}!") +
+            f"\n<i>It will appear as overlay on all {cat} posters.</i>\n"
+            f"<i>To also set text watermark, use the WATERMARK button again and send text.</i>",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[_back_btn(f"cat_settings_{cat}"), _close_btn()]]),
         )
+        return
 
-    user_states.pop(uid, None)
-    await send_admin_menu(update.effective_chat.id, context)
+    # ── LOGO states ───────────────────────────────────────────────────────────
+    if isinstance(state, str) and state.startswith("AWAITING_LOGO_"):
+        cat = state[len("AWAITING_LOGO_"):].lower()
+        user_states.pop(uid, None)
+        update_category_field(cat, "logo_file_id", file_id)
+        await msg.reply_text(
+            b(f"✅ Logo set for {cat}!"),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[_back_btn(f"cat_settings_{cat}"), _close_btn()]]),
+        )
+        return
+
+    # ── Legacy SET_CATEGORY_LOGO state ───────────────────────────────────────
+    if state == SET_CATEGORY_LOGO:
+        category = context.user_data.get("editing_category")
+        if category:
+            update_category_field(category, "logo_file_id", file_id)
+            await msg.reply_text(b(f"✅ Logo updated for {e(category)}!"), parse_mode=ParseMode.HTML)
+        user_states.pop(uid, None)
+        await send_admin_menu(update.effective_chat.id, context)
+        return
+
+    # ── Poster watermark from AWAITING_WM_LAYER_C state ──────────────────────
+    if isinstance(state, str) and state.startswith("AWAITING_WM_LAYER_"):
+        parts_s = state.split("_")
+        layer = parts_s[3].lower() if len(parts_s) > 3 else "c"
+        try:
+            fp_cid = int(parts_s[4])
+        except Exception:
+            fp_cid = uid
+        user_states.pop(uid, None)
+        try:
+            from filter_poster import get_wm_layer, set_wm_layer
+            ldata = get_wm_layer(fp_cid, "c")
+            ldata["file_id"] = file_id
+            ldata["enabled"] = True
+            set_wm_layer(fp_cid, "c", ldata)
+            await msg.reply_text(
+                b("✅ Visual watermark set!"),
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[_back_btn("admin_filter_poster"), _close_btn()]]),
+            )
+        except Exception as exc:
+            await msg.reply_text(b(f"❌ Error: {e(str(exc)[:100])}"), parse_mode=ParseMode.HTML)
+        return
 
 
 # ================================================================================
@@ -5519,6 +6150,37 @@ def _register_all_handlers(app: Application) -> None:
         logger.info("[anime] /airing and /character registered")
     except Exception as _anime_err:
         logger.warning(f"anime extras: {_anime_err}")
+
+    # ── User feature commands (available to ALL users in groups + DM) ─────────
+    app.add_handler(CommandHandler("slap",       user_reaction_cmd))
+    app.add_handler(CommandHandler("hug",        user_reaction_cmd))
+    app.add_handler(CommandHandler("kiss",       user_reaction_cmd))
+    app.add_handler(CommandHandler("pat",        user_reaction_cmd))
+    app.add_handler(CommandHandler("punch",      user_reaction_cmd))
+    app.add_handler(CommandHandler("poke",       user_reaction_cmd))
+    app.add_handler(CommandHandler("couple",     couple_cmd))
+    app.add_handler(CommandHandler("afk",        afk_cmd))
+    app.add_handler(CommandHandler("notes",      notes_list_cmd))
+    app.add_handler(CommandHandler("save",       note_save_cmd))
+    app.add_handler(CommandHandler("get",        note_get_cmd))
+    app.add_handler(CommandHandler("rules",      rules_cmd))
+    app.add_handler(CommandHandler("setrules",   setrules_cmd, filters=filters.ChatType.GROUPS))
+    app.add_handler(CommandHandler("warns",      warns_cmd))
+    app.add_handler(CommandHandler("warn",       warn_cmd, filters=filters.ChatType.GROUPS))
+    app.add_handler(CommandHandler("unwarn",     unwarn_cmd, filters=filters.ChatType.GROUPS))
+    app.add_handler(CommandHandler("resetwarns", resetwarns_cmd, filters=filters.ChatType.GROUPS))
+    # Note trigger — #notename in any message
+    app.add_handler(MessageHandler(filters.Regex(r'^#[\w]+') & ~filters.COMMAND, note_trigger_handler))
+    # AFK auto-reply handler
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, afk_check_handler), group=5)
+    # Chatbot handler — ALL users can use it
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, chatbot_private_handler
+    ), group=6)
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS & filters.Regex(r'(?i)^(hey|hi|hello|bot|@)'), chatbot_group_handler
+    ), group=7)
+    logger.info("[features] User feature commands registered")
     app.add_handler(CommandHandler("id", id_command))
     app.add_handler(CommandHandler("info", info_command))
     app.add_handler(CommandHandler("stats", stats_command, filters=admin_filter))
@@ -5820,34 +6482,41 @@ async def post_init(application: Application) -> None:
             logger.warning(f"poster_cache migration: {_e}")
 
     # ── Apply missing DB migrations ────────────────────────────────────────────
+    _migration_sqls = [
+        """CREATE TABLE IF NOT EXISTS manga_auto_updates (
+            id SERIAL PRIMARY KEY,
+            manga_id TEXT NOT NULL DEFAULT '',
+            manga_title TEXT NOT NULL DEFAULT '',
+            target_chat_id BIGINT,
+            notify_language TEXT DEFAULT 'en',
+            last_chapter TEXT,
+            interval_minutes INTEGER DEFAULT 60,
+            mode TEXT DEFAULT 'latest',
+            watermark BOOLEAN DEFAULT FALSE,
+            active BOOLEAN DEFAULT TRUE,
+            last_checked TIMESTAMP DEFAULT NOW(),
+            created_at TIMESTAMP DEFAULT NOW()
+        )""",
+        "ALTER TABLE bot_progress ADD COLUMN IF NOT EXISTS anime_name TEXT DEFAULT 'Anime Name'",
+        "ALTER TABLE manga_auto_updates ADD COLUMN IF NOT EXISTS notify_language TEXT DEFAULT 'en'",
+        "ALTER TABLE manga_auto_updates ADD COLUMN IF NOT EXISTS interval_minutes INTEGER DEFAULT 60",
+        "ALTER TABLE manga_auto_updates ADD COLUMN IF NOT EXISTS mode TEXT DEFAULT 'latest'",
+        "ALTER TABLE manga_auto_updates ADD COLUMN IF NOT EXISTS watermark BOOLEAN DEFAULT FALSE",
+        "INSERT INTO bot_settings (key, value) VALUES ('loading_sticker_id', ''), ('loading_anim_enabled', 'true') ON CONFLICT (key) DO NOTHING",
+        "INSERT INTO bot_settings (key, value) VALUES ('watermark_sticker_id', ''), ('watermark_image_id', '') ON CONFLICT (key) DO NOTHING",
+    ]
+    for _sql in _migration_sqls:
+        try:
+            with db_manager.get_cursor() as _cur:
+                _cur.execute(_sql)
+        except Exception as _me:
+            logger.debug(f"DB migration (non-fatal): {str(_me)[:80]}")
     try:
         with db_manager.get_cursor() as _cur:
-            _cur.execute("""
-                CREATE TABLE IF NOT EXISTS manga_auto_updates (
-                    id SERIAL PRIMARY KEY,
-                    manga_title TEXT NOT NULL,
-                    manga_id TEXT,
-                    last_chapter TEXT,
-                    target_chat_id BIGINT,
-                    interval_minutes INTEGER DEFAULT 60,
-                    mode TEXT DEFAULT 'auto',
-                    watermark BOOLEAN DEFAULT FALSE,
-                    active BOOLEAN DEFAULT TRUE,
-                    last_checked TIMESTAMP DEFAULT NOW(),
-                    created_at TIMESTAMP DEFAULT NOW()
-                )""")
-            _cur.execute("""
-                ALTER TABLE bot_progress
-                ADD COLUMN IF NOT EXISTS anime_name TEXT DEFAULT 'Anime Name'
-            """)
-            _cur.execute("""
-                INSERT INTO bot_settings (key, value)
-                VALUES ('loading_sticker_id', ''), ('loading_anim_enabled', 'true')
-                ON CONFLICT (key) DO NOTHING
-            """)
-        logger.info("✅ DB migrations applied (manga_auto_updates, anime_name, loader)")
-    except Exception as _me:
-        logger.warning(f"DB migration warning: {_me}")
+            _cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_manga_track_unique ON manga_auto_updates(manga_id, target_chat_id)")
+    except Exception:
+        pass
+    logger.info("✅ DB migrations applied")
 
     # Initialize bot commands per authority level
     from bot_commands_setup import initialize_bot_commands
@@ -6431,7 +7100,7 @@ async def button_handler(
         _img = None
         if _PANEL_IMAGE_AVAILABLE:
             try:
-                _img = await get_panel_image_async("channels")
+                _img = await get_panel_pic_async("channels")
             except Exception:
                 pass
         if _img:
@@ -6795,7 +7464,7 @@ async def button_handler(
         img_url = None
         if _PANEL_IMAGE_AVAILABLE:
             try:
-                img_url = await get_panel_image_async("settings")
+                img_url = await get_panel_pic_async("settings")
             except Exception:
                 pass
         if img_url:
@@ -7592,7 +8261,7 @@ async def button_handler(
         img_url = None
         if _PANEL_IMAGE_AVAILABLE:
             try:
-                img_url = await get_panel_image_async("users")
+                img_url = await get_panel_pic_async("users")
             except Exception:
                 pass
         if img_url:
@@ -8464,6 +9133,84 @@ async def button_handler(
         await show_upload_menu(chat_id, context, query.message)
         return
 
+    # ── FEATURES panel buttons ────────────────────────────────────────────────
+    if data.startswith("feat_"):
+        if not is_admin:
+            return
+        feat_map = {
+            "feat_couple":       ("/couple", "Tag two users as a couple. Usage: /couple @user1 @user2"),
+            "feat_slap":         ("/slap", "Slap someone! Reply to a message with /slap"),
+            "feat_hug":          ("/hug", "Hug someone! Reply to a message with /hug"),
+            "feat_kiss":         ("/kiss", "Kiss someone! Reply to a message with /kiss"),
+            "feat_pat":          ("/pat", "Pat someone! Reply to a message with /pat"),
+            "feat_inline_search":("@Bot query", "Inline anime search — type @YourBot in any chat then anime name."),
+            "feat_reactions":    ("/react", "Reaction GIFs. Reply to a message with /slap /hug /pat etc."),
+            "feat_chatbot":      ("/chatbot on|off", "Toggle AI chatbot mode in a group."),
+            "feat_truth_dare":   ("/truth or /dare", "Play Truth or Dare in a group!"),
+            "feat_notes":        ("/save notename text", "Save group notes. Retrieve with #notename"),
+            "feat_warns":        ("/warn @user", "Warn users. Also: /unwarn /warns /resetwarns"),
+            "feat_muting":       ("/mute @user", "Mute users. Also: /unmute /tmute"),
+            "feat_bans":         ("/ban @user", "Ban users. Also: /unban /tban /sban"),
+            "feat_rules":        ("/setrules | /rules", "Set and show group rules."),
+            "feat_airing":       ("/airing Demon Slayer", "Check next episode airing time from AniList."),
+            "feat_character":    ("/character Tanjiro", "Get anime character info from AniList."),
+            "feat_anime_info":   ("/anime Naruto", "Get landscape poster + full anime info."),
+            "feat_afk":          ("/afk reason", "Set AFK status. Bot auto-replies when tagged."),
+        }
+        info = feat_map.get(data, (data.replace("feat_", "/"), "Feature command."))
+        cmd, desc = info
+        try:
+            await query.answer(f"{cmd} — {desc[:100]}", show_alert=True)
+        except Exception:
+            pass
+        return
+
+    # ── IMPORT USERS from CSV/Excel ────────────────────────────────────────────
+    if data == "admin_import_users":
+        if not is_admin:
+            return
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+        user_states[uid] = "AWAITING_IMPORT_USERS_FILE"
+        await safe_send_message(
+            context.bot, chat_id,
+            (
+                "<b>📥 Import Users</b>\n\n"
+                "Send a <b>CSV</b> or <b>Excel (.xlsx)</b> file with user IDs.\n\n"
+                "<b>CSV format (columns):</b>\n"
+                "<code>user_id, username, first_name</code>\n\n"
+                "<b>Excel:</b> First column must be <code>user_id</code>.\n\n"
+                "Send the file now, or /cancel to abort."
+            ),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[_back_btn("admin_back")]]),
+        )
+        return
+
+    # ── IMPORT LINKS from CSV/Excel ────────────────────────────────────────────
+    if data == "admin_import_links":
+        if not is_admin:
+            return
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+        user_states[uid] = "AWAITING_IMPORT_LINKS_FILE"
+        await safe_send_message(
+            context.bot, chat_id,
+            (
+                "<b>📥 Import Links</b>\n\n"
+                "Send a <b>CSV</b> or <b>Excel (.xlsx)</b> file with link data.\n\n"
+                "<b>CSV columns:</b> <code>link_id, file_name, channel_id</code>\n\n"
+                "Send the file now, or /cancel to abort."
+            ),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[_back_btn("admin_back")]]),
+        )
+        return
+
     # ── Poster CMD buttons from admin panel ───────────────────────────────────
     if data.startswith("poster_cmd_"):
         if not is_admin:
@@ -8974,7 +9721,19 @@ async def handle_admin_message(
             user_states.pop(uid, None)
             return
         try:
-            tg_chat = await context.bot.get_chat(identifier)
+            # Try to get the chat - supports @username, -100xxx ID, or plain ID
+            _ident = identifier.strip()
+            if _ident.lstrip('-').isdigit():
+                _ident = int(_ident)
+            tg_chat = await context.bot.get_chat(_ident)
+            # Verify bot can send to this chat
+            try:
+                _test = await context.bot.get_chat_member(tg_chat.id, (await context.bot.get_me()).id)
+                _status = getattr(_test, 'status', '')
+                if _status not in ('administrator', 'member', 'creator', 'left', 'kicked'):
+                    pass  # still try
+            except Exception:
+                pass
             success = MangaTracker.add_tracking(manga_id, manga_title, tg_chat.id)
             if success:
                 # For "latest" mode: save the current latest chapter as baseline so we don't re-send old ones
@@ -9017,7 +9776,17 @@ async def handle_admin_message(
                     ),
                 )
             else:
-                await safe_send_message(context.bot, chat_id, b("❌ Failed to add tracking. Check that the bot has access to the channel."))
+                await safe_send_message(context.bot, chat_id,
+                    b("❌ Failed to add tracking.") + "\n\n"
+                    + bq(
+                        "<b>Checklist:</b>\n"
+                        "1. Add the bot as admin to your channel\n"
+                        "2. Use correct format: @channelname or -100XXXXXXXXX\n"
+                        "3. Make sure the channel exists and bot can post\n\n"
+                        "Then try again."
+                    ),
+                    reply_markup=InlineKeyboardMarkup([[_back_btn("admin_autoupdate")]]),
+                )
         except Exception as exc:
             await safe_send_message(
                 context.bot, chat_id,
@@ -9151,6 +9920,133 @@ async def handle_admin_message(
         return
 
     # ── New state handlers from panel sub-actions ─────────────────────────────────
+    # ── Import Users / Links from CSV or Excel ────────────────────────────────
+    if state in ("AWAITING_IMPORT_USERS_FILE", "AWAITING_IMPORT_LINKS_FILE"):
+        user_states.pop(uid, None)
+        doc = update.message.document if update.message else None
+        if not doc:
+            await safe_send_message(context.bot, chat_id,
+                "❗ <b>Please send a CSV or Excel (.xlsx) file.</b>", parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[_back_btn("admin_back")]]))
+            return
+        try:
+            tg_file = await context.bot.get_file(doc.file_id)
+            raw = await tg_file.download_as_bytearray()
+        except Exception as _dl_err:
+            await safe_send_message(context.bot, chat_id,
+                f"❌ Failed to download file: <code>{html.escape(str(_dl_err))}</code>",
+                parse_mode="HTML")
+            return
+
+        fname_lower = (doc.file_name or "").lower()
+        imported, errors = 0, 0
+        is_users = state == "AWAITING_IMPORT_USERS_FILE"
+
+        try:
+            if fname_lower.endswith(".xlsx") or fname_lower.endswith(".xls"):
+                # Excel import
+                try:
+                    import openpyxl
+                except ImportError:
+                    await safe_send_message(context.bot, chat_id,
+                        "❌ <b>openpyxl not installed.</b> Please use CSV format instead.",
+                        parse_mode="HTML")
+                    return
+                from io import BytesIO
+                wb = openpyxl.load_workbook(BytesIO(bytes(raw)), read_only=True)
+                ws = wb.active
+                rows_iter = ws.iter_rows(values_only=True)
+                headers_row = next(rows_iter, None)
+                if not headers_row:
+                    await safe_send_message(context.bot, chat_id, "❌ Empty Excel file.")
+                    return
+                headers = [str(c).lower().strip() if c else "" for c in headers_row]
+                def _col(name, fallback=0):
+                    return headers.index(name) if name in headers else fallback
+                uid_col   = _col("user_id")
+                uname_col = _col("username", -1)
+                name_col  = _col("first_name", -1)
+                link_col  = _col("link_id", 0)
+                file_col  = _col("file_name", -1)
+                chan_col  = _col("channel_id", -1)
+                for row in rows_iter:
+                    if not row or not row[0]:
+                        continue
+                    try:
+                        if is_users:
+                            row_uid = int(str(row[uid_col]).strip().split(".")[0])
+                            uname  = str(row[uname_col]).strip() if uname_col >= 0 and row[uname_col] else None
+                            fname2 = str(row[name_col]).strip()  if name_col  >= 0 and row[name_col]  else None
+                            add_user(row_uid, uname, fname2, None)
+                        else:
+                            link_id  = str(row[link_col]).strip()
+                            fn       = str(row[file_col]).strip() if file_col >= 0 and row[file_col] else link_id
+                            try:
+                                chan_raw = row[chan_col] if chan_col >= 0 else None
+                                chan_un  = str(chan_raw).strip() if chan_raw else fn
+                            except Exception:
+                                chan_un = fn
+                            # Use generate_link_id to register imported link
+                            generate_link_id(chan_un, uid, never_expires=True, channel_title=fn)
+                        imported += 1
+                    except Exception:
+                        errors += 1
+            else:
+                # CSV import (default)
+                import csv
+                from io import StringIO
+                text_data = raw.decode("utf-8", errors="replace")
+                # Auto-detect delimiter
+                sample = text_data[:2048]
+                delimiter = ","
+                for d in [",", ";", "	", "|"]:
+                    if d in sample:
+                        delimiter = d
+                        break
+                reader = csv.DictReader(StringIO(text_data), delimiter=delimiter)
+                for row in reader:
+                    if not row:
+                        continue
+                    try:
+                        if is_users:
+                            raw_id = str(row.get("user_id") or row.get("id") or row.get("User ID") or "").strip()
+                            if not raw_id:
+                                errors += 1
+                                continue
+                            row_uid = int(raw_id.split(".")[0])
+                            uname  = (row.get("username") or row.get("Username") or "").strip() or None
+                            fname2 = (row.get("first_name") or row.get("name") or row.get("Name") or "").strip() or None
+                            add_user(row_uid, uname, fname2, None)
+                        else:
+                            fn = str(row.get("file_name") or row.get("name") or "").strip()
+                            chan_raw = (row.get("channel_id") or row.get("channel_username") or "").strip()
+                            generate_link_id(chan_raw or fn, uid, never_expires=True, channel_title=fn or chan_raw)
+                        imported += 1
+                    except Exception:
+                        errors += 1
+        except Exception as exc:
+            await safe_send_message(context.bot, chat_id,
+                f"❌ <b>Import failed:</b> <code>{html.escape(str(exc)[:200])}</code>",
+                parse_mode="HTML")
+            return
+
+        label = "users" if is_users else "links"
+        _import_msg = (
+            f"<b>\u2705 Import Complete!</b>\n\n"
+            f"\u2022 Imported {label}: <b>{imported:,}</b>\n"
+            f"\u2022 Rows skipped: <b>{errors:,}</b>\n\n"
+            f"<i>File: {html.escape(doc.file_name or 'unknown')}</i>"
+        )
+        await safe_send_message(
+            context.bot, chat_id,
+            _import_msg,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [_btn("\U0001f465 VIEW USERS", "user_management"), _back_btn("admin_back")],
+            ]),
+        )
+        return
+
     if state == "AWAITING_USER_SEARCH":
         user_states.pop(uid, None)
         target = resolve_target_user_id(text.strip())
