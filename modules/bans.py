@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/bans.py
+# ACTION: Replace existing file
+# ====================================================================
 import html
 
 from telegram import ParseMode, Update
