@@ -1,10 +1,19 @@
+# ====================================================================
+# PLACE AT: /app/modules/nightmode.py
+# ACTION: Replace existing file
+# ====================================================================
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telethon import functions, types
 from telethon.tl.types import ChatBannedRights
 
 from beataniversebot_compat import BOT_NAME
 from beataniversebot_compat import telethn as tbot
-from BeatVerseProbot.events import register
+try:
+    from BeatVerseProbot.events import register
+except ImportError:
+    def register(*a,**k):
+        def d(f): return f
+        return a[0] if a and callable(a[0]) else d
 from modules.sql.night_mode_sql import (
     add_nightmode,
     get_all_chat_id,
