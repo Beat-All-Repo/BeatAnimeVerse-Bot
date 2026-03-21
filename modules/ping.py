@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/ping.py
+# ACTION: Replace existing file
+# ====================================================================
 import time
 
 from telegram import ParseMode, Update
