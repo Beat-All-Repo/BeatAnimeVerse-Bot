@@ -31,6 +31,13 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+# ── PANEL_PICS env: comma-separated URLs used as panel backgrounds ─────────────
+# Example: PANEL_PICS=https://i.imgur.com/abc.jpg,https://i.imgur.com/xyz.jpg
+_PANEL_PICS_ENV: list = [
+    u.strip() for u in os.getenv("PANEL_PICS", "").split(",")
+    if u.strip().startswith("http")
+]
+
 # ── API keys from env ──────────────────────────────────────────────────────────
 WALL_API_KEY: str = os.getenv("WALL_API_KEY", "")
 TMDB_API_KEY: str = os.getenv("TMDB_API_KEY", "")
@@ -290,9 +297,18 @@ def _fetch_tmdb_backdrop() -> Optional[str]:
 def get_panel_image(panel: str = "default", force_refresh: bool = False) -> Optional[str]:
     """
     Get a SFW anime image URL for a panel background.
-    Uses parallel requests so it returns in ~3s max instead of waiting 8s per API.
+    Priority:
+      1. PANEL_PICS env variable (comma-separated URLs) — random pick, instant
+      2. Parallel API fetch (waifu.im + anilist)
+      3. Static fallback (always works)
     Results cached 30 minutes per panel type.
     """
+    # PANEL_PICS env takes top priority — instant, no API needed
+    if _PANEL_PICS_ENV:
+        url = random.choice(_PANEL_PICS_ENV)
+        _set_cache(panel, url)
+        return url
+
     if not force_refresh and _is_cached(panel):
         return _img_cache[panel]
 
