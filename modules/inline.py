@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/inline.py
+# ACTION: Replace existing file
+# ====================================================================
 """
 Inline Query Module for BeatVerseProbot
 Supports: translate, urban dict, google search, wallpapers,
@@ -12,7 +16,14 @@ from uuid import uuid4
 
 # import aiohttp  # removed: imported but never used
 import requests
-from googletrans import Translator
+try:
+    from googletrans import Translator
+except ImportError:
+    class Translator:
+        def translate(self, text, dest="en", src="auto"):
+            class _R:
+                text = text
+            return _R()
 from telegram import (
     Update,
     InlineQueryResultArticle,
