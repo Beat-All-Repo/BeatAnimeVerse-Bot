@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/help.py
+# ACTION: Replace existing file
+# ====================================================================
 """
 help.py — only handles the ❌ Close button callback.
 
