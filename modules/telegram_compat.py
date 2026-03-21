@@ -25,6 +25,72 @@ Credits: BeatAnime | @BeatAnime
 import os, sys, re, types, logging
 logger = logging.getLogger(__name__)
 
+# ── Stub missing pip packages so modules load even without them ───────────────
+import sys as _sys, types as _types
+
+def _stub_module(name: str, **attrs):
+    """Register a stub in sys.modules so imports don't crash."""
+    if name in _sys.modules:
+        return
+    parts = name.split(".")
+    # Register parent packages too
+    for i in range(1, len(parts)):
+        parent = ".".join(parts[:i])
+        if parent not in _sys.modules:
+            m = _types.ModuleType(parent)
+            _sys.modules[parent] = m
+    m = _types.ModuleType(name)
+    for k, v in attrs.items():
+        setattr(m, k, v)
+    _sys.modules[name] = m
+    return m
+
+try:
+    import pyrate_limiter  # noqa
+except ImportError:
+    # Stub pyrate_limiter so modules/helper_funcs/handlers.py loads
+    class _Rate:
+        def __init__(self, *a, **k): pass
+    class _Duration:
+        CUSTOM = 15; MINUTE = 60; HOUR = 3600; DAY = 86400
+    class _BucketFullException(Exception): pass
+    class _Limiter:
+        def __init__(self, *a, **k): pass
+        def try_acquire(self, *a, **k): pass
+    _pl = _stub_module("pyrate_limiter")
+    _pl.Rate = _Rate
+    _pl.Duration = _Duration
+    _pl.BucketFullException = _BucketFullException
+    _pl.Limiter = _Limiter
+    logger.info("[telegram_compat] pyrate_limiter stubbed")
+
+try:
+    import markdown2  # noqa
+except ImportError:
+    _md2 = _stub_module("markdown2")
+    _md2.markdown = lambda text, **k: text
+    logger.info("[telegram_compat] markdown2 stubbed")
+
+try:
+    import search_engine_parser  # noqa
+except ImportError:
+    _stub_module("search_engine_parser")
+    _stub_module("search_engine_parser.base")
+    logger.info("[telegram_compat] search_engine_parser stubbed")
+
+try:
+    import hachoir  # noqa
+except ImportError:
+    for _h in ("hachoir", "hachoir.parser", "hachoir.metadata", "hachoir.core"):
+        _stub_module(_h)
+    logger.info("[telegram_compat] hachoir stubbed")
+
+try:
+    import webptools  # noqa
+except ImportError:
+    _stub_module("webptools")
+    logger.info("[telegram_compat] webptools stubbed")
+
 # ── PTB v21 real imports ───────────────────────────────────────────────────────
 from telegram.constants import ParseMode, ChatAction, MessageLimit
 from telegram import (
