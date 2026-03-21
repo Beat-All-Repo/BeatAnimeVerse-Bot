@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/dev.py
+# ACTION: Replace existing file
+# ====================================================================
 import os
 import subprocess
 import sys
@@ -8,7 +12,11 @@ from telegram import TelegramError, Update
 from telegram.error import Unauthorized
 from telegram.ext import CallbackContext, CommandHandler
 
-import BeatVerseProbot
+try:
+    import BeatVerseProbot
+except ImportError:
+    class BeatVerseProbot:
+        __version__ = "2.0.0"
 from beataniversebot_compat import dispatcher
 from modules.helper_funcs.chat_status import dev_plus
 
