@@ -1,6 +1,13 @@
+# ====================================================================
+# PLACE AT: /app/modules/sed.py
+# ACTION: Replace existing file
+# ====================================================================
 import sre_constants
 
-import regex
+try:
+    import regex
+except ImportError:
+    import re as regex
 import telegram
 from telegram import Update
 from telegram.ext import CallbackContext, Filters
