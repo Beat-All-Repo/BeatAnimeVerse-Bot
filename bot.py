@@ -5624,8 +5624,14 @@ async def post_init(application: Application) -> None:
         except Exception as _e:
             logger.warning(f"poster_cache migration: {_e}")
 
+    # Initialize bot commands per authority level
+    from bot_commands_setup import initialize_bot_commands
+    await initialize_bot_commands(application.bot)
+
     # Send restart notification
     await _send_restart_notification(application.bot)
+        
+
 
 
 async def _register_bot_commands_on_bot(bot: Bot) -> None:
@@ -9107,6 +9113,11 @@ def main() -> None:
         ),
         group=-1,
     )
+
+        
+    # Register /refresh_commands, /refresh_all_commands, /set_bot_description
+    from bot_commands_setup import register_command_setup_handlers
+    register_command_setup_handlers(application)
 
     application.add_error_handler(error_handler)
     application.post_init = post_init
