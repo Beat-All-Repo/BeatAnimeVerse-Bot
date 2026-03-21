@@ -31,7 +31,7 @@ bleach==6.3.0
 
 # ── Image processing ──────────────────────────────────────────────────────────
 pillow==10.4.0
-opencv-python-headless==4.10.0.84
+opencv-python-headless==4.13.0.92
 
 # ── Translation ───────────────────────────────────────────────────────────────
 gpytranslate==2.0.0
