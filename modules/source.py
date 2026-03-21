@@ -1,8 +1,21 @@
+# ====================================================================
+# PLACE AT: /app/modules/source.py
+# ACTION: Replace existing file
+# ====================================================================
 from platform import python_version as y
 
-from pyrogram import __version__ as z
-from pyrogram import filters
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+try:
+    from pyrogram import __version__ as z
+except ImportError:
+    z = "N/A"
+try:
+    from pyrogram import filters
+except ImportError:
+    filters = None
+try:
+    from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message as PyroMessage
+except ImportError:
+    PyroMessage = None
 from telegram import __version__ as o
 from telethon import __version__ as s
 
