@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/dbcleanup.py
+# ACTION: Replace existing file
+# ====================================================================
 from time import sleep
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
