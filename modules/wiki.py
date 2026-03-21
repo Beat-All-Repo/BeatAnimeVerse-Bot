@@ -1,7 +1,18 @@
-import wikipedia
+# ====================================================================
+# PLACE AT: /app/modules/wiki.py
+# ACTION: Replace existing file
+# ====================================================================
+try:
+    import wikipedia
+except ImportError:
+    wikipedia = None
 from telegram import ParseMode, Update
 from telegram.ext import CallbackContext
-from wikipedia.exceptions import DisambiguationError, PageError
+try:
+    from wikipedia.exceptions import DisambiguationError, PageError
+except ImportError:
+    class DisambiguationError(Exception): pass
+    class PageError(Exception): pass
 
 from beataniversebot_compat import dispatcher
 from modules.disable import DisableAbleCommandHandler
