@@ -202,7 +202,17 @@ _sys.path.insert(0, os.path.join(os.path.dirname(__file__), "."))
 BOT_TOKEN: str = os.getenv("BOT_TOKEN", "") or os.getenv("TOKEN", "")
 DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 MONGO_DB_URI: str = os.getenv("MONGO_DB_URI", "")
-ADMIN_ID: int = int(os.getenv("ADMIN_ID", "0") or os.getenv("OWNER_ID", "0"))
+# ── Owner / Admin IDs — OWNER_ID and ADMIN_ID are interchangeable ─────────────
+# Only ONE of them needs to be set. If only OWNER_ID is set, ADMIN_ID mirrors it.
+# If only ADMIN_ID is set, OWNER_ID mirrors it.
+ADMIN_ID: int = int(os.getenv("ADMIN_ID") or os.getenv("OWNER_ID") or "0")
+OWNER_ID: int = int(os.getenv("OWNER_ID") or os.getenv("ADMIN_ID") or "0")
+# If one was missing, mirror from the other
+if ADMIN_ID == 0 and OWNER_ID != 0:
+    ADMIN_ID = OWNER_ID
+if OWNER_ID == 0 and ADMIN_ID != 0:
+    OWNER_ID = ADMIN_ID
+
 # Poster settings
 IMGBB_API_KEY: str = os.getenv("IMGBB_API_KEY", "")
 # Help info from env (what users see)
@@ -213,7 +223,6 @@ HELP_CHANNEL_2_URL: str = os.getenv("HELP_CHANNEL_2_URL", "")
 HELP_CHANNEL_2_NAME: str = os.getenv("HELP_CHANNEL_2_NAME", "💬 Discussion")
 HELP_CHANNEL_3_URL: str = os.getenv("HELP_CHANNEL_3_URL", "")
 HELP_CHANNEL_3_NAME: str = os.getenv("HELP_CHANNEL_3_NAME", "🎬 Request")
-OWNER_ID: int = int(os.getenv("OWNER_ID", str(ADMIN_ID)))
 
 # Timing
 LINK_EXPIRY_MINUTES: int = int(os.getenv("LINK_EXPIRY_MINUTES", "5"))
@@ -9189,8 +9198,14 @@ def main() -> None:
     if not DATABASE_URL and not MONGO_DB_URI:
         logger.error("❌ Neither DATABASE_URL (NeonDB) nor MONGO_DB_URI (MongoDB) is set! Set at least one.")
         return
-    if not ADMIN_ID:
-        logger.error("❌ ADMIN_ID is not set!")
+    # Re-mirror in case only one is set at runtime
+    global ADMIN_ID, OWNER_ID
+    if ADMIN_ID == 0 and OWNER_ID != 0:
+        ADMIN_ID = OWNER_ID
+    if OWNER_ID == 0 and ADMIN_ID != 0:
+        OWNER_ID = ADMIN_ID
+    if not ADMIN_ID and not OWNER_ID:
+        logger.error("❌ Neither ADMIN_ID nor OWNER_ID is set! Set at least one in environment variables.")
         return
 
     # Initialize database (dual: NeonDB + MongoDB)
