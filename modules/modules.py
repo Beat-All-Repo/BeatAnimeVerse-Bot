@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/modules.py
+# ACTION: Replace existing file
+# ====================================================================
 import collections
 import importlib
 
@@ -5,17 +9,16 @@ from telegram import ParseMode, Update
 from telegram.ext import CallbackContext, CommandHandler
 
 from beataniversebot_compat import dispatcher, telethn
-from BeatVerseProbot.__main__ import (
-    CHAT_SETTINGS,
-    DATA_EXPORT,
-    DATA_IMPORT,
-    HELPABLE,
-    IMPORTED,
-    MIGRATEABLE,
-    STATS,
-    USER_INFO,
-    USER_SETTINGS,
-)
+try:
+    from BeatVerseProbot.__main__ import (
+        CHAT_SETTINGS, DATA_EXPORT, DATA_IMPORT,
+        HELPABLE, IMPORTED, MIGRATEABLE,
+        STATS, USER_INFO, USER_SETTINGS,
+    )
+except ImportError:
+    CHAT_SETTINGS = {}; DATA_EXPORT = {}; DATA_IMPORT = {}
+    HELPABLE = {}; IMPORTED = {}; MIGRATEABLE = []
+    STATS = {}; USER_INFO = {}; USER_SETTINGS = {}
 from modules.helper_funcs.chat_status import dev_plus, sudo_plus
 
 
