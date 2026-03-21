@@ -1,7 +1,14 @@
+# ====================================================================
+# PLACE AT: /app/modules/telegraph.py
+# ACTION: Replace existing file
+# ====================================================================
 import os
 
 from PIL import Image
-from telegraph import Telegraph, exceptions, upload_file
+try:
+    from telegraph import Telegraph, exceptions, upload_file
+except ImportError:
+    Telegraph = None; exceptions = None; upload_file = None
 
 from beataniversebot_compat import telethn
 from telethon import events
