@@ -1,8 +1,17 @@
+# ====================================================================
+# PLACE AT: /app/modules/country.py
+# ACTION: Replace existing file
+# ====================================================================
 import flag
 from countryinfo import CountryInfo
 
 from beataniversebot_compat import BOT_NAME, telethn
-from BeatVerseProbot.events import register
+try:
+    from BeatVerseProbot.events import register
+except ImportError:
+    def register(*a,**k):
+        def d(f): return f
+        return a[0] if a and callable(a[0]) else d
 
 
 @register(pattern="^/country (.*)")
