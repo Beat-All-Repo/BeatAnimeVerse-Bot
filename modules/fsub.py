@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/fsub.py
+# ACTION: Replace existing file
+# ====================================================================
 """
 Force Subscription Module for BeatVerseProbot
 Admins can add/remove/list force-sub channels stored in PostgreSQL.
