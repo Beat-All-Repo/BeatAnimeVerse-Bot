@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/userinfo.py
+# ACTION: Replace existing file
+# ====================================================================
 import html
 import os
 import re
@@ -29,7 +33,10 @@ from beataniversebot_compat import (
     dispatcher,
     telethn,
 )
-from BeatVerseProbot.__main__ import STATS, TOKEN, USER_INFO
+try:
+    from BeatVerseProbot.__main__ import STATS, TOKEN, USER_INFO
+except ImportError:
+    STATS = {}; TOKEN = ""; USER_INFO = {}
 from modules.disable import DisableAbleCommandHandler
 from modules.helper_funcs.chat_status import sudo_plus
 from modules.helper_funcs.extraction import extract_user
