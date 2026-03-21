@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/muting.py
+# ACTION: Replace existing file
+# ====================================================================
 import html
 from typing import Optional
 
