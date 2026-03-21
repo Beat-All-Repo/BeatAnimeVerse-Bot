@@ -6704,6 +6704,186 @@ async def button_handler(
                 pass
         return
 
+
+    if data.startswith("fp_mode_toggle_"):
+        if not is_admin:
+            return
+        try:
+            fp_chat_id = int(data.split("_")[-1])
+        except Exception:
+            fp_chat_id = 0
+        if _FILTER_POSTER_AVAILABLE:
+            from filter_poster import get_filter_mode, set_filter_mode
+            cur = get_filter_mode(fp_chat_id)
+            new_mode = "text" if cur == "poster" else "poster"
+            set_filter_mode(fp_chat_id, new_mode)
+            label = "TEXT (link only)" if new_mode == "text" else "POSTER (full card)"
+            await safe_answer(query, f"✔️ Mode: {label}")
+            await safe_edit_text(
+                query,
+                get_filter_poster_settings_text(fp_chat_id),
+                reply_markup=build_filter_poster_settings_keyboard(fp_chat_id),
+            )
+        return
+
+    if data.startswith("fp_wm_toggle_"):
+        if not is_admin:
+            return
+        parts = data.split("_")
+        layer = parts[3]
+        try:
+            fp_chat_id = int(parts[4])
+        except Exception:
+            fp_chat_id = chat_id
+        if _FILTER_POSTER_AVAILABLE:
+            from filter_poster import get_wm_layer, set_wm_layer
+            ldata = get_wm_layer(fp_chat_id, layer)
+            ldata["enabled"] = not ldata.get("enabled", False)
+            set_wm_layer(fp_chat_id, layer, ldata)
+            state_str = "enabled" if ldata["enabled"] else "disabled"
+            await safe_answer(query, f"✔️ Layer {layer.upper()} {state_str}")
+            await safe_edit_text(
+                query,
+                get_filter_poster_settings_text(fp_chat_id),
+                reply_markup=build_filter_poster_settings_keyboard(fp_chat_id),
+            )
+        return
+
+    if data.startswith("fp_wm_"):
+        if not is_admin:
+            return
+        parts = data.split("_")
+        layer = parts[2]       # a, b, or c
+        try:
+            fp_chat_id = int(parts[3])
+        except Exception:
+            fp_chat_id = chat_id
+        if not _FILTER_POSTER_AVAILABLE:
+            await safe_answer(query, "Filter poster module unavailable.")
+            return
+        from filter_poster import get_wm_layer
+        ldata = get_wm_layer(fp_chat_id, layer)
+        layer_names = {"a": "PRIMARY TEXT", "b": "SECONDARY TEXT", "c": "STICKER / IMAGE"}
+        pos_list = "center | bottom | top | left | right | bottom-left | bottom-right | top-left | top-right"
+        if layer == "c":
+            panel_text = (
+                b(f"WATERMARK LAYER C — STICKER / IMAGE") + "\n\n"
+                + bq(
+                    f"<b>Enabled:</b> {'🟢 Yes' if ldata.get('enabled') else '🔴 No'}\n"
+                    f"<b>Position:</b> {e(ldata.get('position', 'bottom-left'))}\n"
+                    f"<b>Scale:</b> {ldata.get('scale', 0.12)} (0.05–0.30)\n"
+                    f"<b>Opacity:</b> {ldata.get('opacity', 200)} (0–255)\n\n"
+                    "<b>To set sticker:</b> Send any Telegram sticker as a reply.\n"
+                    "<b>To set image:</b> Send: <code>https://url | position | scale | opacity</code>\n"
+                    f"<b>Positions:</b> {pos_list}"
+                )
+            )
+        else:
+            panel_text = (
+                b(f"WATERMARK LAYER {layer.upper()} — {layer_names.get(layer, '')}") + "\n\n"
+                + bq(
+                    f"<b>Enabled:</b> {'🟢 Yes' if ldata.get('enabled') else '🔴 No'}\n"
+                    f"<b>Text:</b> {e(ldata.get('text', '—'))}\n"
+                    f"<b>Position:</b> {e(ldata.get('position', 'bottom-right'))}\n"
+                    f"<b>Font size:</b> {ldata.get('font_size', 24)}\n"
+                    f"<b>Color:</b> {e(ldata.get('color', '#FFFFFF'))}\n"
+                    f"<b>Opacity:</b> {ldata.get('opacity', 150)} (0–255)\n\n"
+                    "<b>Send format:</b> <code>text | position | size | #color | opacity</code>\n"
+                    "<b>Example:</b> <code>BeatAnime | bottom-right | 24 | #FFFFFF | 150</code>\n"
+                    f"<b>Positions:</b> {pos_list}"
+                )
+            )
+        user_states[uid] = f"AWAITING_WM_LAYER_{layer.upper()}_{fp_chat_id}"
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+        await safe_send_message(
+            context.bot, chat_id, panel_text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "🟢 ENABLE" if not ldata.get("enabled") else "🔴 DISABLE",
+                    callback_data=f"fp_wm_toggle_{layer}_{fp_chat_id}",
+                )],
+                [_back_btn("admin_filter_poster"), _close_btn()],
+            ]),
+        )
+        return
+
+    if data == "fp_set_autodel":
+        if not is_admin:
+            return
+        try:
+            cur_del = int(get_setting(f"filter_auto_delete_{chat_id}", "300"))
+        except Exception:
+            cur_del = 300
+        user_states[uid] = "AWAITING_FILTER_AUTODEL"
+        await safe_edit_text(
+            query,
+            b("FILTER AUTO-DELETE TIME") + "\n\n"
+            + bq(
+                f"<b>Current:</b> {cur_del}s ({cur_del // 60} min)\n\n"
+                "Send seconds before poster + link auto-deletes:\n"
+                "• <code>0</code> = never delete\n"
+                "• <code>300</code> = 5 minutes (default)\n"
+                "• <code>600</code> = 10 minutes\n"
+                "• <code>1800</code> = 30 minutes"
+            ),
+            reply_markup=InlineKeyboardMarkup([[_back_btn("admin_filter_poster"), _close_btn()]]),
+        )
+        return
+
+    if data == "fp_set_linkexpiry":
+        if not is_admin:
+            return
+        cur_exp = get_setting("link_expiry_override", str(LINK_EXPIRY_MINUTES))
+        user_states[uid] = "AWAITING_LINK_EXPIRY_FP"
+        await safe_edit_text(
+            query,
+            b("LINK EXPIRY MINUTES") + "\n\n"
+            + bq(
+                f"<b>Current:</b> {cur_exp} min\n\n"
+                "Send minutes the join link stays valid:\n"
+                "• <code>0</code> = permanent (no expiry)\n"
+                "• <code>5</code> = 5 minutes (default)\n"
+                "• <code>60</code> = 1 hour"
+            ),
+            reply_markup=InlineKeyboardMarkup([[_back_btn("admin_filter_poster"), _close_btn()]]),
+        )
+        return
+
+    if data == "fp_view_cache":
+        if not is_admin:
+            return
+        count = _get_cache_count() if _FILTER_POSTER_AVAILABLE else 0
+        await safe_answer(query, f"📦 {count} posters cached")
+        return
+
+    if data == "fp_clear_cache":
+        if not is_admin:
+            return
+        if _FILTER_POSTER_AVAILABLE:
+            cleared = _clear_poster_cache()
+            await safe_answer(query, f"🗑 Cleared {cleared} cached posters")
+            await safe_edit_text(
+                query,
+                get_filter_poster_settings_text(chat_id),
+                reply_markup=build_filter_poster_settings_keyboard(chat_id),
+            )
+        return
+
+    if data == "fp_channel_info":
+        if not is_admin:
+            return
+        from filter_poster import POSTER_DB_CHANNEL as _PDC
+        if _PDC:
+            await safe_answer(query, f"Poster DB Channel: {_PDC}")
+        else:
+            await safe_answer(query, "Set POSTER_DB_CHANNEL in env to enable poster saving")
+        return
+
+
+
     if data == "fp_view_cache":
         if not is_admin:
             return
@@ -8843,6 +9023,86 @@ async def handle_admin_message(
                 reply_markup=InlineKeyboardMarkup([[_back_btn("admin_env_panel"), _close_btn()]]),
             )
         return
+
+
+    if isinstance(state, str) and state.startswith("AWAITING_WM_LAYER_"):
+        parts_s = state.split("_")
+        layer   = parts_s[3].lower()
+        try:
+            fp_cid = int(parts_s[4])
+        except Exception:
+            fp_cid = uid
+        user_states.pop(uid, None)
+        from filter_poster import get_wm_layer, set_wm_layer
+        sticker = update.message.sticker if update.message else None
+        if layer == "c" and sticker:
+            ldata = get_wm_layer(fp_cid, "c")
+            ldata["file_id"] = sticker.file_id
+            ldata["enabled"] = True
+            set_wm_layer(fp_cid, "c", ldata)
+            await safe_send_message(context.bot, chat_id,
+                b("✔️ Sticker set as Layer C watermark!"),
+                reply_markup=InlineKeyboardMarkup([[_back_btn("admin_filter_poster"), _close_btn()]]))
+        elif layer == "c":
+            raw_parts = [p.strip() for p in text.split("|")]
+            ldata = get_wm_layer(fp_cid, "c")
+            if raw_parts[0].startswith("http"):
+                ldata["url"] = raw_parts[0]
+                ldata["file_id"] = ""
+            if len(raw_parts) > 1: ldata["position"] = raw_parts[1]
+            if len(raw_parts) > 2:
+                try: ldata["scale"] = float(raw_parts[2])
+                except: pass
+            if len(raw_parts) > 3:
+                try: ldata["opacity"] = int(raw_parts[3])
+                except: pass
+            ldata["enabled"] = True
+            set_wm_layer(fp_cid, "c", ldata)
+            await safe_send_message(context.bot, chat_id, b("✔️ Layer C image watermark set!"),
+                reply_markup=InlineKeyboardMarkup([[_back_btn("admin_filter_poster"), _close_btn()]]))
+        else:
+            raw_parts = [p.strip() for p in text.split("|")]
+            ldata = get_wm_layer(fp_cid, layer)
+            if raw_parts: ldata["text"] = raw_parts[0]
+            if len(raw_parts) > 1: ldata["position"] = raw_parts[1]
+            if len(raw_parts) > 2:
+                try: ldata["font_size"] = int(raw_parts[2])
+                except: pass
+            if len(raw_parts) > 3: ldata["color"] = raw_parts[3]
+            if len(raw_parts) > 4:
+                try: ldata["opacity"] = int(raw_parts[4])
+                except: pass
+            ldata["enabled"] = True
+            set_wm_layer(fp_cid, layer, ldata)
+            await safe_send_message(context.bot, chat_id,
+                b(f"✔️ Layer {layer.upper()}: {e(ldata.get('text',''))} @ {e(ldata.get('position',''))}"),
+                reply_markup=InlineKeyboardMarkup([[_back_btn("admin_filter_poster"), _close_btn()]]))
+        return
+
+    if state == "AWAITING_FILTER_AUTODEL":
+        user_states.pop(uid, None)
+        try:
+            secs = max(0, int(text.strip()))
+            set_setting(f"filter_auto_delete_{chat_id}", str(secs))
+            await safe_send_message(context.bot, chat_id,
+                b(f"✔️ Auto-delete set to {secs}s ({secs // 60} min)."),
+                reply_markup=InlineKeyboardMarkup([[_back_btn("admin_filter_poster"), _close_btn()]]))
+        except ValueError:
+            await safe_send_message(context.bot, chat_id, b("❗ Send a number in seconds."))
+        return
+
+    if state == "AWAITING_LINK_EXPIRY_FP":
+        user_states.pop(uid, None)
+        try:
+            mins = max(0, int(text.strip()))
+            set_setting("link_expiry_override", str(mins))
+            await safe_send_message(context.bot, chat_id,
+                b(f"✔️ Link expiry set to {mins} minutes."),
+                reply_markup=InlineKeyboardMarkup([[_back_btn("admin_filter_poster"), _close_btn()]]))
+        except ValueError:
+            await safe_send_message(context.bot, chat_id, b("❗ Send a number in minutes."))
+        return
+
 
     if isinstance(state, str) and state.startswith("AWAITING_WATERMARK_"):
         cat = state[len("AWAITING_WATERMARK_"):].lower()
