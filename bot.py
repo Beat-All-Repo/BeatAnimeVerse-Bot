@@ -7163,7 +7163,7 @@ async def button_handler(
                 reply_markup=InlineKeyboardMarkup([
                     [bold_button("Normal", callback_data=f"cat_font_set_{cat_name}_normal"),
                      bold_button("Small Caps", callback_data=f"cat_font_set_{cat_name}_smallcaps")],
-                    [_back_btn(, callback_data=f"admin_category_settings_{cat_name}")],
+                    [_back_btn("admin_category_settings"), _close_btn()],
                 ]),
             )
             return
@@ -7218,7 +7218,7 @@ async def button_handler(
                     row = []
             if row:
                 keyboard.append(row)
-            keyboard.append([_back_btn(, callback_data=f"admin_category_settings_{cat_name}")])
+            keyboard.append([_back_btn("admin_category_settings"), _close_btn()])
             await safe_edit_text(
                 query, b(f"Select watermark position for {e(cat_name)}:"),
                 reply_markup=InlineKeyboardMarkup(keyboard),
@@ -7269,7 +7269,7 @@ async def button_handler(
                  for pos in positions[:3]],
                 [bold_button(pos.title(), callback_data=f"cat_logo_pos_set_{cat_name}_{pos}")
                  for pos in positions[3:]],
-                [_back_btn(, callback_data=f"admin_category_settings_{cat_name}")],
+                [_back_btn("admin_category_settings"), _close_btn()],
             ]
             await safe_edit_text(
                 query, b(f"Select logo position for {e(cat_name)}:"),
