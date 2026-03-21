@@ -77,9 +77,27 @@ class _StubClient:
     def on_callback_query(self, *a, **kw):
         def decorator(func): return func
         return decorator
+    def add_event_handler(self, *a, **kw): pass   # Fix: purge module
+    def add_handler(self, *a, **kw): pass          # Fix: various modules
+    async def iter_chat_members(self, *a, **kw): return iter([])
 
 pbot = _StubClient()
 telethn = _StubClient()
+
+# ── Missing API keys expected by some modules ──────────────────────────────────
+CASH_API_KEY: str = os.getenv("CASH_API_KEY", "")
+TIME_API_KEY: str = os.getenv("TIME_API_KEY", "")
+
+# ── CustomCommandHandler (used by cleaner module) ─────────────────────────────
+try:
+    from telegram.ext import CommandHandler as _BaseCommandHandler
+    class CustomCommandHandler(_BaseCommandHandler):
+        """PTB v13 CustomCommandHandler compat stub."""
+        def __init__(self, *args, **kwargs):
+            kwargs.pop('run_async', None)
+            super().__init__(*args, **kwargs)
+except Exception:
+    CustomCommandHandler = None
 
 # ── Telegram dispatcher (set by bot.py after startup) ─────────────────────────
 dispatcher = None
