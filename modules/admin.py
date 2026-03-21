@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/admin.py
+# ACTION: Replace existing file
+# ====================================================================
 from typing import Optional
 import html
 import os
@@ -5,7 +9,10 @@ import os
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ParseMode, Update
 from telegram.error import BadRequest
 from telegram.ext import CallbackContext, CommandHandler
-from telegram.utils.helpers import mention_html
+try:
+    from telegram.utils.helpers import mention_html
+except ImportError:
+    from telegram.helpers import mention_html
 
 from beataniversebot_compat import DRAGONS, dispatcher
 from modules.disable import DisableAbleCommandHandler
