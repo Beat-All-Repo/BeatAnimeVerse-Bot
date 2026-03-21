@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/health.py
+# ACTION: Replace existing file
+# ====================================================================
 """
 health.py — Tiny HTTP health-check server for Render free tier
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
