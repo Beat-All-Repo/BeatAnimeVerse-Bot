@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/anime.py
+# ACTION: Replace existing file
+# ====================================================================
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -11,38 +15,83 @@ from telegram.ext import ContextTypes, CommandHandler
 
 logger = logging.getLogger(__name__)
 _AL_URL = "https://graphql.anilist.co"
-_ABBR = {"aot":"attack on titan","snk":"attack on titan","bnha":"my hero academia",
-         "mha":"my hero academia","hxh":"hunter x hunter","jjk":"jujutsu kaisen",
-         "csm":"chainsaw man","op":"one piece","fma":"fullmetal alchemist"}
+_ABBR = {
+    "aot":"attack on titan", "snk":"attack on titan",
+    "bnha":"my hero academia", "mha":"my hero academia",
+    "hxh":"hunter x hunter", "jjk":"jujutsu kaisen",
+    "csm":"chainsaw man", "op":"one piece",
+    "fma":"fullmetal alchemist", "fmab":"Fullmetal Alchemist: Brotherhood",
+    "demon slayer":"Kimetsu no Yaiba",
+    "kny":"Kimetsu no Yaiba", "ds":"Kimetsu no Yaiba",
+    "demon slayer swordsmith":"Kimetsu no Yaiba: Katanakaji no Sato-hen",
+    "re zero":"Re:Zero kara Hajimeru Isekai Seikatsu",
+    "rezero":"Re:Zero kara Hajimeru Isekai Seikatsu",
+    "slime":"Tensei shitara Slime Datta Ken",
+    "tensura":"Tensei shitara Slime Datta Ken",
+    "shield hero":"Tate no Yuusha no Nariagari",
+    "sao":"Sword Art Online",
+    "dbs":"dragon ball super", "dbz":"dragon ball z",
+    "frieren":"Sousou no Frieren",
+    "spy family":"Spy x Family",
+    "blue lock":"Blue Lock",
+    "oshi no ko":"Oshi no Ko",
+    "classroom of elite":"Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e",
+    "cote":"Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e",
+    "eminence in shadow":"Kage no Jitsuryokusha ni Naritakute!",
+    "konosuba":"Kono Subarashii Sekai ni Shukufuku wo!",
+    "danmachi":"Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka",
+    "overlord":"Overlord",
+}
 
-_ANIME_GQL = """query($s:String){Media(search:$s,type:ANIME){
+_ANIME_GQL = """query($s:String){Media(search:$s,type:ANIME,sort:[SEARCH_MATCH,POPULARITY_DESC]){
   id siteUrl title{romaji english native} description(asHtml:false)
   coverImage{extraLarge large} bannerImage format status season seasonYear
   episodes duration averageScore genres studios(isMain:true){nodes{name}}
   nextAiringEpisode{episode timeUntilAiring}}}"""
 
-_MANGA_GQL = """query($s:String){Media(search:$s,type:MANGA){
+_MANGA_GQL = """query($s:String){Media(search:$s,type:MANGA,sort:[SEARCH_MATCH,POPULARITY_DESC]){
   id siteUrl title{romaji english native} description(asHtml:false)
   coverImage{extraLarge large} format status chapters volumes averageScore genres}}"""
 
 _CHAR_GQL = """query($s:String){Character(search:$s){
   name{full native} description siteUrl image{large}}}"""
 
-_AIRING_GQL = """query($s:String){Media(search:$s,type:ANIME){
+_AIRING_GQL = """query($s:String){Media(search:$s,type:ANIME,sort:[SEARCH_MATCH,POPULARITY_DESC]){
   id title{romaji english native} episodes status
   nextAiringEpisode{episode timeUntilAiring}}}"""
 
 
 def _al(gql, search):
-    q = _ABBR.get(search.lower().strip(), search)
-    try:
-        r = requests.post(_AL_URL, json={"query": gql, "variables": {"s": q}},
-                          headers={"Content-Type":"application/json"}, timeout=12)
-        if r.status_code == 200:
-            d = r.json().get("data", {})
-            return d.get("Media") or d.get("Character")
-    except Exception as e:
-        logger.debug(f"AniList: {e}")
+    """Smart AniList search — uses mapped query first, falls back to original."""
+    search_clean = search.strip()
+    q_mapped = _ABBR.get(search_clean.lower(), search_clean)
+    queries = [q_mapped]
+    if q_mapped.lower() != search_clean.lower():
+        queries.append(search_clean)
+    if search_clean != search_clean.title():
+        queries.append(search_clean.title())
+
+    for q in queries:
+        try:
+            r = requests.post(_AL_URL, json={"query": gql, "variables": {"s": q}},
+                              headers={"Content-Type":"application/json"}, timeout=12)
+            if r.status_code == 200:
+                d = r.json().get("data", {})
+                result = d.get("Media") or d.get("Character")
+                if result:
+                    # Sanity check for multi-word searches
+                    if isinstance(result, dict) and "title" in result:
+                        titles = result.get("title") or {}
+                        res_text = " ".join([
+                            titles.get("english","") or "",
+                            titles.get("romaji","") or "",
+                        ]).lower()
+                        words = [w for w in search_clean.lower().split() if len(w) > 3]
+                        if words and not any(w in res_text for w in words):
+                            continue
+                    return result
+        except Exception as e:
+            logger.debug(f"AniList: {e}")
     return None
 
 
