@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/blacklist.py
+# ACTION: Replace existing file
+# ====================================================================
 import html
 import re
 
