@@ -35,7 +35,7 @@ opencv-python-headless==4.10.0.84
 
 # ── Translation ───────────────────────────────────────────────────────────────
 gpytranslate==2.0.0
-googletrans==4.0.0-rc1
+googletrans==4.0.2
 
 # ── Media / file utilities ────────────────────────────────────────────────────
 hachoir==3.3.0
