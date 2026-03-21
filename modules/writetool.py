@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/writetool.py
+# ACTION: Replace existing file
+# ====================================================================
 import requests
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ParseMode, Update
 from telegram.ext import CallbackContext
