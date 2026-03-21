@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/global_bans.py
+# ACTION: Replace existing file
+# ====================================================================
 from typing import Optional
 import html
 import time
