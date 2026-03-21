@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/welcome.py
+# ACTION: Replace existing file
+# ====================================================================
 from typing import Optional
 import html
 import random
@@ -23,7 +27,10 @@ from telegram.ext import (
 )
 from telegram.utils.helpers import escape_markdown, mention_html, mention_markdown
 
-import BeatVerseProbot
+try:
+    import BeatVerseProbot
+except ImportError:
+    BeatVerseProbot = None
 import modules.sql.welcome_sql as sql
 from beataniversebot_compat import (
     DEMONS,
