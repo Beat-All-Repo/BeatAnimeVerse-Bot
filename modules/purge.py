@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/purge.py
+# ACTION: Replace existing file
+# ====================================================================
 import time
 
 from telethon import events
