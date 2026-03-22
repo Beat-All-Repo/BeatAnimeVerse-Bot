@@ -199,6 +199,9 @@ class _FiltersCompat:
     contact          = _filters_module.CONTACT
     location         = _filters_module.LOCATION
     venue            = _filters_module.VENUE
+    game             = _filters_module.GAME
+    dice             = _filters_module.Dice.ALL
+    poll             = _filters_module.POLL
     animation        = _filters_module.ANIMATION
     caption          = _filters_module.CAPTION
     all              = _filters_module.ALL
