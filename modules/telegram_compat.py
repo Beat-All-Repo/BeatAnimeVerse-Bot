@@ -128,8 +128,17 @@ except ImportError:
 
 try:
     import search_engine_parser  # noqa
+    if not hasattr(search_engine_parser, 'GoogleSearch'):
+        class _GS:
+            def __init__(self, *a, **k): pass
+            def search(self, *a, **k): return []
+        search_engine_parser.GoogleSearch = _GS
 except ImportError:
-    _stub_module("search_engine_parser")
+    _gs_stub = _stub_module("search_engine_parser")
+    class _GS:
+        def __init__(self, *a, **k): pass
+        def search(self, *a, **k): return []
+    _gs_stub.GoogleSearch = _GS
     _stub_module("search_engine_parser.base")
     logger.info("[telegram_compat] search_engine_parser stubbed")
 
@@ -201,7 +210,8 @@ class _FiltersCompat:
     user             = _filters_module.User
     chat             = _filters_module.Chat
     language         = _filters_module.Language
-    status_update    = _filters_module.StatusUpdate
+    status_update    = _filters_module.StatusUpdate.ALL   # instance, not class — supports ~ operator
+    caption_entity   = _filters_module.CaptionEntity      # needed by locks.py
     new_chat_members = _filters_module.StatusUpdate.NEW_CHAT_MEMBERS
     left_chat_member = _filters_module.StatusUpdate.LEFT_CHAT_MEMBER
     regex            = _filters_module.Regex
@@ -353,6 +363,7 @@ _EXT_INJECT = {
     'CustomCommandHandler': CustomCommandHandler,
     'CustomRegexHandler': CustomRegexHandler,
     'CustomMessageHandler': CustomMessageHandler,
+    'MessageFilter': _filters_module.MessageFilter,   # v21 moved this — re-expose it here
 }
 for _k, _v in _EXT_INJECT.items():
     if not hasattr(_tge, _k):
