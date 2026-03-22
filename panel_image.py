@@ -1,62 +1,45 @@
-# ====================================================================
+# ==============================================================================
 # PLACE AT: /app/panel_image.py
 # ACTION: Replace existing file
-# ====================================================================
+# ==============================================================================
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 BeatAniVerse Bot — Panel Image System
-=======================================
-Fetches 4K SFW anime wallpapers from multiple APIs.
-Used as background images for all admin panels.
+========================================
+Priority order (toggleable from admin panel):
+  SOURCE A: URL list  — PANEL_PICS env OR custom URLs saved in DB
+  SOURCE B: APIs      — waifu.im → nekos.best → anilist → safone → tmdb → static
 
-APIs (in priority order, with fallback):
-  1. Waifu.im         — https://api.waifu.im/search  (SFW, high quality)
-  2. Nekos.best       — https://nekos.best/api/v2/    (SFW, curated)
-  3. Pic.re           — https://pic.re/image           (SFW anime)
-  4. AnimePics.io     — CORS-safe endpoint             (HD anime)
-  5. AniAPI (TMDB backdrop fallback)                   (anime title stills)
-  6. Static fallback URLs (always works)
+Admin can toggle PRIMARY source between URL and API via:
+  Admin Panel → SETTINGS → 🖼 PANEL IMAGE SOURCE
 
-Image format: landscape / YouTube-thumbnail ratio (1280×720 approx.)
-All images: SFW, anime style, modern aesthetic.
-
-Credits: BeatAnime | @BeatAnime | @Beat_Anime_Discussion
+Results cached 30 min. First load always instant (pre-warmed with static).
 """
 
-import os
-import time
-import random
-import logging
-import hashlib
-from typing import Optional, List, Dict, Any
+import os, time, random, logging, asyncio
+import concurrent.futures
+from typing import Optional, Dict, Any
 
 import requests
 
 logger = logging.getLogger(__name__)
 
-# ── PANEL_PICS env: comma-separated URLs used as panel backgrounds ─────────────
-# Example: PANEL_PICS=https://i.imgur.com/abc.jpg,https://i.imgur.com/xyz.jpg
+# ── PANEL_PICS env (always instant, no API) ────────────────────────────────────
 _PANEL_PICS_ENV: list = [
     u.strip() for u in os.getenv("PANEL_PICS", "").split(",")
     if u.strip().startswith("http")
 ]
 
-# ── API keys from env ──────────────────────────────────────────────────────────
 WALL_API_KEY: str = os.getenv("WALL_API_KEY", "")
 TMDB_API_KEY: str = os.getenv("TMDB_API_KEY", "")
 
-# ── Image cache (url → ts) — avoid re-fetching same url repeatedly ───────────
-_img_cache: Dict[str, str] = {}   # panel_type → last_url
-_cache_ts:  Dict[str, float] = {}
-_CACHE_TTL  = 1800  # 30 minutes per panel type
+_CACHE_TTL = 1800   # 30 min
 
-# ── Static fallback images (guaranteed to work) ───────────────────────────────
+_img_cache: Dict[str, str]   = {}
+_cache_ts:  Dict[str, float] = {}
+
+# ── Static fallbacks — always work, pre-warm cache ────────────────────────────
 _STATIC_FALLBACKS = [
-    "https://images.alphacoders.com/133/thumb-1920-1330574.jpg",
-    "https://images.alphacoders.com/133/thumb-1920-1330590.jpg",
-    "https://images.alphacoders.com/130/thumb-1920-1301234.jpg",
-    "https://images.alphacoders.com/131/thumb-1920-1315677.jpg",
     "https://i.imgur.com/WdTdHhv.jpeg",
     "https://i.imgur.com/YeQjKJh.jpeg",
     "https://i.imgur.com/V8gkYXC.jpeg",
@@ -64,9 +47,11 @@ _STATIC_FALLBACKS = [
     "https://cdn.myanimelist.net/images/anime/1988/119092.jpg",
     "https://cdn.myanimelist.net/images/anime/1223/121781.jpg",
     "https://cdn.myanimelist.net/images/anime/1170/124216.jpg",
+    "https://images.alphacoders.com/133/thumb-1920-1330574.jpg",
+    "https://images.alphacoders.com/133/thumb-1920-1330590.jpg",
+    "https://images.alphacoders.com/130/thumb-1920-1301234.jpg",
 ]
 
-# ── Tags per panel type for varied images ────────────────────────────────────
 _PANEL_TAGS = {
     "admin":       ["maid", "elf"],
     "stats":       ["oppai", "uniform"],
@@ -85,25 +70,43 @@ _PANEL_TAGS = {
     "default":     ["waifu", "maid", "elf", "uniform"],
 }
 
-# ── Pre-warm cache with static images — first panel load is INSTANT ───────────
-# Background APIs will refresh these after TTL expires (30 min)
-import random as _rand
-for _panel_key in list(_PANEL_TAGS.keys()) + ["default", "admin", "channels", "users", "broadcast", "upload", "flags", "style", "poster", "clones"]:
-    if _panel_key not in _img_cache:
-        _img_cache[_panel_key] = _rand.choice(_STATIC_FALLBACKS)
-        _cache_ts[_panel_key] = 0  # Expired so first real call refreshes from API
+# Pre-warm with statics so first load is always instant
+for _pk in list(_PANEL_TAGS.keys()) + ["default"]:
+    if _pk not in _img_cache:
+        _img_cache[_pk] = random.choice(_STATIC_FALLBACKS)
+        _cache_ts[_pk]  = 0.0   # expired → will refresh on next non-blocking call
 
-# ── Waifu categories that are always SFW ─────────────────────────────────────
-_WAIFU_IM_TAGS = [
-    "maid", "waifu", "elf", "oppai", "school",
-    "uniform", "raiden-shogun", "kamisato-ayaka",
-    "marin-kitagawa", "holo",
-]
+# ── DB helpers (read primary source setting) ──────────────────────────────────
+def _get_primary_source() -> str:
+    """
+    Returns 'url' or 'api'.
+    Reads from DB setting 'panel_image_source'. Default = 'url'.
+    """
+    try:
+        from database_dual import get_setting
+        return get_setting("panel_image_source", "url") or "url"
+    except Exception:
+        return "url"
 
+def _get_custom_urls() -> list:
+    """
+    Returns list of custom URLs saved via admin panel (panel_image_urls setting).
+    Falls back to PANEL_PICS env.
+    """
+    try:
+        from database_dual import get_setting
+        import json as _j
+        raw = get_setting("panel_image_urls", "")
+        if raw:
+            urls = _j.loads(raw)
+            if isinstance(urls, list) and urls:
+                return urls
+    except Exception:
+        pass
+    return _PANEL_PICS_ENV
 
 def _now() -> float:
     return time.time()
-
 
 def _is_cached(panel: str) -> bool:
     return (
@@ -112,129 +115,53 @@ def _is_cached(panel: str) -> bool:
         (_now() - _cache_ts[panel]) < _CACHE_TTL
     )
 
-
 def _set_cache(panel: str, url: str) -> None:
     _img_cache[panel] = url
-    _cache_ts[panel] = _now()
+    _cache_ts[panel]  = _now()
 
 
-# ── API 1: waifu.im ────────────────────────────────────────────────────────────
+# ── API fetchers ──────────────────────────────────────────────────────────────
 def _fetch_waifu_im(panel: str) -> Optional[str]:
     tags = _PANEL_TAGS.get(panel, _PANEL_TAGS["default"])
     tag  = random.choice(tags)
     try:
         r = requests.get(
             "https://api.waifu.im/search",
-            params={
-                "included_tags": tag,
-                "is_nsfw": "false",
-                "many": "true",
-                "limit": "10",
-            },
-            timeout=5,
-            headers={"Accept": "application/json"},
+            params={"included_tags": tag, "is_nsfw": "false", "many": "true", "limit": "10"},
+            timeout=5, headers={"Accept": "application/json"},
         )
         if r.status_code == 200:
-            data = r.json()
-            images = data.get("images", [])
+            images = r.json().get("images", [])
             if images:
-                # Pick one with width >= 1280 if possible
                 hd = [i for i in images if i.get("width", 0) >= 1280]
-                chosen = random.choice(hd if hd else images)
-                return chosen.get("url")
+                return random.choice(hd if hd else images).get("url")
     except Exception as exc:
-        logger.debug(f"waifu.im error: {exc}")
+        logger.debug(f"waifu.im: {exc}")
     return None
 
-
-# ── API 2: nekos.best ─────────────────────────────────────────────────────────
 _NEKOS_ENDPOINTS = ["waifu", "neko", "kitsune", "shinobu", "megumin",
                     "zero_two", "aqua", "rem", "mai"]
 
 def _fetch_nekos_best(panel: str) -> Optional[str]:
-    endpoint = random.choice(_NEKOS_ENDPOINTS)
     try:
         r = requests.get(
-            f"https://nekos.best/api/v2/{endpoint}",
-            params={"amount": "5"},
-            timeout=5,
+            f"https://nekos.best/api/v2/{random.choice(_NEKOS_ENDPOINTS)}",
+            params={"amount": "5"}, timeout=5,
         )
         if r.status_code == 200:
-            data = r.json()
-            results = data.get("results", [])
+            results = r.json().get("results", [])
             if results:
-                chosen = random.choice(results)
-                url = chosen.get("url", "")
-                # nekos.best returns .png/.jpg SFW images
+                url = random.choice(results).get("url", "")
                 if url.endswith((".jpg", ".jpeg", ".png", ".webp")):
                     return url
     except Exception as exc:
-        logger.debug(f"nekos.best error: {exc}")
+        logger.debug(f"nekos.best: {exc}")
     return None
 
-
-# ── API 3: pic.re ─────────────────────────────────────────────────────────────
-def _fetch_pic_re() -> Optional[str]:
-    try:
-        r = requests.get(
-            "https://pic.re/image",
-            params={"type": "sfw"},
-            timeout=5,
-            allow_redirects=False,
-        )
-        # pic.re returns 302 redirect to image URL
-        if r.status_code in (200, 302):
-            url = r.headers.get("Location") or r.url
-            if url and url.startswith("http") and "pic.re" not in url:
-                return url
-            # If 200, try parsing JSON
-            if r.status_code == 200:
-                try:
-                    d = r.json()
-                    return d.get("url") or d.get("image_url")
-                except Exception:
-                    pass
-    except Exception as exc:
-        logger.debug(f"pic.re error: {exc}")
-    return None
-
-
-# ── API 4: Safone API (anime wallpaper) ───────────────────────────────────────
-_ANIME_QUERIES = [
-    "anime landscape", "anime city night", "anime scenery",
-    "anime 4k wallpaper", "anime fantasy", "anime sky",
-    "anime village", "anime ocean", "anime sakura",
-    "attack on titan scenery", "demon slayer scenery",
-    "ghibli wallpaper", "anime rain", "anime sunset",
-]
-
-def _fetch_safone_wall() -> Optional[str]:
-    query = random.choice(_ANIME_QUERIES)
-    try:
-        r = requests.get(
-            "https://api.safone.me/wall",
-            params={"query": query, "type": "sfw"},
-            timeout=5,
-        )
-        if r.status_code == 200:
-            data = r.json()
-            results = data.get("results", [])
-            if results:
-                chosen = random.choice(results[:5])
-                return chosen.get("imageUrl") or chosen.get("url")
-    except Exception as exc:
-        logger.debug(f"safone wall error: {exc}")
-    return None
-
-
-# ── API 5: AniList cover images for anime (high quality) ─────────────────────
 _ANILIST_POPULAR = [
-    "Demon Slayer", "Attack on Titan", "Jujutsu Kaisen",
-    "Chainsaw Man", "One Piece", "Naruto Shippuden",
-    "Sword Art Online", "Re:Zero", "That Time I Got Reincarnated",
-    "My Hero Academia", "Violet Evergarden", "Your Lie in April",
-    "A Silent Voice", "Weathering with You", "Spirited Away",
-    "Princess Mononoke", "Made in Abyss", "Frieren", "Blue Lock",
+    "Demon Slayer", "Attack on Titan", "Jujutsu Kaisen", "Chainsaw Man",
+    "One Piece", "Frieren", "Violet Evergarden", "Your Lie in April",
+    "Made in Abyss", "Blue Lock", "Spy x Family", "Oshi no Ko",
 ]
 
 def _fetch_anilist_banner() -> Optional[str]:
@@ -246,141 +173,161 @@ def _fetch_anilist_banner() -> Optional[str]:
                 "query": "query($s:String){Media(search:$s,type:ANIME){bannerImage coverImage{extraLarge}}}",
                 "variables": {"s": title},
             },
-            headers={"Content-Type": "application/json"},
-            timeout=5,
+            headers={"Content-Type": "application/json"}, timeout=5,
         )
         if r.status_code == 200:
             data = r.json().get("data", {}).get("Media", {})
-            url = data.get("bannerImage") or \
-                  (data.get("coverImage") or {}).get("extraLarge")
-            if url:
-                return url
+            return data.get("bannerImage") or (data.get("coverImage") or {}).get("extraLarge")
     except Exception as exc:
-        logger.debug(f"anilist banner error: {exc}")
+        logger.debug(f"anilist: {exc}")
     return None
 
-
-# ── API 6: TMDB backdrop (movie/show backdrops — cinematic) ──────────────────
-_TMDB_ANIME_IDS = [
-    # Popular anime movie IDs
-    "14160",  # Spirited Away
-    "8392",   # Princess Mononoke
-    "149870", # Your Name
-    "378064", # A Silent Voice
-    "431580", # Akira
-    "15120",  # Howl's Moving Castle
-    "527774", # Violet Evergarden movie
+_ANIME_QUERIES = [
+    "anime landscape", "anime city night", "anime scenery",
+    "demon slayer scenery", "ghibli wallpaper", "anime sunset",
 ]
+
+def _fetch_safone_wall() -> Optional[str]:
+    try:
+        r = requests.get(
+            "https://api.safone.me/wall",
+            params={"query": random.choice(_ANIME_QUERIES)}, timeout=5,
+        )
+        if r.status_code == 200:
+            results = r.json().get("results", [])
+            if results:
+                chosen = random.choice(results[:5])
+                return chosen.get("imageUrl") or chosen.get("url")
+    except Exception as exc:
+        logger.debug(f"safone: {exc}")
+    return None
 
 def _fetch_tmdb_backdrop() -> Optional[str]:
     if not TMDB_API_KEY:
         return None
-    movie_id = random.choice(_TMDB_ANIME_IDS)
+    ids = ["14160", "8392", "149870", "378064", "431580", "15120", "527774"]
     try:
         r = requests.get(
-            f"https://api.themoviedb.org/3/movie/{movie_id}/images",
-            params={"api_key": TMDB_API_KEY},
-            timeout=5,
+            f"https://api.themoviedb.org/3/movie/{random.choice(ids)}/images",
+            params={"api_key": TMDB_API_KEY}, timeout=5,
         )
         if r.status_code == 200:
-            data = r.json()
-            backdrops = data.get("backdrops", [])
+            backdrops = r.json().get("backdrops", [])
             if backdrops:
-                # Pick widest backdrop
                 best = max(backdrops, key=lambda x: x.get("width", 0))
                 path = best.get("file_path", "")
                 if path:
                     return f"https://image.tmdb.org/t/p/original{path}"
     except Exception as exc:
-        logger.debug(f"tmdb backdrop error: {exc}")
+        logger.debug(f"tmdb: {exc}")
+    return None
+
+def _fetch_pic_re() -> Optional[str]:
+    try:
+        r = requests.get("https://pic.re/image", params={"type": "sfw"},
+                         timeout=5, allow_redirects=False)
+        if r.status_code in (200, 302):
+            url = r.headers.get("Location") or r.url
+            if url and url.startswith("http") and "pic.re" not in url:
+                return url
+    except Exception as exc:
+        logger.debug(f"pic.re: {exc}")
     return None
 
 
-# ── Main fetcher with full fallback chain ─────────────────────────────────────
+# ── URL-first fetch ───────────────────────────────────────────────────────────
+def _fetch_from_urls() -> Optional[str]:
+    """Pick from custom URL list (DB or env). Instant."""
+    urls = _get_custom_urls()
+    if urls:
+        return random.choice(urls)
+    return None
 
-def get_panel_image(panel: str = "default", force_refresh: bool = False) -> Optional[str]:
-    """
-    Get a SFW anime image URL for a panel background.
-    Priority:
-      1. PANEL_PICS env variable (comma-separated URLs) — random pick, instant
-      2. Parallel API fetch (waifu.im + anilist)
-      3. Static fallback (always works)
-    Results cached 30 minutes per panel type.
-    """
-    # PANEL_PICS env takes top priority — instant, no API needed
-    if _PANEL_PICS_ENV:
-        url = random.choice(_PANEL_PICS_ENV)
-        _set_cache(panel, url)
-        return url
-
-    if not force_refresh and _is_cached(panel):
-        return _img_cache[panel]
-
-    import concurrent.futures
-
-    # Run waifu.im + anilist in parallel — take the first one that succeeds
+# ── API fetch (parallel, capped at 5s) ───────────────────────────────────────
+def _fetch_from_apis(panel: str) -> Optional[str]:
+    """Run multiple API fetchers in parallel, return first success."""
     fetchers = [
         ("waifu.im",  lambda: _fetch_waifu_im(panel)),
         ("anilist",   _fetch_anilist_banner),
-        ("nekos",     _fetch_nekos_best if __import__('random').random() > 0.4 else lambda: None),
+        ("nekos",     lambda: _fetch_nekos_best(panel)),
+        ("safone",    _fetch_safone_wall),
+        ("pic.re",    _fetch_pic_re),
+        ("tmdb",      _fetch_tmdb_backdrop),
     ]
-
-    result_url: Optional[str] = None
-
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as ex:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
             futs = {ex.submit(fn): name for name, fn in fetchers}
             for fut in concurrent.futures.as_completed(futs, timeout=5):
                 try:
                     url = fut.result()
                     if url and url.startswith("http"):
-                        result_url = url
-                        logger.debug(f"Panel image [{panel}] from {futs[fut]}: {url[:60]}")
-                        break
+                        logger.debug(f"Panel image from {futs[fut]}: {url[:60]}")
+                        return url
                 except Exception:
                     pass
     except concurrent.futures.TimeoutError:
-        logger.debug(f"Panel image [{panel}] timed out — using static fallback")
+        logger.debug("API fetch timed out")
     except Exception as exc:
-        logger.debug(f"Panel image error: {exc}")
+        logger.debug(f"API fetch error: {exc}")
+    return None
 
-    if not result_url:
-        result_url = random.choice(_STATIC_FALLBACKS)
-        logger.debug(f"Panel image [{panel}] static fallback")
 
-    _set_cache(panel, result_url)
-    return result_url
+# ── Main fetch function ───────────────────────────────────────────────────────
+def get_panel_image(panel: str = "default", force_refresh: bool = False) -> Optional[str]:
+    """
+    Fetch panel image respecting primary source toggle.
 
+    primary = 'url':
+      1. Custom URLs / PANEL_PICS env  → instant
+      2. APIs if URLs empty            → parallel with timeout
+      3. Static fallback
+
+    primary = 'api':
+      1. APIs first                    → parallel with timeout
+      2. Custom URLs / PANEL_PICS env  → fallback
+      3. Static fallback
+    """
+    if not force_refresh and _is_cached(panel):
+        return _img_cache[panel]
+
+    primary = _get_primary_source()
+
+    if primary == "url":
+        url = _fetch_from_urls()
+        if not url:
+            url = _fetch_from_apis(panel)
+    else:  # 'api'
+        url = _fetch_from_apis(panel)
+        if not url:
+            url = _fetch_from_urls()
+
+    if not url:
+        url = random.choice(_STATIC_FALLBACKS)
+        logger.debug(f"Panel [{panel}] static fallback")
+
+    _set_cache(panel, url)
+    return url
 
 def get_panel_image_sync(panel: str = "default") -> Optional[str]:
-    """Synchronous wrapper — same as get_panel_image."""
     return get_panel_image(panel)
-
 
 async def get_panel_image_async(panel: str = "default") -> Optional[str]:
     """
-    Async wrapper — INSTANT return using cache, refreshes in background.
-    First call returns static fallback immediately (pre-warmed).
-    Subsequent calls get fresh API images after cache TTL expires.
+    Async wrapper.
+    Returns cached value INSTANTLY. Refreshes stale cache in background.
+    First call always instant (pre-warmed with static fallbacks).
     """
-    import asyncio
-
-    # Return cached value immediately (even if expired) for instant panel load
     cached = _img_cache.get(panel)
     if cached:
-        # If cache is stale, refresh in background without blocking
         if not _is_cached(panel):
+            # Background refresh — never blocks caller
             loop = asyncio.get_event_loop()
-            loop.run_in_executor(None, get_panel_image, panel)
+            loop.run_in_executor(None, get_panel_image, panel, True)
         return cached
-
-    # No cache at all — fetch synchronously (only happens if pre-warm missed)
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, get_panel_image, panel)
 
-
 def clear_image_cache(panel: str = None) -> int:
-    """Clear image cache. If panel is None, clears all."""
     count = 0
     if panel:
         if panel in _img_cache:
@@ -393,12 +340,9 @@ def clear_image_cache(panel: str = None) -> int:
         _cache_ts.clear()
     return count
 
-
 def get_cache_status() -> Dict[str, Any]:
-    """Return info about cached images."""
     now = _now()
-    status = {}
-    for panel, url in _img_cache.items():
-        age = int(now - _cache_ts.get(panel, now))
-        status[panel] = {"url": url[:50] + "...", "age_sec": age}
-    return status
+    return {
+        p: {"url": u[:60] + "...", "age_sec": int(now - _cache_ts.get(p, now))}
+        for p, u in _img_cache.items()
+    }
