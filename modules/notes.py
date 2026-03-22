@@ -44,16 +44,28 @@ MYVOICE_MATCHER = re.compile(r"^###voice(!photo)?###:")
 MYVIDEO_MATCHER = re.compile(r"^###video(!photo)?###:")
 MYVIDEONOTE_MATCHER = re.compile(r"^###video_note(!photo)?###:")
 
-ENUM_FUNC_MAP = {
-    sql.Types.TEXT.value: dispatcher.bot.send_message,
-    sql.Types.BUTTON_TEXT.value: dispatcher.bot.send_message,
-    sql.Types.STICKER.value: dispatcher.bot.send_sticker,
-    sql.Types.DOCUMENT.value: dispatcher.bot.send_document,
-    sql.Types.PHOTO.value: dispatcher.bot.send_photo,
-    sql.Types.AUDIO.value: dispatcher.bot.send_audio,
-    sql.Types.VOICE.value: dispatcher.bot.send_voice,
-    sql.Types.VIDEO.value: dispatcher.bot.send_video,
-}
+# ENUM_FUNC_MAP built lazily at call time — dispatcher.bot is a stub at import time
+# and direct attribute access (dispatcher.bot.send_sticker) raises AttributeError
+# because the stub __getattr__ returns a _noop callable but 'send_sticker' was missing.
+# We now use a lambda that looks up context.bot at runtime instead.
+def _noop_sender(*a, **k):
+    pass
+
+ENUM_FUNC_MAP = {}  # populated after first real bot is attached
+
+def _get_enum_func_map(bot=None):
+    """Return type→send_method mapping using a live bot instance."""
+    _bot = bot or dispatcher.bot
+    return {
+        sql.Types.TEXT.value:        _bot.send_message,
+        sql.Types.BUTTON_TEXT.value: _bot.send_message,
+        sql.Types.STICKER.value:     getattr(_bot, 'send_sticker',   _noop_sender),
+        sql.Types.DOCUMENT.value:    getattr(_bot, 'send_document',  _noop_sender),
+        sql.Types.PHOTO.value:       getattr(_bot, 'send_photo',     _noop_sender),
+        sql.Types.AUDIO.value:       getattr(_bot, 'send_audio',     _noop_sender),
+        sql.Types.VOICE.value:       getattr(_bot, 'send_voice',     _noop_sender),
+        sql.Types.VIDEO.value:       getattr(_bot, 'send_video',     _noop_sender),
+    }
 
 
 # Do not async
@@ -170,7 +182,7 @@ def get(update, context, notename, show_none=True, no_format=False):
                         reply_markup=keyboard,
                     )
                 else:
-                    ENUM_FUNC_MAP[note.msgtype](
+                    _get_enum_func_map(bot)[note.msgtype](
                         chat_id,
                         note.file,
                         caption=text,
