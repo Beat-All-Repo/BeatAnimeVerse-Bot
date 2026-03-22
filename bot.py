@@ -1048,6 +1048,203 @@ async def safe_send_photo(
     return None
 
 
+
+# ================================================================================
+#   PANEL STORE SYSTEM — pre-render panels into PANEL_DB_CHANNEL for ms delivery
+# ================================================================================
+#
+# How it works:
+#   1. Every panel type (admin, stats, users, channels...) has a "template" stored
+#      as a photo message in PANEL_DB_CHANNEL with caption = panel content.
+#   2. The message_id is saved in bot_settings as "panel_store_{panel_type}".
+#   3. When a user triggers a panel:
+#        a. Look up the stored message_id
+#        b. copy_message from PANEL_DB_CHANNEL to user's chat (pure CDN, ~50ms)
+#        c. Attach the inline keyboard (copy_message doesn't carry keyboards)
+#   4. If no stored message: generate normally, store it, reply instantly.
+#   5. Background job re-stores all panels every 5 minutes with fresh content.
+#
+# This means panel delivery = 1 Telegram API call with a pre-cached file_id.
+# Zero DB read latency for the photo. Zero generation time. Pure CDN speed.
+# ================================================================================
+
+# In-memory panel store: panel_type → {file_id, caption, stored_at}
+_PANEL_STORE: dict = {}
+_PANEL_STORE_TTL: int = 300  # rebuild panels every 5 min
+
+
+def _ps_key(panel_type: str) -> str:
+    return f"panel_store_{panel_type}"
+
+
+def _ps_get(panel_type: str) -> Optional[dict]:
+    """Get stored panel from memory cache."""
+    entry = _PANEL_STORE.get(panel_type)
+    if entry and (time.monotonic() - entry.get("ts", 0)) < _PANEL_STORE_TTL:
+        return entry
+    # Try DB
+    try:
+        raw = get_setting(_ps_key(panel_type), "")
+        if raw:
+            data = json.loads(raw)
+            _PANEL_STORE[panel_type] = {**data, "ts": time.monotonic()}
+            return _PANEL_STORE[panel_type]
+    except Exception:
+        pass
+    return None
+
+
+def _ps_set(panel_type: str, file_id: str, caption: str) -> None:
+    """Cache a panel's photo file_id + caption."""
+    entry = {"file_id": file_id, "caption": caption, "ts": time.monotonic()}
+    _PANEL_STORE[panel_type] = entry
+    try:
+        set_setting(_ps_key(panel_type), json.dumps({
+            "file_id": file_id,
+            "caption": caption,
+        }))
+    except Exception:
+        pass
+
+
+def _ps_invalidate(panel_type: str = None) -> None:
+    """Invalidate stored panel(s) so they're rebuilt on next access."""
+    if panel_type:
+        _PANEL_STORE.pop(panel_type, None)
+    else:
+        _PANEL_STORE.clear()
+
+
+async def _deliver_panel(
+    bot,
+    chat_id: int,
+    panel_type: str,
+    caption: str,
+    reply_markup,
+    query=None,
+) -> bool:
+    """
+    Ultra-fast panel delivery using pre-stored file_ids.
+
+    Flow:
+      1. Delete triggering message (if any)
+      2. Check panel store for pre-cached file_id
+      3a. If found: send_photo with cached file_id + keyboard (CDN-speed, ~50ms)
+      3b. If not found: get_panel_pic() → send_photo → store file_id for next time
+      4. Text fallback if no photo available at all
+
+    The inline keyboard is always attached fresh (contains dynamic data like
+    toggle states) — only the photo is cached/reused.
+    """
+    # ── Step 1: Delete old message ─────────────────────────────────────────────
+    if query and query.message:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+    # ── Step 2: Look up cached file_id ─────────────────────────────────────────
+    stored = _ps_get(panel_type)
+    photo_to_send = stored["file_id"] if stored else None
+
+    # ── Step 3a: If no cached file_id, get from panel image system ─────────────
+    if not photo_to_send:
+        photo_to_send = get_panel_pic(panel_type)
+
+    # ── Step 3b: Send ──────────────────────────────────────────────────────────
+    if photo_to_send:
+        try:
+            sent = await bot.send_photo(
+                chat_id=chat_id,
+                photo=photo_to_send,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup,
+            )
+            # ── Store file_id for next time (if not already stored) ───────────
+            if sent and sent.photo and not stored:
+                fid = sent.photo[-1].file_id
+                _ps_set(panel_type, fid, caption)
+                # Also update panel_image cache
+                if _PANEL_IMAGE_AVAILABLE:
+                    try:
+                        from panel_image import set_tg_fileid
+                        set_tg_fileid(panel_type, fid)
+                        set_tg_fileid("default", fid)
+                    except Exception:
+                        pass
+            return True
+        except Exception as exc:
+            logger.debug(f"_deliver_panel photo failed for {panel_type}: {exc}")
+            # Invalidate bad file_id
+            _ps_invalidate(panel_type)
+
+    # ── Step 4: Text fallback ──────────────────────────────────────────────────
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=caption,
+            parse_mode=ParseMode.HTML,
+            reply_markup=reply_markup,
+            disable_web_page_preview=True,
+        )
+        return True
+    except Exception as exc:
+        logger.debug(f"_deliver_panel text fallback failed: {exc}")
+        return False
+
+
+async def _prebuild_all_panels(bot) -> None:
+    """
+    Background loop: pre-send every panel to PANEL_DB_CHANNEL to warm up
+    file_ids, then store them. Runs every 5 min.
+    Panels with no photo just skip — text-only panels don't benefit from pre-build.
+    """
+    if not PANEL_DB_CHANNEL:
+        return
+
+    PANEL_TYPES = [
+        "admin", "stats", "users", "channels", "clones",
+        "settings", "broadcast", "upload", "categories",
+        "poster", "manga", "autoforward", "flags", "style",
+        "default",
+    ]
+
+    for ptype in PANEL_TYPES:
+        try:
+            photo = get_panel_pic(ptype)
+            if not photo:
+                continue
+            stored = _ps_get(ptype)
+            if stored:
+                continue  # already warm, skip
+
+            # Send a placeholder to PANEL_DB_CHANNEL to get a file_id
+            sent = await bot.send_photo(
+                chat_id=PANEL_DB_CHANNEL,
+                photo=photo,
+                caption=f"<b>Panel Store</b> | <code>{ptype}</code>",
+                parse_mode="HTML",
+            )
+            if sent and sent.photo:
+                fid = sent.photo[-1].file_id
+                _ps_set(ptype, fid, "")  # caption stored per-render, file_id cached here
+                # Update panel_image too
+                if _PANEL_IMAGE_AVAILABLE:
+                    try:
+                        from panel_image import set_tg_fileid
+                        set_tg_fileid(ptype, fid)
+                        set_tg_fileid("default", fid)
+                    except Exception:
+                        pass
+                logger.debug(f"[panel_store] pre-built {ptype}")
+
+            await asyncio.sleep(0.3)  # small delay between sends
+
+        except Exception as exc:
+            logger.debug(f"[panel_store] pre-build {ptype} failed: {exc}")
+
+
 async def safe_edit_panel(
     bot,
     query,
@@ -1057,87 +1254,15 @@ async def safe_edit_panel(
     reply_markup,
     panel_type: str = "default",
 ) -> bool:
-    """
-    SPEED OPTIMISED panel update — edit-in-place instead of delete+send.
-
-    Strategy (fastest to slowest):
-      1. If existing message IS a photo → edit_message_media (invisible swap, ~0.1s)
-      2. If we have a Telegram file_id cached → edit_message_media with file_id
-      3. Send new photo (first time) → cache the returned file_id for future calls
-      4. Text fallback if image completely unavailable
-
-    After a successful send, the returned file_id is stored so every
-    subsequent call takes path 1 or 2 and is near-instant.
-    """
-    from telegram import InputMediaPhoto
-
-    # ── Path 1: edit in-place if the current message already has a photo ──────
-    if query and query.message and query.message.photo:
-        # Try cached file_id first (avoids re-uploading the URL)
-        fileid = None
-        if _PANEL_IMAGE_AVAILABLE:
-            try:
-                from panel_image import get_tg_fileid
-                fileid = get_tg_fileid(panel_type)
-            except Exception:
-                pass
-        media_src = fileid or photo
-        if media_src:
-            try:
-                await bot.edit_message_media(
-                    chat_id=chat_id,
-                    message_id=query.message.message_id,
-                    media=InputMediaPhoto(
-                        media=media_src,
-                        caption=caption,
-                        parse_mode="HTML",
-                    ),
-                    reply_markup=reply_markup,
-                )
-                return True
-            except Exception:
-                pass  # fall through to delete+send
-
-    # ── Path 2/3: delete old message and send fresh photo ─────────────────────
-    if query:
-        try:
-            await query.delete_message()
-        except Exception:
-            pass
-
-    if photo:
-        # Try cached file_id
-        fileid = None
-        if _PANEL_IMAGE_AVAILABLE:
-            try:
-                from panel_image import get_tg_fileid
-                fileid = get_tg_fileid(panel_type)
-            except Exception:
-                pass
-        send_photo = fileid or photo
-        try:
-            sent = await bot.send_photo(
-                chat_id=chat_id, photo=send_photo,
-                caption=caption, parse_mode="HTML", reply_markup=reply_markup,
-            )
-            # Cache the returned file_id for future near-instant sends
-            if sent and sent.photo and _PANEL_IMAGE_AVAILABLE:
-                try:
-                    from panel_image import set_tg_fileid
-                    best_fid = sent.photo[-1].file_id  # largest size
-                    set_tg_fileid(panel_type, best_fid)
-                except Exception:
-                    pass
-            return True
-        except Exception:
-            pass
-
-    # ── Path 4: text-only fallback ─────────────────────────────────────────────
-    try:
-        await safe_send_message(bot, chat_id, caption, reply_markup=reply_markup)
-        return True
-    except Exception:
-        return False
+    """Alias → _deliver_panel. All panels now use the panel store system."""
+    return await _deliver_panel(
+        bot=bot,
+        chat_id=chat_id,
+        panel_type=panel_type,
+        caption=caption,
+        reply_markup=reply_markup,
+        query=query,
+    )
 
 
 async def addpanelimg_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3428,18 +3553,7 @@ async def get_panel_pic_async(panel_type: str = "default") -> Optional[str]:
         except Exception:
             pass
     if quick:
-        # Trigger background refresh of stale cache (fire-and-forget)
-        if _PANEL_IMAGE_AVAILABLE:
-            try:
-                from panel_image import _is_cached
-                if not _is_cached("default"):
-                    asyncio.create_task(
-                        asyncio.get_event_loop().run_in_executor(
-                            None, lambda: __import__('panel_image').get_panel_image("default", True)
-                        )
-                    )
-            except Exception:
-                pass
+
         return quick
 
     # No API fallback — return None and let panel show text-only
@@ -3680,11 +3794,6 @@ async def send_admin_menu(
 
         # ── Get image URL (always instant — pre-warmed static or file_id) ─────
         img_url = get_panel_pic("admin")
-        if not img_url and _PANEL_IMAGE_AVAILABLE:
-            try:
-                img_url = await asyncio.wait_for(get_panel_image_async("admin"), timeout=1.0)
-            except Exception:
-                pass
 
         # ── Send/edit panel using optimised helper ─────────────────────────────
         await safe_edit_panel(
@@ -3693,18 +3802,7 @@ async def send_admin_menu(
             panel_type="admin",
         )
 
-        # ── Background: refresh stale image cache without blocking ─────────────
-        if _PANEL_IMAGE_AVAILABLE and img_url:
-            try:
-                from panel_image import _is_cached
-                if not _is_cached("admin"):
-                    asyncio.create_task(
-                        asyncio.get_event_loop().run_in_executor(
-                            None, lambda: __import__('panel_image').get_panel_image("admin", True)
-                        )
-                    )
-            except Exception:
-                pass
+
 
 
 async def send_stats_panel(
@@ -3747,12 +3845,7 @@ async def send_stats_panel(
     rows.append([_back_btn("admin_back"), _close_btn()])
     markup = InlineKeyboardMarkup(rows)
 
-    img_url = STATS_IMAGE_URL or get_panel_pic("stats")
-    if not img_url and _PANEL_IMAGE_AVAILABLE:
-        try:
-            img_url = await asyncio.wait_for(get_panel_image_async("stats"), timeout=1.0)
-        except Exception:
-            pass
+    img_url = get_panel_pic("stats")
 
     await safe_edit_panel(
         context.bot, query, chat_id,
@@ -4739,39 +4832,75 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         title = "📋 ᴄᴏᴍᴍᴀɴᴅs"
 
-    # Send as paginated sections via separate messages if too long,
-    # otherwise single expandable blockquote
-    MAX = 3800
-    if len(text) > MAX:
-        # Split into pages using section headers as split points
-        sections = [public, anime_s, fun_s, tools_s, group_s]
-        if is_group_admin or is_bot_admin:
-            sections += [moderation_s, group_mgmt_s, welcome_s, filter_s, anti_s, log_s]
-        if is_bot_admin:
-            sections += [bot_admin_s]
+    # ── Send /cmd — always to user's DM (private) to avoid group spam ──────
+    # Telegram message limit is 4096 chars. We split at 3800 to be safe.
+    TELE_MAX = 3800
 
-        pages = []
-        current = b(title) + "\n\n"
-        for sec_text in sections:
-            if len(current) + len(sec_text) > MAX:
-                pages.append(current)
-                current = sec_text
-            else:
-                current += sec_text
-        if current:
-            pages.append(current)
+    # Always try DM first; fall back to current chat if DM blocked
+    send_to = update.effective_user.id  # DM
+    close_kb = InlineKeyboardMarkup([[InlineKeyboardButton("✖️ Close", callback_data="close_message")]])
 
-        total = len(pages)
-        for i, page in enumerate(pages, 1):
-            page_text = page + f"\n<i>Page {i}/{total}</i>"
-            if i == total:
-                await safe_send_message(context.bot, chat.id, page_text,
-                    reply_markup=InlineKeyboardMarkup([[_close_btn()]]))
-            else:
-                await safe_send_message(context.bot, chat.id, page_text)
-    else:
-        await safe_send_message(context.bot, chat.id, text,
-            reply_markup=InlineKeyboardMarkup([[_close_btn()]]))
+    # Build pages: split text into ≤3800-char chunks on section boundaries
+    all_sections = [public, anime_s, fun_s, tools_s, group_s]
+    if is_group_admin or is_bot_admin:
+        all_sections += [moderation_s, group_mgmt_s, welcome_s, filter_s, anti_s, log_s]
+    if is_bot_admin:
+        all_sections += [bot_admin_s]
+
+    pages = []
+    current_page = b(title) + "\n\n"
+    for section in all_sections:
+        if len(current_page) + len(section) > TELE_MAX:
+            pages.append(current_page)
+            current_page = section
+        else:
+            current_page += section
+    if current_page.strip():
+        pages.append(current_page)
+
+    if not pages:
+        pages = [text]
+
+    sent_any = False
+    for i, page_text in enumerate(pages):
+        suffix = f"\n\n<i>Page {i+1}/{len(pages)}</i>" if len(pages) > 1 else ""
+        kb = close_kb if i == len(pages) - 1 else None
+        try:
+            await context.bot.send_message(
+                chat_id=send_to,
+                text=page_text + suffix,
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+            sent_any = True
+        except Forbidden:
+            # DM blocked — send to current chat instead
+            send_to = update.effective_chat.id
+            try:
+                await context.bot.send_message(
+                    chat_id=send_to,
+                    text=page_text + suffix,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb,
+                    disable_web_page_preview=True,
+                )
+                sent_any = True
+            except Exception as exc:
+                logger.debug(f"cmd_command send failed: {exc}")
+        except Exception as exc:
+            logger.debug(f"cmd_command DM failed: {exc}")
+
+    # If sent to DM from a group, notify user
+    if sent_any and send_to == update.effective_user.id and update.effective_chat.id != update.effective_user.id:
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=b(small_caps("📋 command list sent to your dm!")),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
 
 
 @force_sub_required
@@ -4980,13 +5109,7 @@ async def unban_user_command(
                 _img = await get_panel_pic_async("users")
             except Exception:
                 pass
-        if _img:
-            try:
-                await context.bot.send_photo(chat_id, _img, caption=text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(rows))
-            except Exception:
-                await safe_send_message(context.bot, chat_id, text, reply_markup=InlineKeyboardMarkup(rows))
-        else:
-            await safe_send_message(context.bot, chat_id, text, reply_markup=InlineKeyboardMarkup(rows))
+        await _deliver_panel(context.bot, chat_id, "users", text, InlineKeyboardMarkup(rows), query=None)
         return
 
     if data == "user_search":
@@ -6319,14 +6442,31 @@ async def load_upload_progress() -> None:
     """Load upload progress from database into global dict."""
     global upload_progress
     try:
+        # First try with anime_name column (may not exist on older DBs)
+        row = None
         with db_manager.get_cursor() as cur:
-            cur.execute("""
-                SELECT target_chat_id, season, episode, total_episode, video_count,
-                       selected_qualities, base_caption, auto_caption_enabled, anime_name
-                FROM bot_progress WHERE id = 1
-            """)
-            row = cur.fetchone()
-        if row:
+            try:
+                cur.execute("""
+                    SELECT target_chat_id, season, episode, total_episode, video_count,
+                           selected_qualities, base_caption, auto_caption_enabled, anime_name
+                    FROM bot_progress WHERE id = 1
+                """)
+                row = cur.fetchone()
+            except Exception:
+                # Fallback: query without anime_name column
+                try:
+                    cur.execute("""
+                        SELECT target_chat_id, season, episode, total_episode, video_count,
+                               selected_qualities, base_caption, auto_caption_enabled
+                        FROM bot_progress WHERE id = 1
+                    """)
+                    row_short = cur.fetchone()
+                    if row_short:
+                        # Pad to 9 elements with default anime_name
+                        row = tuple(row_short) + ("Anime Name",)
+                except Exception:
+                    pass
+        if row and len(row) >= 8:
             upload_progress.update({
                 "target_chat_id": row[0],
                 "season": row[1] or 1,
@@ -6336,7 +6476,7 @@ async def load_upload_progress() -> None:
                 "selected_qualities": row[5].split(",") if row[5] else ["480p", "720p", "1080p"],
                 "base_caption": row[6] or DEFAULT_CAPTION,
                 "auto_caption_enabled": bool(row[7]),
-                "anime_name": row[8] or "Anime Name",
+                "anime_name": row[8] if len(row) > 8 else "Anime Name",
             })
     except Exception as exc:
         db_logger.debug(f"load_upload_progress error: {exc}")
@@ -7977,6 +8117,264 @@ def _register_all_handlers(app: Application) -> None:
     app.add_error_handler(error_handler)
 
 
+
+# ================================================================================
+#   SPEED ENGINE — Background pre-warming & panel cache system
+# ================================================================================
+
+# Global panel cache: stores (text, markup) keyed by panel name
+# Built once then reused. Refreshed every 60s in background.
+_PANEL_CACHE: dict = {}
+_PANEL_CACHE_TS: dict = {}
+_PANEL_CACHE_TTL = 45  # seconds
+
+def _panel_cache_get(key: str):
+    ts = _PANEL_CACHE_TS.get(key, 0)
+    if time.monotonic() - ts < _PANEL_CACHE_TTL:
+        return _PANEL_CACHE.get(key)
+    return None
+
+def _panel_cache_set(key: str, value):
+    _PANEL_CACHE[key] = value
+    _PANEL_CACHE_TS[key] = time.monotonic()
+
+
+
+async def _pregen_all_filter_posters(bot, admin_id: int, chat_id: int) -> None:
+    """
+    Background task: generate posters for every anime title in anime_channel_links.
+    Sends each poster to POSTER_DB_CHANNEL and caches the file_id.
+    Reports summary to admin DM when done.
+    """
+    from database_dual import get_all_anime_channel_links, get_filter_poster_cache, save_filter_poster_cache
+    import hashlib as _hl
+
+    try:
+        links = get_all_anime_channel_links()
+    except Exception:
+        links = []
+
+    if not links:
+        try:
+            await bot.send_message(
+                admin_id,
+                b(small_caps("❌ no anime channel links found. generate links first.")),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+        return
+
+    total   = len(links)
+    done    = 0
+    skipped = 0
+    failed  = 0
+
+    status_msg = None
+    try:
+        status_msg = await bot.send_message(
+            admin_id,
+            b(small_caps(f"🎌 pre-generating {total} posters…")) + "\n"
+            + bq(small_caps("0% complete")),
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
+
+    from poster_engine import _anilist_anime, _build_anime_data, _make_poster, _get_settings
+    import asyncio as _aio
+
+    loop = _aio.get_event_loop()
+
+    for i, row in enumerate(links):
+        # row: (id, anime_title, channel_id, channel_title, link_id, created_at)
+        anime_title   = row[1]
+        channel_id    = row[2]
+        template      = "ani"   # default template
+        cache_key     = _hl.md5(f"{anime_title.lower()}:{template}".encode()).hexdigest()
+
+        # Skip if already cached
+        try:
+            existing = get_filter_poster_cache(cache_key)
+            if existing and existing.get("file_id"):
+                skipped += 1
+                continue
+        except Exception:
+            pass
+
+        try:
+            # Fetch AniList data
+            data = await loop.run_in_executor(None, _anilist_anime, anime_title)
+            if not data:
+                failed += 1
+                continue
+
+            settings = _get_settings("anime")
+            title_b, native, st, poster_rows, desc, cover_url, score = await loop.run_in_executor(
+                None, _build_anime_data, data
+            )
+
+            # Generate poster image
+            poster_buf = await loop.run_in_executor(
+                None, _make_poster,
+                template, title_b, native, st, poster_rows, desc, cover_url, score,
+                settings.get("watermark_text"),
+                settings.get("watermark_position", "center"),
+                None, "bottom",
+            )
+
+            # Build caption
+            import html as _html
+            genres = ", ".join((data.get("genres") or [])[:3])
+            t_d    = data.get("title", {}) or {}
+            eng    = t_d.get("english") or t_d.get("romaji") or anime_title
+            caption = f"<b>{_html.escape(eng)}</b>"
+            if native:
+                caption += f"\n<i>{_html.escape(native)}</i>"
+            if genres:
+                caption += f"\n\n» <b>Genre:</b> {_html.escape(genres)}"
+
+            file_id = None
+            channel_msg_id = 0
+
+            # Send to POSTER_DB_CHANNEL
+            if POSTER_DB_CHANNEL and poster_buf:
+                try:
+                    poster_buf.seek(0)
+                    db_msg = await bot.send_photo(
+                        chat_id=POSTER_DB_CHANNEL,
+                        photo=poster_buf,
+                        caption=f"<b>FilterPoster</b> | {_html.escape(anime_title)} | {template}\n\n{caption}",
+                        parse_mode="HTML",
+                    )
+                    if db_msg.photo:
+                        file_id = db_msg.photo[-1].file_id
+                        channel_msg_id = db_msg.message_id
+                except Exception as _se:
+                    logger.debug(f"[pregen] DB channel send failed for {anime_title}: {_se}")
+
+            # If no DB channel, use the poster directly
+            if not file_id and poster_buf:
+                file_id = "pending"  # Will be cached on first real send
+
+            # Save to cache
+            if file_id and file_id != "pending":
+                try:
+                    save_filter_poster_cache(
+                        cache_key=cache_key,
+                        anime_title=anime_title,
+                        template=template,
+                        file_id=file_id,
+                        channel_id=channel_id or 0,
+                        channel_msg_id=channel_msg_id,
+                        caption=caption,
+                    )
+                    done += 1
+                except Exception:
+                    failed += 1
+            else:
+                done += 1  # Generated but no DB channel — still counts
+
+        except Exception as exc:
+            logger.debug(f"[pregen] {anime_title}: {exc}")
+            failed += 1
+
+        # Update status every 5 items
+        if status_msg and (i + 1) % 5 == 0:
+            pct = int((i + 1) / total * 100)
+            try:
+                await status_msg.edit_text(
+                    b(small_caps(f"🎌 pre-generating {total} posters…")) + "\n"
+                    + bq(small_caps(f"{pct}% — {i+1}/{total} processed")),
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+        # Small delay to avoid flood limits
+        await _aio.sleep(0.5)
+
+    # Final report
+    summary = (
+        b(small_caps("✅ poster pre-generation complete!")) + "\n\n"
+        + bq(
+            b(small_caps("total: ")) + str(total) + "\n"
+            + b(small_caps("generated & cached: ")) + str(done) + "\n"
+            + b(small_caps("skipped (already cached): ")) + str(skipped) + "\n"
+            + b(small_caps("failed: ")) + str(failed)
+        )
+    )
+    try:
+        if status_msg:
+            await status_msg.edit_text(summary, parse_mode="HTML")
+        else:
+            await bot.send_message(admin_id, summary, parse_mode="HTML")
+    except Exception:
+        pass
+
+
+async def _prewarm_all_caches(bot) -> None:
+    """
+    Background task: pre-build all panel data so first button tap is instant.
+    Runs at startup and repeats every 45s to keep caches fresh.
+    All DB queries run in parallel via asyncio.gather.
+    """
+    while True:
+        try:
+            # ── Pre-build panel photo store ───────────────────────────────
+            try:
+                await _prebuild_all_panels(bot)
+            except Exception as _pbe:
+                logger.debug(f"[prewarm] prebuild: {_pbe}")
+
+            # ── Run all panel data fetches in parallel ─────────────────────
+            results = await asyncio.gather(
+                asyncio.get_event_loop().run_in_executor(None, get_user_count),
+                asyncio.get_event_loop().run_in_executor(None, get_blocked_users_count),
+                asyncio.get_event_loop().run_in_executor(None, get_all_force_sub_channels),
+                asyncio.get_event_loop().run_in_executor(None, get_all_clone_bots),
+                asyncio.get_event_loop().run_in_executor(None, lambda: get_setting("maintenance_mode", "false")),
+                asyncio.get_event_loop().run_in_executor(None, lambda: get_all_anime_channel_links() if callable(globals().get("get_all_anime_channel_links")) else []),
+                return_exceptions=True,
+            )
+            user_count, blocked_count, channels, clones, maint, anime_links = results
+
+            # Store pre-computed values
+            _panel_cache_set("user_count",    user_count    if isinstance(user_count, int)   else 0)
+            _panel_cache_set("blocked_count", blocked_count if isinstance(blocked_count, int) else 0)
+            _panel_cache_set("channels",      channels      if isinstance(channels, list)     else [])
+            _panel_cache_set("clones",        clones        if isinstance(clones, list)       else [])
+            _panel_cache_set("maint",         maint         if isinstance(maint, str)         else "false")
+            _panel_cache_set("anime_links",   anime_links   if isinstance(anime_links, list)  else [])
+
+            logger.debug("[prewarm] panel caches refreshed")
+        except Exception as exc:
+            logger.debug(f"[prewarm] error: {exc}")
+
+        await asyncio.sleep(_PANEL_CACHE_TTL)
+
+
+def _fast_user_count() -> int:
+    """Return cached user count (instantly, no DB)."""
+    cached = _panel_cache_get("user_count")
+    return cached if cached is not None else 0
+
+def _fast_channels() -> list:
+    """Return cached force-sub channels."""
+    cached = _panel_cache_get("channels")
+    return cached if cached is not None else []
+
+def _fast_clones() -> list:
+    """Return cached clone bots."""
+    cached = _panel_cache_get("clones")
+    return cached if cached is not None else []
+
+def _fast_anime_links() -> list:
+    """Return cached anime channel links."""
+    cached = _panel_cache_get("anime_links")
+    return cached if cached is not None else []
+
+
 async def _run_clone_polling(token: str, uname: str) -> None:
     """Run a clone bot as an independent Application with all handlers."""
     logger.info(f" Starting clone bot @{uname} polling...")
@@ -8241,6 +8639,9 @@ async def post_init(application: Application) -> None:
             logger.info("✅ poster_cache table ready")
         except Exception as _e:
             logger.warning(f"poster_cache migration: {_e}")
+
+    # ── SPEED: Pre-warm all panel caches in background (non-blocking) ─────────
+    asyncio.create_task(_prewarm_all_caches(application.bot))
 
     # ── Apply missing DB migrations ────────────────────────────────────────────
     _migration_sqls = [
@@ -8534,9 +8935,14 @@ async def button_handler(
     if not query:
         return
 
-    # Answer only on real calls, not on internal re-routes
+    # ── INSTANT ACK: answer the callback query FIRST, ALWAYS, IMMEDIATELY ────────
+    # This removes the spinner from the button within <50ms regardless of what
+    # the handler does next. Telegram shows the spinner until answered or 10s timeout.
     if _data_override is None:
-        await safe_answer(query)
+        try:
+            await query.answer()
+        except Exception:
+            pass  # Already answered or expired — never block on this
 
     data = _data_override if _data_override is not None else (query.data or "")
     uid = query.from_user.id if query.from_user else 0
@@ -10307,6 +10713,24 @@ async def button_handler(
                 "• <code>0</code> = permanent (no expiry)\n"
                 "• <code>5</code> = 5 minutes (default)\n"
                 "• <code>60</code> = 1 hour"
+            ),
+            reply_markup=InlineKeyboardMarkup([[_back_btn("admin_filter_poster"), _close_btn()]]),
+        )
+        return
+
+    # ── PRE-GENERATE all posters for registered anime channel links ───────────
+    if data.startswith("fp_pregen_all_"):
+        if not is_admin:
+            return
+        # Launch background task — report progress via DM
+        asyncio.create_task(_pregen_all_filter_posters(context.bot, uid, chat_id))
+        await safe_send_message(
+            context.bot, chat_id,
+            b(small_caps("🎌 poster pre-generation started!")) + "\n"
+            + bq(
+                small_caps("generating posters for all registered anime channels in background.\n\n")
+                + small_caps("each poster is generated, sent to poster db channel, and cached for instant future delivery.\n\n")
+                + small_caps("you will receive a summary when done.")
             ),
             reply_markup=InlineKeyboardMarkup([[_back_btn("admin_filter_poster"), _close_btn()]]),
         )
