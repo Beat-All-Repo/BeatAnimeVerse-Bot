@@ -1,78 +1,110 @@
-# ====================================================================
-# PLACE AT: /app/modules/health.py
-# ACTION: Replace existing file
-# ====================================================================
 """
-health.py — Tiny HTTP health-check server for Render free tier
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Render free-tier web services require an HTTP server listening on $PORT.
-This module starts one in a background daemon thread so the Telegram bot
-(long-polling) keeps running normally while Render's health checks pass.
+Health check endpoint + README web viewer for BeatAniVerse Bot.
 
-Endpoints:
-  GET /         → 200 "BeatVerse Bot is running 🤖"
-  GET /health   → 200 JSON {"status":"ok","bot":"BeatVerseProbot"}
-  HEAD /health  → 200 (for uptime monitors that use HEAD)
-  anything else → 404
-
-Keep-alive (prevents Render free tier 15-min sleep):
-  Point UptimeRobot → https://<your-app>.onrender.com/health every 5 min.
+Routes:
+  GET /          → Health check (plain OK)
+  GET /health    → Health check (plain OK)
+  GET /ping      → JSON alive response
+  GET /readme    → Beautiful HTML README (Netflix × RE theme)
+  GET /docs      → Same as /readme (alias)
 """
 
-import json
+from aiohttp import web
 import logging
 import os
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from datetime import datetime
+from pathlib import Path
 
-LOGGER = logging.getLogger(__name__)
+logger = logging.getLogger(__name__)
 
-PORT = int(os.environ.get("PORT", 10000))
-
-
-class _HealthHandler(BaseHTTPRequestHandler):
-    def log_message(self, format, *args):  # silence per-request logs
-        pass
-
-    def _send(self, code, body, content_type):
-        self.send_response(code)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_GET(self):
-        if self.path in ("/", ""):
-            self._send(200, b"BeatVerse Bot is running \xf0\x9f\xa4\x96", "text/plain; charset=utf-8")
-        elif self.path == "/health":
-            body = json.dumps({"status": "ok", "bot": "BeatVerse Bot"}).encode()
-            self._send(200, body, "application/json")
-        else:
-            self._send(404, b"Not Found", "text/plain")
-
-    def do_HEAD(self):
-        if self.path in ("/", "", "/health"):
-            self.send_response(200)
-            self.end_headers()
-        else:
-            self.send_response(404)
-            self.end_headers()
+# ── Path to your HTML readme file ───────────────────────────────────────────
+# Place README.html in the same directory as health_check.py (project root)
+# or update this path to wherever you put it.
+README_HTML_PATH = Path(__file__).parent / "README.html"
 
 
-def _start_server():
+def _load_readme_html() -> str:
+    """Load the README.html file contents, with a fallback if not found."""
     try:
-        server = HTTPServer(("0.0.0.0", PORT), _HealthHandler)
-        LOGGER.info("Health-check server listening on port %d", PORT)
-        server.serve_forever()
-    except OSError as e:
-        LOGGER.error("Health-check server failed to start on port %d: %s", PORT, e)
+        return README_HTML_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        logger.warning(
+            f"README.html not found at {README_HTML_PATH}. "
+            "Place README.html in your project root to enable /readme route."
+        )
+        return """<!DOCTYPE html>
+<html>
+<head><title>BeatAniVerse Bot</title>
+<style>body{background:#0a0a0a;color:#ccc;font-family:monospace;
+text-align:center;padding:80px;}</style></head>
+<body>
+<h1 style="color:#E50914;font-size:60px;">BEATANIVERSE</h1>
+<p>README.html not found. Place it in the project root.</p>
+<p style="color:#555">Expected: {path}</p>
+</body></html>""".format(path=README_HTML_PATH)
 
 
-# Daemon thread — dies automatically when the bot process exits
-_t = threading.Thread(target=_start_server, name="HealthServer", daemon=True)
-_t.start()
+class HealthCheckServer:
+    def __init__(self, port: int = 8080):
+        self.port = port
+        self.app = web.Application()
+        self.runner = None
+        self.site = None
+        self.last_activity = datetime.now()
 
-__mod_name__ = "Health"
-__handlers__ = []
-__command_list__ = []
-# No __help__ — this module must NOT appear in the user-facing help menu
+        # ── Register routes ──────────────────────────────────────────────────
+        self.app.router.add_get("/",        self.health_check)
+        self.app.router.add_get("/health",  self.health_check)
+        self.app.router.add_get("/ping",    self.ping)
+        self.app.router.add_get("/readme",  self.readme)   # ← HTML README
+        self.app.router.add_get("/docs",    self.readme)   # ← alias
+
+    # ── Handlers ─────────────────────────────────────────────────────────────
+
+    async def health_check(self, request: web.Request) -> web.Response:
+        """Plain-text health check for UptimeRobot / Render."""
+        return web.Response(text="OK", status=200)
+
+    async def ping(self, request: web.Request) -> web.Response:
+        """JSON ping — updates last_activity timestamp."""
+        self.last_activity = datetime.now()
+        return web.json_response({
+            "status": "alive",
+            "timestamp": self.last_activity.isoformat(),
+            "bot": "BeatAniVerse",
+            "version": "2.0.0",
+        })
+
+    async def readme(self, request: web.Request) -> web.Response:
+        """Serve the styled HTML README."""
+        html = _load_readme_html()
+        return web.Response(
+            text=html,
+            content_type="text/html",
+            charset="utf-8",
+            status=200,
+        )
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    async def start(self) -> None:
+        try:
+            self.runner = web.AppRunner(self.app)
+            await self.runner.setup()
+            self.site = web.TCPSite(self.runner, "0.0.0.0", self.port)
+            await self.site.start()
+            logger.info(f"✅ Health server running on port {self.port}")
+            logger.info(f"   → /health  (uptime check)")
+            logger.info(f"   → /ping    (JSON status)")
+            logger.info(f"   → /readme  (HTML README viewer)")
+        except Exception as exc:
+            logger.error(f"❌ Failed to start health server: {exc}")
+
+    async def stop(self) -> None:
+        if self.site:
+            await self.site.stop()
+        if self.runner:
+            await self.runner.cleanup()
+
+
+health_server = HealthCheckServer()
