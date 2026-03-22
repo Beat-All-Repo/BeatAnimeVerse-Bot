@@ -41,6 +41,7 @@ import json
 import time
 import uuid
 import math
+import random
 import asyncio
 import logging
 import logging.handlers
@@ -480,6 +481,12 @@ PENDING_FILL_TITLE = 45
 
 # "Forward a post" — admin forwards any channel post and bot auto-extracts channel ID
 PENDING_CHANNEL_POST = 53
+
+# Channel welcome system states
+(
+    CW_SET_TEXT,
+    CW_SET_BUTTONS,
+) = range(54, 56)
 
 # Conversation dictionaries
 user_states: Dict[int, int] = {}
@@ -3367,18 +3374,16 @@ async def _scan_panel_channel(bot) -> None:
 def get_panel_pic(panel_type: str = "default") -> Optional[str]:
     """
     Get panel image — synchronous, always instant.
-    ALL panel types (admin, users, stats, channels, etc.) share the SAME image
-    so there are zero duplicate fetches and panels always load at file_id speed.
+    ALL panel types share the same image pool — zero external HTTP ever.
 
     Priority:
-      1. Panel DB channel file_ids (set via bot) — fastest, zero external HTTP
+      1. Manually added images via /addpanelimg (stored in DB)
       2. PANEL_IMAGE_FILE_ID env var
-      3. Session file_id cache (from panel_image module)
-      4. panel_image URL cache (pre-warmed with static fallbacks)
-      5. PANEL_PICS env
-      6. Per-panel env vars (only if all above are empty)
+      3. Session file_id cache (from panel_image module — channel scan)
+      4. PANEL_PICS env var (file_ids or URLs)
+      NO external API calls. NO waifu.im. NO nekos.best. NO TMDB.
     """
-    # Priority 1: channel-stored file_ids — same for ALL panel types
+    # Priority 1: manually added channel images
     fid = _get_panel_db_fileid()
     if fid:
         return fid
@@ -3387,41 +3392,24 @@ def get_panel_pic(panel_type: str = "default") -> Optional[str]:
     if PANEL_IMAGE_FILE_ID:
         return PANEL_IMAGE_FILE_ID
 
-    # Priority 3: session file_id cache — use "default" key so all panels share it
+    # Priority 3: session file_id cache from channel scan
     if _PANEL_IMAGE_AVAILABLE:
         try:
-            from panel_image import get_tg_fileid
-            # Try shared "default" first, then panel-specific
+            from panel_image import get_tg_fileid, get_channel_scan_fileid
             cached_fid = get_tg_fileid("default") or get_tg_fileid(panel_type)
             if cached_fid:
                 return cached_fid
+            scan_fid = get_channel_scan_fileid()
+            if scan_fid:
+                return scan_fid
         except Exception:
             pass
 
-    # Priority 4: URL cache — use "default" key so all panels share it
-    if _PANEL_IMAGE_AVAILABLE:
-        try:
-            from panel_image import _img_cache
-            cached = _img_cache.get("default") or _img_cache.get(panel_type)
-            if cached:
-                return cached
-        except Exception:
-            pass
-
-    # Priority 5: PANEL_PICS env
+    # Priority 4: PANEL_PICS env
     if PANEL_PICS:
         return random.choice(PANEL_PICS)
 
-    # Priority 6: Per-panel env vars (last resort only)
-    _per_panel = {
-        "admin":     ADMIN_PANEL_IMAGE_URL,
-        "stats":     STATS_IMAGE_URL,
-        "settings":  SETTINGS_IMAGE_URL,
-        "broadcast": BROADCAST_PANEL_IMAGE_URL,
-        "help":      HELP_IMAGE_URL,
-        "welcome":   WELCOME_IMAGE_URL,
-    }
-    return _per_panel.get(panel_type, "") or None
+    return None  # No image available — panel will show text-only
 
 
 async def get_panel_pic_async(panel_type: str = "default") -> Optional[str]:
@@ -3454,12 +3442,7 @@ async def get_panel_pic_async(panel_type: str = "default") -> Optional[str]:
                 pass
         return quick
 
-    # Fallback: async fetch with 3s timeout (only if cache completely empty)
-    if _PANEL_IMAGE_AVAILABLE:
-        try:
-            return await asyncio.wait_for(get_panel_image_async("default"), timeout=3.0)
-        except Exception:
-            pass
+    # No API fallback — return None and let panel show text-only
     return None
 
 
@@ -4459,7 +4442,6 @@ async def tvshow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 #                           ADMIN COMMANDS (ALL)
 # ================================================================================
 
-@force_sub_required
 async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     /cmd — Show commands based on who is asking.
@@ -4481,23 +4463,30 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # ── Section builder ────────────────────────────────────────────────────
     def sec(title, cmds):
-        lines = f"<b>{title}</b>\n"
+        lines = f"<b>{small_caps(title)}</b>\n"
         for cmd, desc in cmds:
-            lines += f"  <b>/{cmd}</b> — {desc}\n"
+            # Never small-cap the command itself (it starts with /)
+            lines += f"  /{cmd} — {small_caps(desc)}\n"
         return lines + "\n"
 
     # ══════════════════════════════════════════════
     # SECTION 1 — EVERYONE (always shown)
     # ══════════════════════════════════════════════
     public = sec("🌐 General — Everyone", [
-        ("start",      "Main menu"),
-        ("help",       "Help & channel links"),
-        ("alive",      "Is bot online?"),
-        ("ping",       "Bot response speed"),
-        ("id",         "Your user / chat ID"),
-        ("info",       "User info lookup"),
-        ("my_plan",    "Your daily poster limit"),
-        ("plans",      "View all poster plans"),
+        ("start",       "Main menu"),
+        ("help",        "Help & channel links"),
+        ("cmd",         "Show all commands (this list)"),
+        ("alive",       "Check if bot is online"),
+        ("ping",        "Bot response speed"),
+        ("id",          "Your Telegram user / chat ID"),
+        ("info",        "User info lookup by reply or @username"),
+        ("my_plan",     "Your daily poster usage limit"),
+        ("plans",       "View all available poster plans"),
+        ("start",       "Deep link channel join"),
+        ("welcomehelp", "Welcome message format guide"),
+        ("welcomemutehelp", "Explain welcome mute modes"),
+        ("rules",       "View this group's rules"),
+        ("report",      "<reason> — Report a message to admins (reply)"),
     ])
 
     anime_s = sec("🎌 Anime & Media — Everyone", [
@@ -4512,41 +4501,54 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     ])
 
     fun_s = sec("🎮 Fun & Reactions — Everyone", [
-        ("hug",        "Hug someone (reply)"),
-        ("slap",       "Slap someone (reply)"),
-        ("kiss",       "Kiss someone (reply)"),
-        ("pat",        "Pat someone (reply)"),
-        ("punch",      "Punch someone (reply)"),
-        ("poke",       "Poke someone (reply)"),
-        ("wave",       "Wave at someone"),
-        ("bite",       "Bite someone"),
-        ("wink",       "Wink at someone"),
-        ("cry",        "Cry expression"),
-        ("laugh",      "Laugh expression"),
-        ("blush",      "Blush expression"),
-        ("couple",     "Couple of the day (group)"),
-        ("truth",      "Random truth question"),
-        ("dare",       "Random dare challenge"),
-        ("toss",       "Flip a coin"),
-        ("roll",       "Roll a dice"),
-        ("8ball",      "<question> — Magic 8-ball"),
-        ("decide",     "<q> — Yes/No/Maybe"),
-        ("shrug",      "Post a shrug"),
-        ("table",      "Flip a table"),
-        ("aq",         "Random anime quote"),
+        ("hug",         "Hug someone (reply to their message)"),
+        ("slap",        "Slap someone (reply)"),
+        ("kiss",        "Kiss someone (reply)"),
+        ("pat",         "Pat someone (reply)"),
+        ("punch",       "Punch someone (reply)"),
+        ("poke",        "Poke someone (reply)"),
+        ("wave",        "Wave at someone (reply)"),
+        ("bite",        "Bite someone (reply)"),
+        ("wink",        "Wink at someone (reply)"),
+        ("nod",         "Nod at someone (reply)"),
+        ("shoot",       "Shoot someone (reply)"),
+        ("cry",         "Cry expression"),
+        ("laugh",       "Laugh expression"),
+        ("blush",       "Blush expression"),
+        ("couple",      "Couple of the day for the group"),
+        ("truth",       "Random truth question"),
+        ("dare",        "Random dare challenge"),
+        ("toss",        "Flip a coin — heads or tails"),
+        ("roll",        "Roll a dice (1–6)"),
+        ("shrug",       "Post a shrug emoticon"),
+        ("table",       "Flip a table (╯°□°）╯"),
+        ("aq",          "Random anime quote"),
+        ("run",         "Send a random run GIF"),
+        ("afk",         "<reason> — Set yourself as AFK"),
     ])
 
     tools_s = sec("🛠 Tools — Everyone", [
-        ("wiki",       "<topic> — Wikipedia"),
-        ("ud",         "<word> — Urban Dictionary"),
-        ("tr",         "<lang> — Translate (reply)"),
-        ("time",       "<city> — Current time"),
-        ("write",      "<text> — Handwriting image"),
-        ("wall",       "<query> — Anime wallpaper"),
-        ("stickerid",  "Get sticker file ID (reply)"),
-        ("getsticker", "Sticker as PNG (reply)"),
-        ("kang",       "Add sticker to your pack"),
-        ("cash",       "<amt> <from> <to> — Currency"),
+        ("wiki",        "<topic> — Wikipedia summary"),
+        ("ud",          "<word> — Urban Dictionary definition"),
+        ("tr",          "<lang> <text> — Translate text"),
+        ("time",        "<city/country> — Current time anywhere"),
+        ("write",       "<text> — Generate handwriting image"),
+        ("wall",        "<query> — Anime wallpaper search"),
+        ("stickerid",   "Get sticker file_id (reply to sticker)"),
+        ("getsticker",  "Download sticker as PNG (reply)"),
+        ("kang",        "Add sticker to your own pack (reply)"),
+        ("cash",        "<amount> <from> <to> — Currency converter"),
+        ("shout",       "<text> — Make text shout-style"),
+        ("fonts",       "<text> — Fancy font styles"),
+        ("telegraph",   "Upload media to Telegraph"),
+        ("shorturl",    "<url> — Shorten a URL"),
+        ("weather",     "<city> — Current weather"),
+        ("lyrics",      "<song> — Song lyrics search"),
+        ("zip",         "Zip files (reply)"),
+        ("unzip",       "Unzip archive (reply)"),
+        ("json",        "Parse JSON (reply)"),
+        ("github",      "<username> — GitHub user info"),
+        ("google",      "<query> — Google search"),
     ])
 
     group_s = sec("📋 Group Info — Everyone", [
@@ -4597,16 +4599,19 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     ])
 
     welcome_s = sec("👋 Welcome System — Group Admins", [
-        ("welcome",    "<on/off/noformat> — Toggle/view"),
-        ("setwelcome", "<text> — Set welcome message"),
-        ("resetwelcome","Reset to default welcome"),
-        ("goodbye",    "<on/off> — Toggle goodbye"),
-        ("setgoodbye", "<text> — Set goodbye message"),
-        ("resetgoodbye","Reset goodbye"),
-        ("welcomemute","<soft/strong/off> — Mute new users"),
-        ("cleanservice","<on/off> — Delete join/leave msgs"),
-        ("cleanwelcome","<on/off> — Delete old welcome"),
-        ("welcomehelp","Welcome system full guide"),
+        ("welcome",         "<on/off/noformat> — Toggle/view welcome"),
+        ("setwelcome",      "<text> — Set custom welcome message"),
+        ("resetwelcome",    "Reset welcome to default"),
+        ("goodbye",         "<on/off> — Toggle goodbye message"),
+        ("setgoodbye",      "<text> — Set goodbye message"),
+        ("resetgoodbye",    "Reset goodbye to default"),
+        ("welcomemute",     "<soft/strong/off> — Mute new members"),
+        ("cleanservice",    "<on/off> — Delete Telegram join/left msgs"),
+        ("cleanwelcome",    "<on/off> — Delete previous welcome on new join"),
+        ("setwelcomeimage", "Reply to photo — Set welcome image"),
+        ("welcdelay",       "<seconds> — Auto-delete welcome after N seconds"),
+        ("welcomehelp",     "Full guide: variables, HTML tags, buttons"),
+        ("welcomemutehelp", "Explain soft/strong mute modes"),
     ])
 
     filter_s = sec("🔍 Filters & Locks — Group Admins", [
@@ -4657,41 +4662,55 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # SECTION 3 — BOT ADMIN ONLY
     # ══════════════════════════════════════════════
     bot_admin_s = sec("🔴 Bot Admin Only", [
-        ("stats",      "Bot statistics"),
-        ("sysstats",   "Server resource stats"),
-        ("users",      "Total users count"),
-        ("listusers",  "Browse user database"),
-        ("banuser",    "<id> — Ban from bot"),
-        ("unbanuser",  "<id> — Unban from bot"),
-        ("deleteuser", "<id> — Delete from DB"),
-        ("exportusers","Export all users as CSV"),
-        ("addchannel", "@ch Title — Add force-sub"),
-        ("removechannel","@ch — Remove force-sub"),
-        ("channel",    "List force-sub channels"),
-        ("addclone",   "TOKEN — Register clone bot"),
-        ("clones",     "List all clone bots"),
-        ("upload",     "Upload manager"),
-        ("settings",   "Category settings"),
-        ("autoupdate", "Manga chapter tracker"),
-        ("autoforward","Auto-forward manager"),
-        ("reload",     "Restart bot"),
-        ("logs",       "View recent logs"),
-        ("broadcast",  "Send broadcast to users"),
-        ("add_premium","<id> <rank> <days> — Give plan"),
-        ("remove_premium","<id> — Remove plan"),
-        ("premium_list","List premium users"),
-        ("set_loader", "Set loading sticker"),
-        ("backup",     "List generated links"),
-        ("connect",    "Connect a group"),
-        ("disconnect", "Disconnect group"),
-        ("addsudo",    "@user — Add sudo user"),
-        ("sudolist",   "List sudo users"),
-        ("gban",       "@user — Global ban"),
-        ("ungban",     "@user — Unban globally"),
-        ("gbanlist",   "List globally banned"),
-        ("dbcleanup",  "Clean database"),
-        ("sh",         "<cmd> — Run shell command"),
-        ("reload",     "Restart the bot"),
+        ("stats",           "Full bot statistics dashboard"),
+        ("sysstats",        "Server CPU/RAM/disk usage"),
+        ("users",           "Total registered users count"),
+        ("listusers",       "Browse user database with pagination"),
+        ("banuser",         "<id/@user> — Ban user from bot"),
+        ("unbanuser",       "<id/@user> — Unban user from bot"),
+        ("deleteuser",      "<id> — Delete user from database"),
+        ("exportusers",     "Export all users as CSV file"),
+        ("addchannel",      "@username or -100ID — Add force-sub channel"),
+        ("removechannel",   "@username — Remove force-sub channel"),
+        ("channel",         "List all force-sub channels"),
+        ("addclone",        "BOT_TOKEN — Register a clone bot"),
+        ("clones",          "List all registered clone bots"),
+        ("upload",          "Open upload/episode manager"),
+        ("settings",        "Category poster settings"),
+        ("autoupdate",      "Manga chapter auto-tracker"),
+        ("autoforward",     "Auto-forward connections manager"),
+        ("reload",          "Refresh admin cache / restart"),
+        ("logs",            "View recent bot error logs"),
+        ("broadcast",       "Send message to all users"),
+        ("add_premium",     "<id> <gold/silver/bronze> <days> — Give poster plan"),
+        ("remove_premium",  "<id> — Remove poster plan"),
+        ("premium_list",    "List all premium poster users"),
+        ("set_loader",      "Set loading animation sticker"),
+        ("backup",          "List all generated deep links"),
+        ("connect",         "Connect a group to bot"),
+        ("disconnect",      "Disconnect a group from bot"),
+        ("addsudo",         "@user — Add bot sudo user"),
+        ("rmsudo",          "@user — Remove sudo user"),
+        ("sudolist",        "List all sudo users"),
+        ("gban",            "@user <reason> — Global ban"),
+        ("ungban",          "@user — Global unban"),
+        ("gbanlist",        "List globally banned users"),
+        ("dbcleanup",       "Clean up old database entries"),
+        ("sh",              "<command> — Run shell command"),
+        ("eval",            "<code> — Evaluate Python code"),
+        ("exec",            "<code> — Execute Python code"),
+        ("speedtest",       "Run network speed test"),
+        ("getid",           "<username> — Resolve username to ID"),
+        ("getcommonchats",  "@user — Common chats with user"),
+        ("setbotname",      "<name> — Change bot display name"),
+        ("setbotdesc",      "<text> — Change bot description"),
+        ("night",           "<on/off> — Night mode for group"),
+        ("nightmode",       "Check night mode status"),
+        ("addpanelimg",     "Add image to panel image pool"),
+        ("set_loader",      "Set startup loading sticker"),
+        ("refresh_commands","Refresh bot command list in Telegram"),
+        ("addword",         "<word> — Add global bad word"),
+        ("wordlist",        "List all global bad words"),
     ])
 
     # ── Build final text based on who's asking ────────────────────────────
@@ -7249,6 +7268,24 @@ async def handle_admin_photo(
             await msg.reply_text(b(f"❌ {e(str(exc)[:100])}"), parse_mode=ParseMode.HTML)
         return
 
+    # ── CW_AWAITING_IMAGE: admin sends photo/sticker for channel welcome ────────
+    if isinstance(state, str) and state == "CW_AWAITING_IMAGE":
+        ch_id = context.user_data.get("cw_editing_channel")
+        if ch_id and file_id:
+            from database_dual import set_channel_welcome
+            set_channel_welcome(ch_id, image_file_id=file_id, image_url="")
+            user_states.pop(uid, None)
+            _kind = "sticker" if file_type == "sticker" else "image"
+            await msg.reply_text(
+                b(small_caps(f"✅ welcome {_kind} saved!")),
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(small_caps("✏️ edit more"), callback_data=f"cw_edit_{ch_id}"),
+                    _back_btn("admin_channel_welcome"),
+                ]]),
+            )
+        return
+
     # ── PENDING_CHANNEL_POST: forwarded message used to extract channel ID ────
     if state == PENDING_CHANNEL_POST:
         fwd_chat = None
@@ -7389,6 +7426,149 @@ async def handle_admin_photo(
             return
 
 
+
+
+# ================================================================================
+#                      CHANNEL WELCOME SYSTEM
+# ================================================================================
+# Sends a welcome message (text + image + buttons) when someone joins a channel
+# that the bot is admin of. Configured via Admin Panel → Channels → CHANNEL WELCOME.
+#
+# HOW IT WORKS:
+#   1. Admin registers a channel via the admin panel (Channels → CHANNEL WELCOME)
+#   2. Admin sets: welcome text, image (file_id or URL), and buttons (label - url)
+#   3. When bot receives a ChatJoinRequest approval OR sees a new_chat_member update
+#      in the channel, it DMs the new member the welcome message.
+# ================================================================================
+
+async def send_channel_welcome(bot, user_id: int, channel_id: int) -> None:
+    """Send a welcome DM to a new channel member based on configured settings."""
+    try:
+        from database_dual import get_channel_welcome
+        import json as _j
+        settings = get_channel_welcome(channel_id)
+        if not settings or not settings.get("enabled"):
+            return
+
+        text = settings.get("welcome_text") or ""
+        image_fid = settings.get("image_file_id") or ""
+        image_url = settings.get("image_url") or ""
+        buttons   = settings.get("buttons") or []
+
+        if not text and not image_fid and not image_url:
+            return
+
+        # Apply small caps to welcome text
+        styled_text = b(text) if text else ""
+
+        # Build keyboard
+        kb_rows = []
+        for btn in buttons:
+            lbl = btn.get("text", "") or btn.get("label", "")
+            url = btn.get("url", "")
+            if lbl and url:
+                kb_rows.append([InlineKeyboardButton(small_caps(lbl), url=url)])
+        markup = InlineKeyboardMarkup(kb_rows) if kb_rows else None
+
+        image_src = image_fid or image_url or None
+
+        if image_src:
+            try:
+                await bot.send_photo(
+                    chat_id=user_id,
+                    photo=image_src,
+                    caption=styled_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=markup,
+                )
+                return
+            except Exception as _pe:
+                logger.debug(f"[cw] photo send failed: {_pe}")
+
+        if styled_text:
+            try:
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=styled_text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=markup,
+                    disable_web_page_preview=True,
+                )
+            except Exception as _me:
+                logger.debug(f"[cw] message send failed: {_me}")
+    except Exception as exc:
+        logger.debug(f"[cw] send_channel_welcome: {exc}")
+
+
+async def channel_welcome_join_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Handle new members joining a channel — send welcome DM."""
+    msg = update.message or update.channel_post
+    if not msg:
+        return
+    new_members = msg.new_chat_members
+    if not new_members:
+        return
+    channel_id = msg.chat_id
+    for member in new_members:
+        if member.is_bot:
+            continue
+        asyncio.create_task(send_channel_welcome(context.bot, member.id, channel_id))
+
+
+# ── Admin panel: channel welcome management ───────────────────────────────────
+
+async def show_channel_welcome_panel(
+    context: ContextTypes.DEFAULT_TYPE, chat_id: int, query=None
+) -> None:
+    """Show channel welcome configuration panel."""
+    try:
+        from database_dual import get_all_channel_welcomes
+        channels = get_all_channel_welcomes()
+    except Exception:
+        channels = []
+
+    text = b("📣 channel welcome system") + "\n\n"
+    if channels:
+        for ch_id, enabled, wtext in channels[:10]:
+            icon = "🟢" if enabled else "🔴"
+            text += f"{icon} <code>{ch_id}</code> — {e((wtext or '')[:40])}\n"
+    else:
+        text += bq(
+            b(small_caps("no channels configured yet.")) + "\n"
+            + small_caps("use ➕ add channel below to configure a welcome message for any channel.")
+        )
+
+    text += (
+        "\n\n" + bq(
+            b(small_caps("how it works:")) + "\n"
+            + small_caps("when someone joins a channel where this bot is admin, "
+                         "the bot automatically DMs them the configured welcome message.")
+        )
+    )
+
+    grid = [
+        [InlineKeyboardButton(small_caps("➕ add/edit channel"), callback_data="cw_add")],
+        [InlineKeyboardButton(small_caps("📋 list configured"), callback_data="cw_list"),
+         InlineKeyboardButton(small_caps("🗑️ remove"), callback_data="cw_remove_menu")],
+        [_back_btn("manage_force_sub"), _close_btn()],
+    ]
+    markup = InlineKeyboardMarkup(grid)
+
+    img = await get_panel_pic_async("channels")
+    try:
+        if query:
+            await query.delete_message()
+    except Exception:
+        pass
+    if img:
+        try:
+            await context.bot.send_photo(chat_id, img, caption=text, parse_mode=ParseMode.HTML, reply_markup=markup)
+            return
+        except Exception:
+            pass
+    await safe_send_message(context.bot, chat_id, text, reply_markup=markup)
 
 # ================================================================================
 #                      AUTO-APPROVE CHAT JOIN REQUESTS
@@ -7789,6 +7969,11 @@ def _register_all_handlers(app: Application) -> None:
         filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.IMAGE | filters.Sticker.ALL) & admin_filter,
         handle_admin_photo))
     app.add_handler(ChatJoinRequestHandler(auto_approve_join_request))
+    # Channel welcome: fire when new members join a channel/group
+    app.add_handler(MessageHandler(
+        filters.StatusUpdate.NEW_CHAT_MEMBERS,
+        channel_welcome_join_handler,
+    ))
     app.add_error_handler(error_handler)
 
 
@@ -9017,6 +9202,7 @@ async def button_handler(
             _btn("LIST CHANNELS",     "fsub_list_full"),
             _btn("GEN LINK",          "generate_links"),
             _btn("🎌 ANIME LINKS",   "admin_anime_links"),
+            _btn("📣 CHANNEL WELCOME", "admin_channel_welcome"),
             _btn("CLONE REDIRECT",    "manage_clones"),
             _btn("LINK STATS",        "fsub_link_stats"),
             _btn("📨 FWD SOURCE",    "fsub_fwd_source"),
@@ -9162,6 +9348,206 @@ async def button_handler(
         except Exception:
             pass
         await backup_command(update, context)
+        return
+
+    # ── Channel Welcome System ────────────────────────────────────────────────────
+    if data == "admin_channel_welcome":
+        if not is_admin:
+            return
+        await show_channel_welcome_panel(context, chat_id, query)
+        return
+
+    if data == "cw_add":
+        if not is_admin:
+            return
+        user_states[uid] = "CW_WAITING_CHANNEL_ID"
+        await safe_edit_text(
+            query,
+            b("📣 add channel welcome") + "\n\n"
+            + bq(
+                b(small_caps("send the channel id, @username, or forward a post:")) + "\n\n"
+                + small_caps("• @channelname") + "\n"
+                + small_caps("• -1001234567890") + "\n"
+                + small_caps("• or forward any message from the channel") + "\n\n"
+                + small_caps("⚠️ bot must be admin in the channel.")
+            ),
+            reply_markup=InlineKeyboardMarkup([[_back_btn("admin_channel_welcome"), _close_btn()]]),
+        )
+        return
+
+    if data == "cw_list":
+        if not is_admin:
+            return
+        try:
+            from database_dual import get_all_channel_welcomes, get_channel_welcome
+            channels = get_all_channel_welcomes()
+        except Exception:
+            channels = []
+        if not channels:
+            await safe_answer(query, small_caps("no channels configured yet."))
+            return
+        text = b("📋 " + small_caps("configured channel welcomes:")) + "\n\n"
+        for ch_id, enabled, wtext in channels:
+            icon = "🟢" if enabled else "🔴"
+            text += f"{icon} <code>{ch_id}</code>\n"
+            if wtext:
+                text += f"   {e((wtext)[:60])}…\n"
+        await safe_edit_text(
+            query, text,
+            reply_markup=InlineKeyboardMarkup([[_back_btn("admin_channel_welcome"), _close_btn()]]),
+        )
+        return
+
+    if data == "cw_remove_menu":
+        if not is_admin:
+            return
+        try:
+            from database_dual import get_all_channel_welcomes
+            channels = get_all_channel_welcomes()
+        except Exception:
+            channels = []
+        if not channels:
+            await safe_answer(query, small_caps("nothing to remove."))
+            return
+        btns = [[InlineKeyboardButton(f"🗑 {ch_id}", callback_data=f"cw_del_{ch_id}")]
+                for ch_id, _, _ in channels[:10]]
+        btns.append([_back_btn("admin_channel_welcome"), _close_btn()])
+        await safe_edit_text(
+            query, b(small_caps("select channel to remove:")),
+            reply_markup=InlineKeyboardMarkup(btns),
+        )
+        return
+
+    if data.startswith("cw_del_"):
+        if not is_admin:
+            return
+        try:
+            from database_dual import delete_channel_welcome
+            ch_id = int(data[len("cw_del_"):])
+            delete_channel_welcome(ch_id)
+            await safe_answer(query, small_caps(f"removed channel {ch_id}"))
+            await show_channel_welcome_panel(context, chat_id, query)
+        except Exception as exc:
+            await safe_answer(query, f"error: {str(exc)[:60]}", show_alert=True)
+        return
+
+    if data.startswith("cw_toggle_"):
+        if not is_admin:
+            return
+        try:
+            from database_dual import get_channel_welcome, set_channel_welcome
+            ch_id = int(data[len("cw_toggle_"):])
+            s = get_channel_welcome(ch_id)
+            new_state = not (s.get("enabled", True) if s else True)
+            set_channel_welcome(ch_id, enabled=new_state)
+            await safe_answer(query, small_caps(f"welcome {'enabled' if new_state else 'disabled'}"))
+            await show_channel_welcome_panel(context, chat_id, query)
+        except Exception as exc:
+            await safe_answer(query, f"error: {str(exc)[:60]}", show_alert=True)
+        return
+
+    if data.startswith("cw_edit_"):
+        if not is_admin:
+            return
+        ch_id = int(data[len("cw_edit_"):])
+        try:
+            from database_dual import get_channel_welcome
+            s = get_channel_welcome(ch_id) or {}
+        except Exception:
+            s = {}
+        wtext   = s.get("welcome_text", "")
+        img_fid = s.get("image_file_id", "")
+        img_url = s.get("image_url", "")
+        btns_json = s.get("buttons", [])
+        enabled = s.get("enabled", True)
+
+        text = (
+            b(small_caps(f"edit channel welcome: {ch_id}")) + "\n\n"
+            + bq(
+                f"<b>{small_caps('enabled')}:</b> {'🟢 yes' if enabled else '🔴 no'}\n"
+                f"<b>{small_caps('text')}:</b> {e((wtext)[:60]) if wtext else small_caps('not set')}\n"
+                f"<b>{small_caps('image')}:</b> {'✅ set' if img_fid or img_url else small_caps('not set')}\n"
+                f"<b>{small_caps('buttons')}:</b> {len(btns_json)} {small_caps('configured')}"
+            )
+        )
+        context.user_data["cw_editing_channel"] = ch_id
+        edit_kb = [
+            [InlineKeyboardButton(small_caps("✏️ set text"),    callback_data=f"cw_settext_{ch_id}"),
+             InlineKeyboardButton(small_caps("🖼 set image"),   callback_data=f"cw_setimg_{ch_id}")],
+            [InlineKeyboardButton(small_caps("🔘 set buttons"), callback_data=f"cw_setbtns_{ch_id}"),
+             InlineKeyboardButton(small_caps("⚡ toggle on/off"), callback_data=f"cw_toggle_{ch_id}")],
+            [InlineKeyboardButton(small_caps("👁 preview"),     callback_data=f"cw_preview_{ch_id}"),
+             InlineKeyboardButton(small_caps("🗑 remove"),      callback_data=f"cw_del_{ch_id}")],
+            [_back_btn("admin_channel_welcome"), _close_btn()],
+        ]
+        await safe_edit_text(query, text, reply_markup=InlineKeyboardMarkup(edit_kb))
+        return
+
+    if data.startswith("cw_settext_"):
+        if not is_admin:
+            return
+        ch_id = int(data[len("cw_settext_"):])
+        context.user_data["cw_editing_channel"] = ch_id
+        user_states[uid] = CW_SET_TEXT
+        await safe_edit_text(
+            query,
+            b(small_caps("send the welcome text:")) + "\n\n"
+            + bq(
+                small_caps("this text is sent as a dm when someone joins the channel.") + "\n\n"
+                + small_caps("available placeholders:") + "\n"
+                + "• <code>{first}</code> — " + small_caps("user first name") + "\n"
+                + "• <code>{last}</code> — " + small_caps("user last name") + "\n"
+                + "• <code>{full}</code> — " + small_caps("full name") + "\n"
+                + "• <code>{id}</code> — " + small_caps("user id") + "\n"
+                + "• <code>{channel}</code> — " + small_caps("channel title")
+            ),
+            reply_markup=InlineKeyboardMarkup([[_back_btn(f"cw_edit_{ch_id}"), _close_btn()]]),
+        )
+        return
+
+    if data.startswith("cw_setbtns_"):
+        if not is_admin:
+            return
+        ch_id = int(data[len("cw_setbtns_"):])
+        context.user_data["cw_editing_channel"] = ch_id
+        user_states[uid] = CW_SET_BUTTONS
+        await safe_edit_text(
+            query,
+            b(small_caps("send button config:")) + "\n\n"
+            + bq(
+                small_caps("one button per line, format:") + "\n"
+                + "<code>Button Label - https://url.com</code>\n\n"
+                + small_caps("example:") + "\n"
+                + "<code>Join Channel - https://t.me/BeatAnime</code>\n"
+                + "<code>Request - https://t.me/Beat_Hindi_Dubbed</code>"
+            ),
+            reply_markup=InlineKeyboardMarkup([[_back_btn(f"cw_edit_{ch_id}"), _close_btn()]]),
+        )
+        return
+
+    if data.startswith("cw_setimg_"):
+        if not is_admin:
+            return
+        ch_id = int(data[len("cw_setimg_"):])
+        context.user_data["cw_editing_channel"] = ch_id
+        user_states[uid] = "CW_AWAITING_IMAGE"
+        await safe_edit_text(
+            query,
+            b(small_caps("send welcome image:")) + "\n\n"
+            + bq(
+                small_caps("send a photo, sticker, or image url.") + "\n"
+                + small_caps("this image appears at the top of the welcome message.")
+            ),
+            reply_markup=InlineKeyboardMarkup([[_back_btn(f"cw_edit_{ch_id}"), _close_btn()]]),
+        )
+        return
+
+    if data.startswith("cw_preview_"):
+        if not is_admin:
+            return
+        ch_id = int(data[len("cw_preview_"):])
+        asyncio.create_task(send_channel_welcome(context.bot, chat_id, ch_id))
+        await safe_answer(query, small_caps("preview sent to you in dm."))
         return
 
     if data == "admin_anime_links":
@@ -12478,6 +12864,102 @@ async def handle_admin_message(
         context.user_data.pop("au_manga_mode", None)
         context.user_data.pop("au_manga_interval", None)
         await send_admin_menu(chat_id, context)
+        return
+
+    # ── Channel welcome text/buttons ──────────────────────────────────────────────
+    if state == CW_SET_TEXT:
+        ch_id = context.user_data.get("cw_editing_channel")
+        if not ch_id:
+            user_states.pop(uid, None)
+            await safe_send_message(context.bot, chat_id, b("session expired. start over."))
+            return
+        from database_dual import set_channel_welcome
+        set_channel_welcome(ch_id, welcome_text=text.strip())
+        user_states.pop(uid, None)
+        await safe_send_message(
+            context.bot, chat_id,
+            b(small_caps("✅ welcome text saved!")) + "\n" + bq(e(text.strip()[:200])),
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(small_caps("✏️ edit more"), callback_data=f"cw_edit_{ch_id}"),
+                _back_btn("admin_channel_welcome"),
+            ]]),
+        )
+        return
+
+    if state == CW_SET_BUTTONS:
+        ch_id = context.user_data.get("cw_editing_channel")
+        if not ch_id:
+            user_states.pop(uid, None)
+            await safe_send_message(context.bot, chat_id, b("session expired. start over."))
+            return
+        lines = text.strip().split("\n")
+        btns = []
+        for line in lines:
+            if " - " in line:
+                parts = line.split(" - ", 1)
+                btns.append({"text": parts[0].strip(), "url": parts[1].strip()})
+        from database_dual import set_channel_welcome
+        set_channel_welcome(ch_id, buttons=btns)
+        user_states.pop(uid, None)
+        await safe_send_message(
+            context.bot, chat_id,
+            b(small_caps(f"✅ {len(btns)} button(s) saved!")),
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(small_caps("✏️ edit more"), callback_data=f"cw_edit_{ch_id}"),
+                _back_btn("admin_channel_welcome"),
+            ]]),
+        )
+        return
+
+    if isinstance(state, str) and state == "CW_WAITING_CHANNEL_ID":
+        identifier = text.strip()
+        if identifier.lstrip("-").isdigit():
+            identifier = int(identifier)
+        elif not identifier.startswith("@"):
+            identifier = f"@{identifier}"
+        try:
+            tg_chat = await context.bot.get_chat(identifier)
+            from database_dual import set_channel_welcome
+            set_channel_welcome(tg_chat.id, enabled=True, welcome_text="", added_by=uid)
+            context.user_data["cw_editing_channel"] = tg_chat.id
+            user_states.pop(uid, None)
+            await safe_send_message(
+                context.bot, chat_id,
+                b(small_caps(f"✅ channel registered: {tg_chat.title or str(tg_chat.id)}")) + "\n"
+                + bq(small_caps("now configure the welcome message below.")),
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(small_caps("⚙️ configure"), callback_data=f"cw_edit_{tg_chat.id}"),
+                    _back_btn("admin_channel_welcome"),
+                ]]),
+            )
+        except Exception as exc:
+            await safe_send_message(
+                context.bot, chat_id,
+                b(small_caps("❌ cannot access that channel.")) + "\n"
+                + bq(small_caps("make sure bot is admin in the channel.\n\nerror: ") + code(e(str(exc)[:100]))),
+                reply_markup=InlineKeyboardMarkup([[_back_btn("admin_channel_welcome")]]),
+            )
+        return
+
+    if isinstance(state, str) and state == "CW_AWAITING_IMAGE":
+        # Text fallback: URL
+        ch_id = context.user_data.get("cw_editing_channel")
+        if ch_id and text.strip().startswith("http"):
+            from database_dual import set_channel_welcome
+            set_channel_welcome(ch_id, image_url=text.strip(), image_file_id="")
+            user_states.pop(uid, None)
+            await safe_send_message(
+                context.bot, chat_id,
+                b(small_caps("✅ welcome image url saved!")),
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton(small_caps("✏️ edit more"), callback_data=f"cw_edit_{ch_id}"),
+                ]]),
+            )
+        else:
+            await safe_send_message(
+                context.bot, chat_id,
+                b(small_caps("send a photo or image url (starts with https://).")),
+            )
         return
 
     # ── User management states ─────────────────────────────────────────────────────
