@@ -7060,11 +7060,12 @@ async def post_init(application: Application) -> None:
     except Exception as exc:
         logger.warning(f"Health server failed: {exc}")
 
-    # Schedule jobs
+    # Schedule jobs — first= delays prevent "missed run" warnings during slow startup
     if application.job_queue:
-        application.job_queue.run_repeating(manga_update_job, interval=3600, first=120)
-        application.job_queue.run_repeating(cleanup_expired_links_job, interval=600, first=60)
-        application.job_queue.run_repeating(check_scheduled_broadcasts, interval=60, first=30)
+        application.job_queue.run_repeating(manga_update_job,           interval=3600, first=180)
+        application.job_queue.run_repeating(cleanup_expired_links_job,  interval=600,  first=90)
+        # check_scheduled_broadcasts: start 3 min after boot to avoid missed-run spam
+        application.job_queue.run_repeating(check_scheduled_broadcasts, interval=60,   first=180)
         logger.info("✅ Background jobs scheduled")
 
     # Migrate poster_cache table
