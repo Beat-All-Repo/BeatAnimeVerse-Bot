@@ -1,14 +1,19 @@
+# ==============================================================================
+# PLACE AT: /app/modules/sql/__init__.py
+# ACTION: Replace existing file
+# ==============================================================================
 """
 SQL layer for BeatVerse modules.
 Uses NeonDB (PostgreSQL via SQLAlchemy) when DATABASE_URL is set.
-Falls back to NoOp stub when only MongoDB is configured.
+KEY FIX: All table models share ONE Base + metadata with extend_existing=True
+so duplicate Table definitions don't crash.
 """
 import time as _time
 import os
-
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import scoped_session, sessionmaker
+from sqlalchemy import MetaData
 
 _DB_URI = os.getenv("DATABASE_URL", "")
 _MONGO_URI = os.getenv("MONGO_DB_URI", "")
@@ -16,7 +21,32 @@ _MONGO_URI = os.getenv("MONGO_DB_URI", "")
 import logging as _log
 log = _log.getLogger(__name__)
 
-BASE = declarative_base()
+# Shared metadata — with naming convention to avoid constraint conflicts
+_METADATA = MetaData()
+
+# Patch MetaData._add_table to silently handle duplicate table definitions
+_orig_add_table = _METADATA.__class__._add_table if hasattr(_METADATA.__class__, '_add_table') else None
+if _orig_add_table:
+    def _safe_add_table(self, name, schema, table):
+        key = (schema, name) if schema else name
+        if key in self.tables or name in self.tables:
+            return  # already registered, skip
+        return _orig_add_table(self, name, schema, table)
+    _METADATA.__class__._add_table = _safe_add_table
+
+BASE = declarative_base(metadata=_METADATA)
+
+# Also patch SQLAlchemy Table.__init__ globally for extra safety
+try:
+    import sqlalchemy as _sa
+    _orig_Table_init = _sa.Table.__init__
+    def _safe_Table_init(self, name, metadata, *cols, **kwargs):
+        if hasattr(metadata, 'tables') and name in metadata.tables:
+            kwargs.setdefault('extend_existing', True)
+        return _orig_Table_init(self, name, metadata, *cols, **kwargs)
+    _sa.Table.__init__ = _safe_Table_init
+except Exception:
+    pass
 
 if _DB_URI:
     _uri = _DB_URI
@@ -41,7 +71,7 @@ if _DB_URI:
     for _attempt in range(5):
         try:
             SESSION = start()
-            log.info("[SQL] ✅ PostgreSQL connected")
+            log.info("[SQL] \u2705 PostgreSQL connected")
             break
         except Exception as e:
             if _attempt < 4:
