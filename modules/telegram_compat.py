@@ -45,24 +45,65 @@ def _stub_module(name: str, **attrs):
     _sys.modules[name] = m
     return m
 
+# ── SQLAlchemy: EARLY patch — must run before any module imports sql models ───
+# Fixes: "Table 'users' is already defined for this MetaData instance"
+try:
+    import sqlalchemy as _sa_early
+    _sa_orig_Table_init = _sa_early.Table.__init__
+
+    def _sa_patched_init(self, name, metadata=None, *args, **kwargs):
+        if metadata is not None and hasattr(metadata, 'tables') and name in metadata.tables:
+            kwargs.setdefault('extend_existing', True)
+        if metadata is not None:
+            _sa_orig_Table_init(self, name, metadata, *args, **kwargs)
+        else:
+            _sa_orig_Table_init(self, name, *args, **kwargs)
+
+    _sa_early.Table.__init__ = _sa_patched_init
+except Exception as _sa_e:
+    pass  # Will be retried later
+
+
 # ── pyrate_limiter v2/v3 compatibility ────────────────────────────────────────
 # v2 uses Rate; v3 uses RequestRate. Patch whichever is installed.
 try:
     import pyrate_limiter as _prl
     if not hasattr(_prl, 'Rate'):
-        # v3 installed — add v2 aliases
         if hasattr(_prl, 'RequestRate'):
             _prl.Rate = _prl.RequestRate
         else:
             class _Rate:
                 def __init__(self, *a, **k): pass
             _prl.Rate = _Rate
-        # Duration.CUSTOM missing in v3
-        if hasattr(_prl, 'Duration') and not hasattr(_prl.Duration, 'CUSTOM'):
-            _prl.Duration.CUSTOM = 15
-        logger.info("[telegram_compat] pyrate_limiter v3→v2 aliases patched")
-    # Also patch into sys.modules so all importers see the patched version
+
+    # Duration.CUSTOM missing in v3
+    if hasattr(_prl, 'Duration') and not hasattr(_prl.Duration, 'CUSTOM'):
+        _prl.Duration.CUSTOM = 15
+
+    # Limiter API changed: v2=Limiter(list_of_rates), v3=Limiter(*rates)
+    # Patch Limiter to accept both calling conventions
+    _orig_Limiter = _prl.Limiter
+    class _PatchedLimiter(_orig_Limiter):
+        def __init__(self, rates=None, *args, **kwargs):
+            if isinstance(rates, list):
+                # v2 style: Limiter([rate1, rate2]) → unpack for v3
+                try:
+                    super().__init__(*rates, **kwargs)
+                except Exception:
+                    super().__init__(**kwargs)
+            elif rates is not None:
+                super().__init__(rates, *args, **kwargs)
+            else:
+                super().__init__(*args, **kwargs)
+        def try_acquire(self, key):
+            try:
+                super().try_acquire(key)
+            except Exception as exc:
+                if 'BucketFullException' in type(exc).__name__ or 'full' in str(exc).lower():
+                    raise _prl.BucketFullException(key, 0) from exc
+    _prl.Limiter = _PatchedLimiter
     _sys.modules['pyrate_limiter'] = _prl
+    logger.info("[telegram_compat] pyrate_limiter v3→v2 fully patched (Rate alias + Limiter compat)")
 except ImportError:
     # Not installed at all — full stub
     class _Rate:
@@ -155,6 +196,7 @@ class _FiltersCompat:
     private          = _filters_module.ChatType.PRIVATE
     group            = _filters_module.ChatType.GROUP
     supergroup       = _filters_module.ChatType.SUPERGROUP
+    groups           = _filters_module.ChatType.GROUPS  # v13 compat alias
     chat_type        = _filters_module.ChatType
     user             = _filters_module.User
     chat             = _filters_module.Chat
@@ -192,6 +234,35 @@ class _FiltersCompat:
     def __call__(self, *a, **kw):
         return _filters_module.ALL
 
+
+# ── Patch ChatType to add v13-style aliases ────────────────────────────────────
+try:
+    from telegram.constants import ChatType as _CT
+    # v13 used lowercase: Filters.chat_type.groups, Filters.chat_type.private
+    # v21 uses uppercase: ChatType.GROUP, ChatType.PRIVATE
+    if not hasattr(_CT, 'groups'):
+        _CT.groups = _CT.GROUP
+    if not hasattr(_CT, 'supergroups'):
+        _CT.supergroups = _CT.SUPERGROUP
+    if not hasattr(_CT, 'private'):
+        _CT.private = _CT.PRIVATE
+    if not hasattr(_CT, 'channel'):
+        _CT.channel = _CT.CHANNEL
+except Exception:
+    pass
+
+# Also patch Filters.chat_type so Filters.chat_type.groups works
+_FiltersCompat.chat_type = type('_ChatTypeCompat', (), {
+    'groups':      _filters_module.ChatType.GROUPS,
+    'supergroups': _filters_module.ChatType.SUPERGROUP,
+    'private':     _filters_module.ChatType.PRIVATE,
+    'channel':     _filters_module.ChatType.CHANNEL,
+    'GROUP':       _filters_module.ChatType.GROUP,
+    'GROUPS':      _filters_module.ChatType.GROUPS,
+    'PRIVATE':     _filters_module.ChatType.PRIVATE,
+    'SUPERGROUP':  _filters_module.ChatType.SUPERGROUP,
+})()
+
 Filters = _FiltersCompat()
 
 # ── DispatcherHandlerStop ──────────────────────────────────────────────────────
@@ -215,10 +286,15 @@ class RegexHandler(MessageHandler):
         super().__init__(filters=f, callback=callback)
 
 # ── Patch run_async kwarg out of all handlers ──────────────────────────────────
+# Strip v13-only kwargs from all handlers (run_async, pass_args, pass_update_queue etc.)
+_V13_KWARGS = {'run_async', 'pass_args', 'pass_update_queue', 'pass_job_queue',
+               'pass_user_data', 'pass_chat_data', 'message_updates', 'channel_post_updates',
+               'edited_updates', 'allow_edited', 'pass_groups', 'pass_groupdict'}
 for _cls in (CommandHandler, MessageHandler, CallbackQueryHandler, InlineQueryHandler):
     _orig = _cls.__init__
     def _patched(self, *a, _orig=_orig, **kw):
-        kw.pop('run_async', None)
+        for _k in _V13_KWARGS:
+            kw.pop(_k, None)
         _orig(self, *a, **kw)
     _cls.__init__ = _patched
 
@@ -314,38 +390,44 @@ else:
 # ── SQLAlchemy: prevent "Table already defined" errors ────────────────────────
 try:
     import sqlalchemy as _sa
-    _orig_table_new = _sa.Table.__new__
+    # Patch MetaData._add_table to silently handle duplicates
+    from sqlalchemy import MetaData as _MetaData
+    _orig_add_table = _MetaData._add_table if hasattr(_MetaData, '_add_table') else None
 
-    class _PatchedTable(_sa.Table):
-        """Subclass that silently accepts extend_existing."""
-        def __new__(cls, name, metadata, *args, **kwargs):
-            if name in metadata.tables:
-                kwargs.setdefault('extend_existing', True)
-            return super().__new__(cls, name, metadata, *args, **kwargs)
+    # Patch at the Table class __new__ level using __init_subclass__ bypass
+    # Most reliable: patch declarative_base metadata and all MetaData instances
+    import sqlalchemy.orm as _orm
+    _orig_decl_base = _orm.declarative_base
+    def _patched_decl_base(*a, **kw):
+        base = _orig_decl_base(*a, **kw)
+        # Ensure metadata allows extension
+        if hasattr(base, 'metadata'):
+            meta = base.metadata
+            # Override _add_table to handle duplicates gracefully
+            if hasattr(meta, '_add_table'):
+                _orig_at = meta._add_table
+                def _safe_add_table(name, schema, table):
+                    key = schema + '.' + name if schema else name
+                    if key in meta.tables:
+                        return  # silently skip duplicates
+                    return _orig_at(name, schema, table)
+                meta._add_table = _safe_add_table
+        return base
+    _orm.declarative_base = _patched_decl_base
 
-    # Monkey-patch at the MetaData level instead
-    _orig_meta_init = _sa.MetaData.__init__
-    def _patched_meta_init(self, *a, **kw):
-        _orig_meta_init(self, *a, **kw)
-    # Simpler: patch Table.__init_subclass__ won't work
-    # Use event approach instead
-    from sqlalchemy import event
-    @event.listens_for(_sa.MetaData, "before_create")
-    def _allow_extend(*a, **k): pass
-    # Most reliable: patch _sa.Table directly
-    _orig_Table = _sa.Table
-    def _Table(name, metadata=None, *cols, **kwargs):
-        if metadata is not None and name in metadata.tables:
+    # Also patch existing Table.__new__ for non-ORM tables
+    _orig_Table_init = _sa.Table.__init__
+    def _safe_Table_init(self, name, metadata, *cols, **kwargs):
+        if hasattr(metadata, 'tables') and name in metadata.tables:
             kwargs.setdefault('extend_existing', True)
-            kwargs.setdefault('keep_existing', False)
-        if metadata is not None:
-            return _orig_Table(name, metadata, *cols, **kwargs)
-        return _orig_Table(name, *cols, **kwargs)
-    _sa.Table = _Table
-    logger.info("[telegram_compat] SQLAlchemy Table duplicate-definition patched")
+        return _orig_Table_init(self, name, metadata, *cols, **kwargs)
+    _sa.Table.__init__ = _safe_Table_init
+    logger.info("[telegram_compat] SQLAlchemy duplicate-table patch applied")
 except Exception as _sq_exc:
-    logger.debug(f"[telegram_compat] SQLAlchemy patch failed: {_sq_exc}")
+    logger.debug(f"[telegram_compat] SQLAlchemy patch: {_sq_exc}")
 
+if False:  # dummy block to replace old try
+    import sqlalchemy as _sa
 logger.info("[telegram_compat] ✅ PTB v13→v21 shim loaded")
 
 __all__ = [
