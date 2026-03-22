@@ -210,7 +210,27 @@ class _FiltersCompat:
     user             = _filters_module.User
     chat             = _filters_module.Chat
     language         = _filters_module.Language
-    status_update    = _filters_module.StatusUpdate.ALL   # instance, not class — supports ~ operator
+    class status_update:  # v13 lowercase ↔ v21 uppercase bridge
+        """Proxy so both .new_chat_members (v13) and .NEW_CHAT_MEMBERS (v21) work."""
+        # Uppercase (v21 native)
+        ALL              = _filters_module.StatusUpdate.ALL
+        NEW_CHAT_MEMBERS = _filters_module.StatusUpdate.NEW_CHAT_MEMBERS
+        LEFT_CHAT_MEMBER = _filters_module.StatusUpdate.LEFT_CHAT_MEMBER
+        CHAT_CREATED     = _filters_module.StatusUpdate.CHAT_CREATED
+        DELETE_CHAT_PHOTO= _filters_module.StatusUpdate.DELETE_CHAT_PHOTO
+        NEW_CHAT_PHOTO   = _filters_module.StatusUpdate.NEW_CHAT_PHOTO
+        NEW_CHAT_TITLE   = _filters_module.StatusUpdate.NEW_CHAT_TITLE
+        PINNED_MESSAGE   = _filters_module.StatusUpdate.PINNED_MESSAGE
+        MIGRATE          = _filters_module.StatusUpdate.MIGRATE
+        # Lowercase aliases (v13 compat — what locks.py / welcome.py use)
+        new_chat_members = _filters_module.StatusUpdate.NEW_CHAT_MEMBERS
+        left_chat_member = _filters_module.StatusUpdate.LEFT_CHAT_MEMBER
+        chat_created     = _filters_module.StatusUpdate.CHAT_CREATED
+        delete_chat_photo= _filters_module.StatusUpdate.DELETE_CHAT_PHOTO
+        new_chat_photo   = _filters_module.StatusUpdate.NEW_CHAT_PHOTO
+        new_chat_title   = _filters_module.StatusUpdate.NEW_CHAT_TITLE
+        pinned_message   = _filters_module.StatusUpdate.PINNED_MESSAGE
+        migrate          = _filters_module.StatusUpdate.MIGRATE
     caption_entity   = _filters_module.CaptionEntity      # needed by locks.py
     new_chat_members = _filters_module.StatusUpdate.NEW_CHAT_MEMBERS
     left_chat_member = _filters_module.StatusUpdate.LEFT_CHAT_MEMBER
