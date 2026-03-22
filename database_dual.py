@@ -416,6 +416,7 @@ def _migrate_pg() -> None:
             "DO $$ BEGIN ALTER TABLE generated_links ADD COLUMN source_bot_username TEXT; EXCEPTION WHEN duplicate_column THEN NULL; END $$;",
             "DO $$ BEGIN ALTER TABLE force_sub_channels ADD COLUMN join_by_request BOOLEAN DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;",
             "DO $$ BEGIN ALTER TABLE users ADD COLUMN is_banned BOOLEAN DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;",
+            "DO $$ BEGIN ALTER TABLE bot_progress ADD COLUMN anime_name TEXT DEFAULT 'Anime Name'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;",
         ]:
             try:
                 cur.execute(ddl)
