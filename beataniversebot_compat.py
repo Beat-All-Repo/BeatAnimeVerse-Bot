@@ -84,6 +84,22 @@ class _StubClient:
     def add_event_handler(self, *a, **kw): pass   # Fix: purge module
     def add_handler(self, *a, **kw): pass          # Fix: various modules
     async def iter_chat_members(self, *a, **kw): return iter([])
+    def on(self, *a, **kw):
+        """Stub for telethn.on(events.X) Telethon decorator."""
+        def decorator(func): return func
+        return decorator
+    @property
+    def bot(self):
+        return self
+    @property
+    def id(self):
+        return 0
+    @property
+    def username(self):
+        return ""
+    @property
+    def first_name(self):
+        return "Bot"
 
 # ── Patch SQLAlchemy to allow duplicate table definitions ─────────────────────
 # Prevents: "Table 'users' is already defined for this MetaData instance"
@@ -155,7 +171,12 @@ class _LazyDispatcher:
     def bot(self):
         if self._real is not None:
             return self._real.bot
-        return None
+        # Return stub bot so modules don't crash with NoneType.id
+        return type('_StubBot', (), {
+            'id': 0, 'username': '', 'first_name': 'Bot',
+            'send_message': lambda *a, **k: None,
+            'get_chat_member': lambda *a, **k: None,
+        })()
 
     def __getattr__(self, name):
         if self._real is not None:
