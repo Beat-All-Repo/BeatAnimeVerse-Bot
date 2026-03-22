@@ -4,371 +4,132 @@
 # ==============================================================================
 #!/usr/bin/env python3
 """
-BeatAniVerse Bot — Panel Image System
-========================================
-Priority order (toggleable from admin panel):
-  SOURCE A: URL list  — PANEL_PICS env OR custom URLs saved in DB
-  SOURCE B: APIs      — waifu.im → nekos.best → anilist → safone → tmdb → static
+BeatAniVerse Bot — Panel Image System (Channel-Only Edition)
+=============================================================
+Images come EXCLUSIVELY from Telegram channels — zero external API calls.
 
-Admin can toggle PRIMARY source between URL and API via:
-  Admin Panel → SETTINGS → 🖼 PANEL IMAGE SOURCE
+Priority order:
+  1. Manually added images via /addpanelimg → stored in DB (bot_settings)
+  2. Auto-scanned photos from PANEL_DB_CHANNEL (env var)
+  3. Auto-scanned photos from FALLBACK_IMAGE_CHANNEL (default: -1003794802745)
+  4. Returns None — panel shows text-only (never fetches from any image API)
 
-Results cached 30 min. First load always instant (pre-warmed with static).
+Speed:
+  • All delivery is via Telegram file_id — no HTTP fetches, CDN-speed always.
+  • All panels share the same file_id pool (no per-panel separate fetches).
+  • Stickers and non-photo messages are automatically skipped during scan.
 
-SPEED UPGRADE: Telegram file_id cache
-  After any panel photo is sent, store the Telegram file_id.
-  Subsequent sends use the file_id directly — Telegram serves from its own CDN,
-  zero re-download, near-instant delivery.
+Admin can add images via:
+  Admin Panel → SETTINGS → 🖼 PANEL IMAGE SOURCE → /addpanelimg
+
+No waifu.im, nekos.best, AniList, TMDB, safone, pic.re — ever.
 """
 
-import os, time, random, logging, asyncio
-import concurrent.futures
+import os
+import time
+import random
+import logging
 from typing import Optional, Dict, Any
-
-import requests
 
 logger = logging.getLogger(__name__)
 
-# ── PANEL_PICS env (always instant, no API) ────────────────────────────────────
-_PANEL_PICS_ENV: list = [
-    u.strip() for u in os.getenv("PANEL_PICS", "").split(",")
-    if u.strip().startswith("http")
-]
+# ── In-memory file_id cache — session-scoped, shared across all panel types ───
+_tg_fileid_cache: Dict[str, str] = {}   # "default" → file_id
+_channel_scan_cache: list = []           # list of file_ids from channel scan
+_channel_scan_ts: float = 0.0
+_CHANNEL_SCAN_TTL: float = 300.0        # re-use scan for 5 minutes
 
-WALL_API_KEY: str = os.getenv("WALL_API_KEY", "")
-TMDB_API_KEY: str = os.getenv("TMDB_API_KEY", "")
 
-_CACHE_TTL = 1800   # 30 min
+# ── Telegram file_id cache ────────────────────────────────────────────────────
 
-_img_cache: Dict[str, str]   = {}
-_cache_ts:  Dict[str, float] = {}
-
-# ── Telegram file_id cache — persists for the bot session ─────────────────────
-# Maps panel_type → Telegram file_id string (e.g. "AgACAgIAAxk...")
-# These are permanent for the bot and never expire — only cleared on restart.
-# Using a file_id instead of a URL skips URL fetch entirely: ~0.05s vs ~1-3s.
-_tg_fileid_cache: Dict[str, str] = {}
-
-def get_tg_fileid(panel: str) -> Optional[str]:
-    """Return cached Telegram file_id for this panel, or None."""
-    return _tg_fileid_cache.get(panel)
+def get_tg_fileid(panel: str = "default") -> Optional[str]:
+    """Return cached Telegram file_id, or None."""
+    # All panels share one pool — always use "default" key
+    return _tg_fileid_cache.get("default") or _tg_fileid_cache.get(panel)
 
 def set_tg_fileid(panel: str, file_id: str) -> None:
-    """Store a Telegram file_id for this panel type after a successful send."""
+    """Store a Telegram file_id after a successful send."""
     if file_id:
+        _tg_fileid_cache["default"] = file_id  # share across all panels
         _tg_fileid_cache[panel] = file_id
-        logger.debug(f"Panel [{panel}] file_id cached: {file_id[:20]}...")
+        logger.debug(f"Panel file_id cached: {file_id[:20]}…")
 
 def clear_tg_fileid(panel: str = None) -> None:
-    """Clear file_id cache (call when user changes the panel image source)."""
-    if panel:
-        _tg_fileid_cache.pop(panel, None)
-    else:
-        _tg_fileid_cache.clear()
-
-# ── Static fallbacks — always work, pre-warm cache ────────────────────────────
-_STATIC_FALLBACKS = [
-    "https://i.imgur.com/WdTdHhv.jpeg",
-    "https://i.imgur.com/YeQjKJh.jpeg",
-    "https://i.imgur.com/V8gkYXC.jpeg",
-    "https://i.imgur.com/aLqjMV7.jpeg",
-    "https://cdn.myanimelist.net/images/anime/1988/119092.jpg",
-    "https://cdn.myanimelist.net/images/anime/1223/121781.jpg",
-    "https://cdn.myanimelist.net/images/anime/1170/124216.jpg",
-    "https://images.alphacoders.com/133/thumb-1920-1330574.jpg",
-    "https://images.alphacoders.com/133/thumb-1920-1330590.jpg",
-    "https://images.alphacoders.com/130/thumb-1920-1301234.jpg",
-]
-
-_PANEL_TAGS = {
-    "admin":       ["maid", "elf"],
-    "stats":       ["oppai", "uniform"],
-    "users":       ["waifu", "raiden-shogun"],
-    "channels":    ["maid", "school"],
-    "clones":      ["elf", "kamisato-ayaka"],
-    "settings":    ["waifu", "maid"],
-    "broadcast":   ["uniform", "holo"],
-    "upload":      ["waifu", "school"],
-    "categories":  ["elf", "marin-kitagawa"],
-    "poster":      ["waifu", "maid"],
-    "manga":       ["waifu", "uniform"],
-    "autoforward": ["maid", "elf"],
-    "flags":       ["raiden-shogun", "kamisato-ayaka"],
-    "style":       ["waifu", "school"],
-    "default":     ["waifu", "maid", "elf", "uniform"],
-}
-
-# Pre-warm with statics so first load is always instant
-for _pk in list(_PANEL_TAGS.keys()) + ["default"]:
-    if _pk not in _img_cache:
-        _img_cache[_pk] = random.choice(_STATIC_FALLBACKS)
-        _cache_ts[_pk]  = 0.0   # expired → will refresh on next non-blocking call
-
-# ── DB helpers (read primary source setting) ──────────────────────────────────
-def _get_primary_source() -> str:
-    try:
-        from database_dual import get_setting
-        return get_setting("panel_image_source", "url") or "url"
-    except Exception:
-        return "url"
-
-def _get_custom_urls() -> list:
-    try:
-        from database_dual import get_setting
-        import json as _j
-        raw = get_setting("panel_image_urls", "")
-        if raw:
-            urls = _j.loads(raw)
-            if isinstance(urls, list) and urls:
-                return urls
-    except Exception:
-        pass
-    return _PANEL_PICS_ENV
-
-def _now() -> float:
-    return time.time()
-
-def _is_cached(panel: str) -> bool:
-    return (
-        panel in _img_cache and
-        panel in _cache_ts and
-        (_now() - _cache_ts[panel]) < _CACHE_TTL
-    )
-
-def _set_cache(panel: str, url: str) -> None:
-    _img_cache[panel] = url
-    _cache_ts[panel]  = _now()
+    """Clear file_id cache (call when panel images change)."""
+    _tg_fileid_cache.clear()
 
 
-# ── API fetchers ──────────────────────────────────────────────────────────────
-def _fetch_waifu_im(panel: str) -> Optional[str]:
-    tags = _PANEL_TAGS.get(panel, _PANEL_TAGS["default"])
-    tag  = random.choice(tags)
-    try:
-        r = requests.get(
-            "https://api.waifu.im/search",
-            params={"included_tags": tag, "is_nsfw": "false", "many": "true", "limit": "10"},
-            timeout=5, headers={"Accept": "application/json"},
-        )
-        if r.status_code == 200:
-            images = r.json().get("images", [])
-            if images:
-                hd = [i for i in images if i.get("width", 0) >= 1280]
-                return random.choice(hd if hd else images).get("url")
-    except Exception as exc:
-        logger.debug(f"waifu.im: {exc}")
+# ── Channel scan cache ────────────────────────────────────────────────────────
+
+def get_channel_scan_fileid() -> Optional[str]:
+    """Return a random file_id from the channel scan cache, or None."""
+    if _channel_scan_cache:
+        return random.choice(_channel_scan_cache)
     return None
 
-_NEKOS_ENDPOINTS = ["waifu", "neko", "kitsune", "shinobu", "megumin",
-                    "zero_two", "aqua", "rem", "mai"]
+def set_channel_scan_cache(file_ids: list) -> None:
+    """Store file_ids scanned from a channel."""
+    global _channel_scan_cache, _channel_scan_ts
+    _channel_scan_cache = file_ids
+    _channel_scan_ts = time.monotonic()
 
-def _fetch_nekos_best(panel: str) -> Optional[str]:
-    try:
-        r = requests.get(
-            f"https://nekos.best/api/v2/{random.choice(_NEKOS_ENDPOINTS)}",
-            params={"amount": "5"}, timeout=5,
-        )
-        if r.status_code == 200:
-            results = r.json().get("results", [])
-            if results:
-                url = random.choice(results).get("url", "")
-                if url.endswith((".jpg", ".jpeg", ".png", ".webp")):
-                    return url
-    except Exception as exc:
-        logger.debug(f"nekos.best: {exc}")
-    return None
-
-_ANILIST_POPULAR = [
-    "Demon Slayer", "Attack on Titan", "Jujutsu Kaisen", "Chainsaw Man",
-    "One Piece", "Frieren", "Violet Evergarden", "Your Lie in April",
-    "Made in Abyss", "Blue Lock", "Spy x Family", "Oshi no Ko",
-]
-
-def _fetch_anilist_banner() -> Optional[str]:
-    title = random.choice(_ANILIST_POPULAR)
-    try:
-        r = requests.post(
-            "https://graphql.anilist.co",
-            json={
-                "query": "query($s:String){Media(search:$s,type:ANIME){bannerImage coverImage{extraLarge}}}",
-                "variables": {"s": title},
-            },
-            headers={"Content-Type": "application/json"}, timeout=5,
-        )
-        if r.status_code == 200:
-            data = r.json().get("data", {}).get("Media", {})
-            return data.get("bannerImage") or (data.get("coverImage") or {}).get("extraLarge")
-    except Exception as exc:
-        logger.debug(f"anilist: {exc}")
-    return None
-
-_ANIME_QUERIES = [
-    "anime landscape", "anime city night", "anime scenery",
-    "demon slayer scenery", "ghibli wallpaper", "anime sunset",
-]
-
-def _fetch_safone_wall() -> Optional[str]:
-    try:
-        r = requests.get(
-            "https://api.safone.me/wall",
-            params={"query": random.choice(_ANIME_QUERIES)}, timeout=5,
-        )
-        if r.status_code == 200:
-            results = r.json().get("results", [])
-            if results:
-                chosen = random.choice(results[:5])
-                return chosen.get("imageUrl") or chosen.get("url")
-    except Exception as exc:
-        logger.debug(f"safone: {exc}")
-    return None
-
-def _fetch_tmdb_backdrop() -> Optional[str]:
-    if not TMDB_API_KEY:
-        return None
-    ids = ["14160", "8392", "149870", "378064", "431580", "15120", "527774"]
-    try:
-        r = requests.get(
-            f"https://api.themoviedb.org/3/movie/{random.choice(ids)}/images",
-            params={"api_key": TMDB_API_KEY}, timeout=5,
-        )
-        if r.status_code == 200:
-            backdrops = r.json().get("backdrops", [])
-            if backdrops:
-                best = max(backdrops, key=lambda x: x.get("width", 0))
-                path = best.get("file_path", "")
-                if path:
-                    return f"https://image.tmdb.org/t/p/original{path}"
-    except Exception as exc:
-        logger.debug(f"tmdb: {exc}")
-    return None
-
-def _fetch_pic_re() -> Optional[str]:
-    try:
-        r = requests.get("https://pic.re/image", params={"type": "sfw"},
-                         timeout=5, allow_redirects=False)
-        if r.status_code in (200, 302):
-            url = r.headers.get("Location") or r.url
-            if url and url.startswith("http") and "pic.re" not in url:
-                return url
-    except Exception as exc:
-        logger.debug(f"pic.re: {exc}")
-    return None
+def is_channel_scan_fresh() -> bool:
+    return bool(_channel_scan_cache and (time.monotonic() - _channel_scan_ts) < _CHANNEL_SCAN_TTL)
 
 
-# ── URL-first fetch ───────────────────────────────────────────────────────────
-def _fetch_from_urls() -> Optional[str]:
-    """Pick from custom URL list (DB or env). Instant."""
-    urls = _get_custom_urls()
-    if urls:
-        return random.choice(urls)
-    return None
+# ── Main public API ───────────────────────────────────────────────────────────
 
-# ── API fetch (parallel, capped at 5s) ───────────────────────────────────────
-def _fetch_from_apis(panel: str) -> Optional[str]:
-    """Run multiple API fetchers in parallel, return first success."""
-    fetchers = [
-        ("waifu.im",  lambda: _fetch_waifu_im(panel)),
-        ("anilist",   _fetch_anilist_banner),
-        ("nekos",     lambda: _fetch_nekos_best(panel)),
-        ("safone",    _fetch_safone_wall),
-        ("pic.re",    _fetch_pic_re),
-        ("tmdb",      _fetch_tmdb_backdrop),
-    ]
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as ex:
-            futs = {ex.submit(fn): name for name, fn in fetchers}
-            for fut in concurrent.futures.as_completed(futs, timeout=5):
-                try:
-                    url = fut.result()
-                    if url and url.startswith("http"):
-                        logger.debug(f"Panel image from {futs[fut]}: {url[:60]}")
-                        return url
-                except Exception:
-                    pass
-    except concurrent.futures.TimeoutError:
-        logger.debug("API fetch timed out")
-    except Exception as exc:
-        logger.debug(f"API fetch error: {exc}")
-    return None
-
-
-# ── Main fetch function ───────────────────────────────────────────────────────
 def get_panel_image(panel: str = "default", force_refresh: bool = False) -> Optional[str]:
     """
-    Fetch panel image respecting primary source toggle.
-
-    primary = 'url':
-      1. Custom URLs / PANEL_PICS env  → instant
-      2. APIs if URLs empty            → parallel with timeout
-      3. Static fallback
-
-    primary = 'api':
-      1. APIs first                    → parallel with timeout
-      2. Custom URLs / PANEL_PICS env  → fallback
-      3. Static fallback
+    Synchronous panel image getter — channel file_ids only, no APIs.
+    Returns a Telegram file_id string, or None.
     """
-    if not force_refresh and _is_cached(panel):
-        return _img_cache[panel]
+    # Session cache hit
+    if not force_refresh:
+        fid = get_tg_fileid(panel)
+        if fid:
+            return fid
 
-    primary = _get_primary_source()
+    # Channel scan cache
+    fid = get_channel_scan_fileid()
+    if fid:
+        return fid
 
-    if primary == "url":
-        url = _fetch_from_urls()
-        if not url:
-            url = _fetch_from_apis(panel)
-    else:  # 'api'
-        url = _fetch_from_apis(panel)
-        if not url:
-            url = _fetch_from_urls()
+    return None
 
-    if not url:
-        url = random.choice(_STATIC_FALLBACKS)
-        logger.debug(f"Panel [{panel}] static fallback")
-
-    _set_cache(panel, url)
-    return url
 
 def get_panel_image_sync(panel: str = "default") -> Optional[str]:
     return get_panel_image(panel)
 
+
 async def get_panel_image_async(panel: str = "default") -> Optional[str]:
     """
-    Async wrapper.
-    Returns cached value INSTANTLY. Refreshes stale cache in background.
-    First call always instant (pre-warmed with static fallbacks).
+    Async wrapper — always instant, no awaiting external HTTP.
+    Returns cached file_id or None.
     """
-    cached = _img_cache.get(panel)
-    if cached:
-        if not _is_cached(panel):
-            # Background refresh — never blocks caller
-            loop = asyncio.get_event_loop()
-            loop.run_in_executor(None, get_panel_image, panel, True)
-        return cached
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, get_panel_image, panel)
+    return get_panel_image(panel)
+
 
 def clear_image_cache(panel: str = None) -> int:
-    count = 0
-    if panel:
-        if panel in _img_cache:
-            del _img_cache[panel]
-            del _cache_ts[panel]
-            count = 1
-        clear_tg_fileid(panel)   # also clear file_id so next send re-uploads
-    else:
-        count = len(_img_cache)
-        _img_cache.clear()
-        _cache_ts.clear()
-        clear_tg_fileid()        # clear all file_ids too
+    """Clear all caches. Returns number of entries cleared."""
+    count = len(_tg_fileid_cache) + len(_channel_scan_cache)
+    _tg_fileid_cache.clear()
+    _channel_scan_cache.clear()
     return count
 
+
 def get_cache_status() -> Dict[str, Any]:
-    now = _now()
+    """Return cache status for admin diagnostics."""
     return {
-        p: {
-            "url": u[:60] + "...",
-            "age_sec": int(now - _cache_ts.get(p, now)),
-            "has_fileid": p in _tg_fileid_cache,
-        }
-        for p, u in _img_cache.items()
+        "file_id_cache_size": len(_tg_fileid_cache),
+        "channel_scan_size":  len(_channel_scan_cache),
+        "channel_scan_fresh": is_channel_scan_fresh(),
+        "sample_fid":         (_channel_scan_cache[0][:20] + "…") if _channel_scan_cache else None,
     }
+
+
+# ── Compatibility shims (keep old import paths working) ──────────────────────
+
+def _is_cached(panel: str = "default") -> bool:
+    """Compat: always True if we have any file_id cached."""
+    return bool(get_tg_fileid(panel) or _channel_scan_cache)
