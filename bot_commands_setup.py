@@ -298,9 +298,10 @@ async def initialize_bot_commands(bot: Bot) -> None:
     # 2. Set global default (USER level for everyone)
     await set_default_bot_commands(bot)
 
-    # 3. Set OWNER commands for OWNER_ID
-    await set_bot_commands_for_user(bot, OWNER_ID)
-    if ADMIN_ID != OWNER_ID:
+    # 3. Set OWNER commands for OWNER_ID (skip if env var not configured = 0)
+    if OWNER_ID and OWNER_ID != 0:
+        await set_bot_commands_for_user(bot, OWNER_ID)
+    if ADMIN_ID and ADMIN_ID != 0 and ADMIN_ID != OWNER_ID:
         await set_bot_commands_for_user(bot, ADMIN_ID)
 
     # 4. Set ADMIN commands for all DRAGONS
@@ -314,10 +315,13 @@ async def initialize_bot_commands(bot: Bot) -> None:
             "SELECT value FROM bot_settings WHERE key LIKE 'admin_%'"
         )
         if rows:
-            for (val,) in rows:
+            for row in rows:
                 try:
+                    # Guard: row may be a tuple with 0 or 1+ columns — unpack safely
+                    val = row[0] if isinstance(row, (tuple, list)) and len(row) > 0 else row
                     aid = int(val)
-                    await set_bot_commands_for_user(bot, aid)
+                    if aid and aid != 0:
+                        await set_bot_commands_for_user(bot, aid)
                 except Exception:
                     pass
     except Exception as exc:
