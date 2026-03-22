@@ -35,10 +35,13 @@ command_list = [
     "leaderboard",
 ]
 
-for handler_list in dispatcher.handlers:
-    for handler in dispatcher.handlers[handler_list]:
-        if any(isinstance(handler, cmd_handler) for cmd_handler in CommandHandlerList):
-            command_list += handler.command
+try:
+    for handler_list in dispatcher.handlers:
+        for handler in dispatcher.handlers[handler_list]:
+            if any(isinstance(handler, cmd_handler) for cmd_handler in CommandHandlerList):
+                command_list += list(handler.command)
+except (TypeError, AttributeError):
+    pass  # dispatcher.handlers not ready yet at import time — command_list stays as default
 
 
 def clean_blue_text_must_click(update: Update, context: CallbackContext):
