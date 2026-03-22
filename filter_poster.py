@@ -438,20 +438,30 @@ async def _auto_delete(bot: Any, chat_id: int, *message_ids: int, delay: int = 3
 # ═════════════════════════════════════════════════════════════════════════════
 
 async def download_sticker(bot: Any, file_id: str) -> Optional[str]:
-    """Download a Telegram sticker by file_id, return local path."""
+    """
+    Download a Telegram sticker/image by file_id, return local path.
+    Supports: static .webp stickers, .png/.jpg/.webp images.
+    Animated (.tgs) stickers are skipped (can't render as PIL overlay).
+    """
     if file_id in _sticker_cache:
         path = _sticker_cache[file_id]
         if os.path.exists(path):
             return path
     try:
-        file = await bot.get_file(file_id)
-        # Extension: .webp for static stickers, .tgs for animated (skip animated)
-        ext = ".webp" if not file.file_path.endswith(".tgs") else ".tgs"
-        if ext == ".tgs":
-            logger.debug("Animated stickers not supported as watermark")
+        tg_file = await bot.get_file(file_id)
+        fp = tg_file.file_path or ""
+        if fp.endswith(".tgs"):
+            logger.debug("Animated sticker (.tgs) not supported as watermark — skipping")
             return None
+        # Determine extension
+        for ext_check in (".webp", ".png", ".jpg", ".jpeg", ".gif"):
+            if fp.lower().endswith(ext_check):
+                ext = ext_check
+                break
+        else:
+            ext = ".webp"  # default for stickers
         path = os.path.join(STICKER_DIR, f"{hashlib.md5(file_id.encode()).hexdigest()}{ext}")
-        await file.download_to_drive(path)
+        await tg_file.download_to_drive(path)
         _sticker_cache[file_id] = path
         return path
     except Exception as exc:
