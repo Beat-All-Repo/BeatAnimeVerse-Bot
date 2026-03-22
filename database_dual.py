@@ -1,3 +1,7 @@
+# ==============================================================================
+# PLACE AT: /app/database_dual.py
+# ACTION: Replace existing file
+# ==============================================================================
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -417,7 +421,7 @@ def get_setting(key: str, default=None) -> Optional[str]:
     if row:
         return row[0]
     # Mongo fallback
-    if _MG.db:
+    if _MG.db is not None:
         try:
             doc = _MG.db.bot_settings.find_one({"key": key})
             if doc:
@@ -432,7 +436,7 @@ def set_setting(key: str, value: str) -> None:
         INSERT INTO bot_settings (key, value) VALUES (%s, %s)
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
     """, (key, value))
-    if _MG.db:
+    if _MG.db is not None:
         try:
             _MG.db.bot_settings.update_one(
                 {"key": key}, {"$set": {"key": key, "value": value}}, upsert=True
@@ -466,7 +470,7 @@ def add_user(user_id: int, username: Optional[str],
                 first_name = EXCLUDED.first_name,
                 last_name  = EXCLUDED.last_name
     """, (user_id, clean, first_name, last_name))
-    if _MG.db:
+    if _MG.db is not None:
         try:
             _MG.db.mongo_users.update_one(
                 {"user_id": user_id},
@@ -482,7 +486,7 @@ def get_user_count() -> int:
     row = _pg_exec("SELECT COUNT(*) FROM users")
     if row:
         return row[0]
-    if _MG.db:
+    if _MG.db is not None:
         try:
             return _MG.db.mongo_users.count_documents({})
         except Exception:
@@ -509,7 +513,7 @@ def get_all_users(limit=None, offset=0) -> list:
     if rows is not None:
         return rows
     # Mongo fallback
-    if _MG.db:
+    if _MG.db is not None:
         try:
             cursor = _MG.db.mongo_users.find({}, {"_id": 0}).skip(offset)
             if limit:
@@ -531,7 +535,7 @@ def get_user_info_by_id(user_id: int) -> Optional[tuple]:
     """, (user_id,))
     if row:
         return row
-    if _MG.db:
+    if _MG.db is not None:
         try:
             doc = _MG.db.mongo_users.find_one({"user_id": user_id})
             if doc:
@@ -547,7 +551,7 @@ def get_user_id_by_username(username: str) -> Optional[int]:
     row = _pg_exec("SELECT user_id FROM users WHERE LOWER(username) = %s", (clean,))
     if row:
         return row[0]
-    if _MG.db:
+    if _MG.db is not None:
         try:
             doc = _MG.db.mongo_users.find_one({"username": {"$regex": f"^{clean}$", "$options": "i"}})
             if doc:
@@ -570,7 +574,7 @@ def is_existing_user(user_id: int) -> bool:
     row = _pg_exec("SELECT 1 FROM users WHERE user_id = %s", (user_id,))
     if row:
         return True
-    if _MG.db:
+    if _MG.db is not None:
         try:
             return _MG.db.mongo_users.find_one({"user_id": user_id}) is not None
         except Exception:
@@ -580,7 +584,7 @@ def is_existing_user(user_id: int) -> bool:
 
 def ban_user(user_id: int) -> None:
     _pg_run("UPDATE users SET is_banned = TRUE WHERE user_id = %s", (user_id,))
-    if _MG.db:
+    if _MG.db is not None:
         try:
             _MG.db.mongo_users.update_one({"user_id": user_id}, {"$set": {"is_banned": True}})
         except Exception:
@@ -589,7 +593,7 @@ def ban_user(user_id: int) -> None:
 
 def unban_user(user_id: int) -> None:
     _pg_run("UPDATE users SET is_banned = FALSE WHERE user_id = %s", (user_id,))
-    if _MG.db:
+    if _MG.db is not None:
         try:
             _MG.db.mongo_users.update_one({"user_id": user_id}, {"$set": {"is_banned": False}})
         except Exception:
@@ -600,7 +604,7 @@ def is_user_banned(user_id: int) -> bool:
     row = _pg_exec("SELECT is_banned FROM users WHERE user_id = %s", (user_id,))
     if row:
         return bool(row[0])
-    if _MG.db:
+    if _MG.db is not None:
         try:
             doc = _MG.db.mongo_users.find_one({"user_id": user_id})
             if doc:
@@ -624,7 +628,7 @@ def add_force_sub_channel(channel_username: str, channel_title: str,
                 is_active = TRUE,
                 join_by_request = EXCLUDED.join_by_request
     """, (channel_username, channel_title, join_by_request))
-    if _MG.db:
+    if _MG.db is not None:
         try:
             _MG.db.force_sub_channels.update_one(
                 {"channel_username": channel_username},
@@ -653,7 +657,7 @@ def get_all_force_sub_channels(return_usernames_only: bool = False) -> list:
             return rows
 
     # Mongo fallback
-    if _MG.db:
+    if _MG.db is not None:
         try:
             docs = list(_MG.db.force_sub_channels.find({"is_active": True}))
             if return_usernames_only:
@@ -672,7 +676,7 @@ def get_force_sub_channel_info(channel_username: str) -> Optional[tuple]:
     """, (channel_username,))
     if row:
         return row
-    if _MG.db:
+    if _MG.db is not None:
         try:
             doc = _MG.db.force_sub_channels.find_one(
                 {"channel_username": channel_username, "is_active": True}
@@ -690,7 +694,7 @@ def delete_force_sub_channel(channel_username: str) -> None:
         "UPDATE force_sub_channels SET is_active = FALSE WHERE channel_username = %s",
         (channel_username,)
     )
-    if _MG.db:
+    if _MG.db is not None:
         try:
             _MG.db.force_sub_channels.update_one(
                 {"channel_username": channel_username}, {"$set": {"is_active": False}}
@@ -713,7 +717,7 @@ def generate_link_id(channel_username: str, user_id: int,
         VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (link_id) DO UPDATE SET channel_username = EXCLUDED.channel_username
     """, (link_id, channel_username, user_id, never_expires, channel_title, source_bot_username))
-    if _MG.db:
+    if _MG.db is not None:
         try:
             _MG.db.generated_links.insert_one({
                 "link_id": link_id, "channel_username": channel_username,
@@ -733,7 +737,7 @@ def get_link_info(link_id: str) -> Optional[tuple]:
     """, (link_id,))
     if row:
         return row
-    if _MG.db:
+    if _MG.db is not None:
         try:
             doc = _MG.db.generated_links.find_one({"link_id": link_id})
             if doc:
@@ -812,7 +816,7 @@ def cleanup_expired_links() -> None:
         cur.execute("DELETE FROM generated_links WHERE created_time < %s AND never_expires = FALSE",
                     (cutoff,))
         logger.info(f"[NeonDB] Cleaned {cur.rowcount} expired links")
-    if _MG.db:
+    if _MG.db is not None:
         try:
             res = _MG.db.generated_links.delete_many(
                 {"created_time": {"$lt": cutoff}, "never_expires": False}
@@ -833,7 +837,7 @@ def add_clone_bot(bot_token: str, bot_username: str) -> bool:
         ON CONFLICT (bot_token) DO UPDATE
             SET bot_username = EXCLUDED.bot_username, is_active = TRUE
     """, (bot_token, bot_username))
-    if _MG.db:
+    if _MG.db is not None:
         try:
             _MG.db.clone_bots.update_one(
                 {"bot_token": bot_token},
@@ -858,7 +862,7 @@ def get_all_clone_bots(active_only: bool = False) -> list:
         """)
     if rows is not None:
         return rows
-    if _MG.db:
+    if _MG.db is not None:
         try:
             filt = {"is_active": True} if active_only else {}
             return [(None, d["bot_token"], d["bot_username"], d.get("is_active", True), None)
@@ -877,7 +881,7 @@ def remove_clone_bot(bot_username: str) -> bool:
                 "UPDATE clone_bots SET is_active = FALSE WHERE LOWER(bot_username) = %s",
                 (uname,)
             )
-    if _MG.db:
+    if _MG.db is not None:
         try:
             _MG.db.clone_bots.update_one(
                 {"bot_username": {"$regex": f"^{uname}$", "$options": "i"}},
@@ -903,7 +907,7 @@ def am_i_a_clone_token(bot_token: str) -> bool:
     )
     if row:
         return True
-    if _MG.db:
+    if _MG.db is not None:
         try:
             return _MG.db.clone_bots.find_one({"bot_token": bot_token, "is_active": True}) is not None
         except Exception:
@@ -1292,7 +1296,7 @@ def add_poster_premium(user_id: int, rank: str,
                         expiry_time: Optional[datetime] = None) -> bool:
     data = {"user_id": user_id, "rank": rank, "expiry_time": expiry_time,
             "added_at": datetime.utcnow()}
-    if _MG.db:
+    if _MG.db is not None:
         try:
             _MG.db.poster_premium.update_one(
                 {"user_id": user_id}, {"$set": data}, upsert=True
@@ -1315,7 +1319,7 @@ def add_poster_premium(user_id: int, rank: str,
 
 
 def get_poster_premium(user_id: int) -> Optional[dict]:
-    if _MG.db:
+    if _MG.db is not None:
         try:
             doc = _MG.db.poster_premium.find_one({"user_id": user_id})
             if doc:
@@ -1346,7 +1350,7 @@ def get_poster_premium(user_id: int) -> Optional[dict]:
 
 
 def remove_poster_premium(user_id: int) -> bool:
-    if _MG.db:
+    if _MG.db is not None:
         try:
             _MG.db.poster_premium.delete_one({"user_id": user_id})
         except Exception:
@@ -1362,7 +1366,7 @@ def remove_poster_premium(user_id: int) -> bool:
 
 
 def get_all_poster_premium() -> list:
-    if _MG.db:
+    if _MG.db is not None:
         try:
             now = datetime.utcnow()
             return list(_MG.db.poster_premium.find(
@@ -1386,7 +1390,7 @@ def get_poster_rank(user_id: int) -> str:
 def check_and_update_poster_usage(user_id: int, limit: int) -> bool:
     """Returns True if within limit, updates counter. Uses MongoDB for speed."""
     today = _today()
-    if _MG.db:
+    if _MG.db is not None:
         try:
             res = _MG.db.poster_usage.find_one_and_update(
                 {"user_id": user_id, "date": today},
@@ -1409,7 +1413,7 @@ def check_and_update_poster_usage(user_id: int, limit: int) -> bool:
 
 def get_poster_usage_today(user_id: int) -> int:
     today = _today()
-    if _MG.db:
+    if _MG.db is not None:
         try:
             doc = _MG.db.poster_usage.find_one({"user_id": user_id, "date": today})
             return doc.get("count", 0) if doc else 0
@@ -1423,7 +1427,7 @@ def get_poster_usage_today(user_id: int) -> int:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def get_couple(user_id: int) -> Optional[dict]:
-    if _MG.db:
+    if _MG.db is not None:
         try:
             return _MG.db.couples.find_one({"user_id": user_id}, {"_id": 0})
         except Exception:
@@ -1432,7 +1436,7 @@ def get_couple(user_id: int) -> Optional[dict]:
 
 
 def set_couple(user_id: int, partner_id: int, chat_id: int) -> None:
-    if _MG.db:
+    if _MG.db is not None:
         try:
             _MG.db.couples.update_one(
                 {"user_id": user_id},
@@ -1445,7 +1449,7 @@ def set_couple(user_id: int, partner_id: int, chat_id: int) -> None:
 
 
 def remove_couple(user_id: int) -> None:
-    if _MG.db:
+    if _MG.db is not None:
         try:
             _MG.db.couples.delete_many(
                 {"$or": [{"user_id": user_id}, {"partner_id": user_id}]}
@@ -1455,7 +1459,7 @@ def remove_couple(user_id: int) -> None:
 
 
 def get_couple_of_day(chat_id: int) -> Optional[tuple]:
-    if _MG.db:
+    if _MG.db is not None:
         try:
             today = _today()
             doc = _MG.db.couple_of_day.find_one({"chat_id": chat_id, "date": today})
@@ -1467,7 +1471,7 @@ def get_couple_of_day(chat_id: int) -> Optional[tuple]:
 
 
 def set_couple_of_day(chat_id: int, user1: int, user2: int) -> None:
-    if _MG.db:
+    if _MG.db is not None:
         try:
             today = _today()
             _MG.db.couple_of_day.update_one(
@@ -1485,7 +1489,7 @@ def set_couple_of_day(chat_id: int, user1: int, user2: int) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def is_chatbot_enabled(chat_id: int) -> bool:
-    if _MG.db:
+    if _MG.db is not None:
         try:
             doc = _MG.db.chatbot_data.find_one({"chat_id": chat_id})
             return bool(doc and doc.get("enabled", False))
@@ -1495,7 +1499,7 @@ def is_chatbot_enabled(chat_id: int) -> bool:
 
 
 def set_chatbot_enabled(chat_id: int, enabled: bool) -> None:
-    if _MG.db:
+    if _MG.db is not None:
         try:
             _MG.db.chatbot_data.update_one(
                 {"chat_id": chat_id},
