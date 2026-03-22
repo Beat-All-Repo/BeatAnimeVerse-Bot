@@ -100,6 +100,7 @@ from telegram.ext import (
     JobQueue,
     InlineQueryHandler,
     ConversationHandler,
+    ChatJoinRequestHandler,
 )
 from telegram.error import (
     TelegramError,
@@ -246,6 +247,11 @@ WELCOME_SOURCE_MESSAGE_ID: int = int(os.getenv("WELCOME_SOURCE_MESSAGE_ID", "32"
 # Same concept as WELCOME_SOURCE_CHANNEL. Add bot as admin to this channel.
 PANEL_DB_CHANNEL: int = int(os.getenv("PANEL_DB_CHANNEL", "0"))
 
+# Fallback image channel — bot scans this channel for photos on startup (ignores stickers/text).
+# If PANEL_DB_CHANNEL has no manually added images, random photos from here are used for ALL panels.
+# Bot must be a member/admin of this channel. Default: -1003794802745
+FALLBACK_IMAGE_CHANNEL: int = int(os.getenv("FALLBACK_IMAGE_CHANNEL", "-1003794802745"))
+
 # Public links / branding
 PUBLIC_ANIME_CHANNEL_URL: str = os.getenv("PUBLIC_ANIME_CHANNEL_URL", "https://t.me/BeatAnime")
 REQUEST_CHANNEL_URL: str = os.getenv("REQUEST_CHANNEL_URL", "https://t.me/Beat_Hindi_Dubbed")
@@ -376,7 +382,8 @@ def _cache_set(key: str, data: Any) -> None:
 (
     GENERATE_LINK_IDENTIFIER,
     GENERATE_LINK_TITLE,
-) = range(3, 5)
+    GENERATE_LINK_ANIME_NAME,
+) = range(3, 6)
 
 # Clone states
 (ADD_CLONE_TOKEN,) = range(5, 6)
@@ -471,6 +478,9 @@ PENDING_FILL_TITLE = 45
     AU_MANGA_CUSTOM_INTERVAL,
 ) = range(52, 53)
 
+# "Forward a post" — admin forwards any channel post and bot auto-extracts channel ID
+PENDING_CHANNEL_POST = 53
+
 # Conversation dictionaries
 user_states: Dict[int, int] = {}
 user_data_temp: Dict[int, Dict[str, Any]] = {}
@@ -564,19 +574,72 @@ MATH_BOLD_MAP: Dict[str, str] = {
 
 
 def small_caps(text: str) -> str:
-    """Convert ASCII letters to Unicode small caps, skipping HTML tags."""
-    result, inside_tag = [], False
-    for ch in text:
-        if ch == "<":
-            inside_tag = True
+    """
+    Convert ASCII letters to Unicode small caps.
+    Skips: HTML tags, @mentions, /commands, http(s):// URLs, <code>...</code> content.
+    Numbers and punctuation are passed through unchanged.
+    """
+    if not text:
+        return text
+    result: list = []
+    i = 0
+    n = len(text)
+    in_tag = False
+    in_code = False
+
+    while i < n:
+        ch = text[i]
+        # HTML tag open
+        if ch == "<" and not in_code:
+            in_tag = True
+            # Detect <code> / </code>
+            rest = text[i:].lower()
+            if rest.startswith("<code"):
+                in_code = True
+            elif rest.startswith("</code"):
+                in_code = False
             result.append(ch)
-        elif ch == ">":
-            inside_tag = False
+            i += 1
+            continue
+        if ch == ">" and in_tag:
+            in_tag = False
             result.append(ch)
-        elif inside_tag:
+            i += 1
+            continue
+        # Inside HTML tag attribute text — copy verbatim
+        if in_tag:
             result.append(ch)
-        else:
-            result.append(SMALL_CAPS_MAP.get(ch, ch))
+            i += 1
+            continue
+        # Inside <code> block — copy verbatim
+        if in_code:
+            result.append(ch)
+            i += 1
+            continue
+        # @mention — copy word as-is
+        if ch == "@":
+            result.append(ch)
+            i += 1
+            while i < n and (text[i].isalnum() or text[i] == "_"):
+                result.append(text[i])
+                i += 1
+            continue
+        # /command — copy word as-is (only at word boundary)
+        if ch == "/" and (i == 0 or not text[i-1].isalnum()):
+            i += 1
+            while i < n and (text[i].isalnum() or text[i] == "_"):
+                result.append(text[i])
+                i += 1
+            continue
+        # URL — copy until whitespace
+        if text[i:i+7] in ("https:/", "http://") or text[i:i+8] == "https://":
+            while i < n and text[i] not in (" ", "\n", "\t", "<", ">"):
+                result.append(text[i])
+                i += 1
+            continue
+        # Normal char — apply SC map
+        result.append(SMALL_CAPS_MAP.get(ch, ch))
+        i += 1
     return "".join(result)
 
 
@@ -591,8 +654,8 @@ def bold_button(label: str, **kwargs) -> InlineKeyboardButton:
 
 
 def b(text: str) -> str:
-    """Wrap text in HTML bold tags."""
-    return f"<b>{text}</b>"
+    """Wrap text in HTML bold tags, auto-applying small caps to all letter content."""
+    return f"<b>{small_caps(text)}</b>"
 
 
 def code(text: str) -> str:
@@ -600,8 +663,12 @@ def code(text: str) -> str:
     return f"<code>{text}</code>"
 
 
-def bq(content: str, expandable: bool = False) -> str:
-    """Wrap text in a proper HTML blockquote tag."""
+def bq(content: str, expandable: bool = True) -> str:
+    """
+    Wrap text in an expandable HTML blockquote (collapsed by default).
+    Pass expandable=False for a plain blockquote.
+    Text inside is SC-converted unless it already contains SC chars.
+    """
     tag = "blockquote expandable" if expandable else "blockquote"
     return f"<{tag}>{content}</{tag.split()[0]}>"
 
@@ -3187,13 +3254,12 @@ _CHANNEL_SCAN_TTL: float = 300.0  # re-scan every 5 min
 
 def _get_panel_db_fileid() -> Optional[str]:
     """
-    Return a random file_id for panel images.
-    
+    Return a random file_id for panel images — shared across ALL panel types.
+
     Priority:
       1. Manually added images (via /addpanelimg) — stored in DB
-      2. Auto-scanned from PANEL_DB_CHANNEL — if channel is set but no
-         images have been manually added yet, fetches the last 20 messages
-         from the channel and picks a random photo. Result is cached 5 min.
+      2. Auto-scanned from PANEL_DB_CHANNEL (if set, 5-min cache)
+      3. Auto-scanned from FALLBACK_IMAGE_CHANNEL (-1003794802745) — ignores stickers
     """
     global _channel_scan_cache, _channel_scan_ts
 
@@ -3203,66 +3269,97 @@ def _get_panel_db_fileid() -> Optional[str]:
         item = random.choice(items)
         return item.get("file_id") or None
 
-    # Priority 2: auto-scan PANEL_DB_CHANNEL (only if channel set, no manual images)
-    if not PANEL_DB_CHANNEL:
-        return None
-
+    # Priority 2 & 3: auto-scan from PANEL_DB_CHANNEL or FALLBACK_IMAGE_CHANNEL
     now = time.monotonic()
     if _channel_scan_cache and (now - _channel_scan_ts) < _CHANNEL_SCAN_TTL:
         return random.choice(_channel_scan_cache) if _channel_scan_cache else None
 
-    # Cache miss / expired — trigger async scan (non-blocking, runs in background)
-    # Return last known value while scan runs, or None on very first call
+    # Cache miss / expired — return last known (non-blocking) or None on first call
     return random.choice(_channel_scan_cache) if _channel_scan_cache else None
 
 
 async def _scan_panel_channel(bot) -> None:
     """
-    Background task: fetch recent photo messages from PANEL_DB_CHANNEL,
-    extract file_ids, and cache them. Called once at startup and every 5 min.
-    Never blocks the event loop — runs as a fire-and-forget task.
+    Background task: scan PANEL_DB_CHANNEL (if set) or FALLBACK_IMAGE_CHANNEL for photo messages.
+    Probes message IDs 1-200 using forward_message, extracts file_ids for photos only (skips stickers).
+    Cached 5 min. Never blocks the event loop.
     """
     global _channel_scan_cache, _channel_scan_ts
 
-    if not PANEL_DB_CHANNEL:
-        return
-    # Skip if manual images exist — no need to scan
+    # Skip if manual images exist
     if _get_panel_db_images():
+        return
+
+    # Determine which channel to scan
+    scan_channel = PANEL_DB_CHANNEL if PANEL_DB_CHANNEL else FALLBACK_IMAGE_CHANNEL
+    if not scan_channel or not bot:
         return
 
     try:
         file_ids = []
-        # Telegram getUpdates doesn't let us list channel messages directly,
-        # but forwardMessages does. Instead we use getChatHistory via
-        # bot.get_chat — actually PTB has no direct history API.
-        # Best approach: use the stored msg_ids from previous forwards.
-        # Fallback: nothing to scan without pyrogram/telethon.
-        # Use pyrogram if available (it has get_chat_history):
+
+        # Try pyrogram first (fast, gets full history)
         try:
             from pyrogram import Client as _Pyro
-            # Check if a pyrogram client is running
-            import sys
+            import sys as _sys2
             pyro_client = None
-            for obj in sys.modules.values():
+            for obj in _sys2.modules.values():
                 if isinstance(obj, _Pyro) and getattr(obj, "is_connected", False):
                     pyro_client = obj
                     break
             if pyro_client:
-                async for msg in pyro_client.get_chat_history(PANEL_DB_CHANNEL, limit=30):
-                    if msg.photo:
+                async for msg in pyro_client.get_chat_history(scan_channel, limit=50):
+                    # Skip stickers, only collect photos
+                    if msg.photo and not msg.sticker:
                         file_ids.append(msg.photo.file_id)
-                    if len(file_ids) >= 20:
+                    if len(file_ids) >= 30:
                         break
         except Exception:
             pass
 
+        # Bot API fallback: probe sequential message IDs (1-200).
+        # Each call to copy_message returns the copied message with file_id.
+        # We use a temp private chat (PANEL_DB_CHANNEL) as sink, then delete.
+        if not file_ids:
+            sink = PANEL_DB_CHANNEL or None
+            if sink:
+                for msg_id in range(1, 201):
+                    if len(file_ids) >= 30:
+                        break
+                    try:
+                        fwd = await bot.forward_message(
+                            chat_id=sink,
+                            from_chat_id=scan_channel,
+                            message_id=msg_id,
+                            disable_notification=True,
+                        )
+                        if fwd and fwd.photo and not fwd.sticker:
+                            file_ids.append(fwd.photo[-1].file_id)
+                            # Clean up forwarded copy to keep the channel tidy
+                            try:
+                                await bot.delete_message(sink, fwd.message_id)
+                            except Exception:
+                                pass
+                        elif fwd and not fwd.photo:
+                            # Non-photo message — skip (sticker, text, etc.)
+                            try:
+                                await bot.delete_message(sink, fwd.message_id)
+                            except Exception:
+                                pass
+                    except Exception:
+                        # Message doesn't exist at this ID — continue
+                        pass
+            else:
+                # No sink — can't probe without a destination
+                logger.debug("[panel] no PANEL_DB_CHANNEL set; cannot probe FALLBACK_IMAGE_CHANNEL via Bot API")
+
         if file_ids:
             _channel_scan_cache = file_ids
             _channel_scan_ts = time.monotonic()
-            logger.info(f"[panel] auto-scanned {len(file_ids)} images from PANEL_DB_CHANNEL")
+            logger.info(f"[panel] scanned {len(file_ids)} panel images from channel {scan_channel}")
         else:
-            # pyrogram not available or channel empty — just mark as scanned
-            _channel_scan_ts = time.monotonic()
+            _channel_scan_ts = time.monotonic()  # mark as attempted
+            logger.debug(f"[panel] no photos found in channel {scan_channel}")
     except Exception as exc:
         logger.debug(f"[panel] channel scan failed: {exc}")
 
@@ -3270,15 +3367,18 @@ async def _scan_panel_channel(bot) -> None:
 def get_panel_pic(panel_type: str = "default") -> Optional[str]:
     """
     Get panel image — synchronous, always instant.
+    ALL panel types (admin, users, stats, channels, etc.) share the SAME image
+    so there are zero duplicate fetches and panels always load at file_id speed.
+
     Priority:
       1. Panel DB channel file_ids (set via bot) — fastest, zero external HTTP
       2. PANEL_IMAGE_FILE_ID env var
-      3. session file_id cache
-      4. panel_image URL cache
+      3. Session file_id cache (from panel_image module)
+      4. panel_image URL cache (pre-warmed with static fallbacks)
       5. PANEL_PICS env
-      6. Per-panel env vars
+      6. Per-panel env vars (only if all above are empty)
     """
-    # Priority 1: channel-stored file_ids — always instant
+    # Priority 1: channel-stored file_ids — same for ALL panel types
     fid = _get_panel_db_fileid()
     if fid:
         return fid
@@ -3287,21 +3387,22 @@ def get_panel_pic(panel_type: str = "default") -> Optional[str]:
     if PANEL_IMAGE_FILE_ID:
         return PANEL_IMAGE_FILE_ID
 
-    # Priority 3: session file_id cache
+    # Priority 3: session file_id cache — use "default" key so all panels share it
     if _PANEL_IMAGE_AVAILABLE:
         try:
             from panel_image import get_tg_fileid
-            cached_fid = get_tg_fileid(panel_type)
+            # Try shared "default" first, then panel-specific
+            cached_fid = get_tg_fileid("default") or get_tg_fileid(panel_type)
             if cached_fid:
                 return cached_fid
         except Exception:
             pass
 
-    # Priority 4: URL cache (pre-warmed with static fallbacks at startup)
+    # Priority 4: URL cache — use "default" key so all panels share it
     if _PANEL_IMAGE_AVAILABLE:
         try:
             from panel_image import _img_cache
-            cached = _img_cache.get(panel_type) or _img_cache.get("default")
+            cached = _img_cache.get("default") or _img_cache.get(panel_type)
             if cached:
                 return cached
         except Exception:
@@ -3311,7 +3412,7 @@ def get_panel_pic(panel_type: str = "default") -> Optional[str]:
     if PANEL_PICS:
         return random.choice(PANEL_PICS)
 
-    # Priority 6: Per-panel env vars
+    # Priority 6: Per-panel env vars (last resort only)
     _per_panel = {
         "admin":     ADMIN_PANEL_IMAGE_URL,
         "stats":     STATS_IMAGE_URL,
@@ -3325,24 +3426,17 @@ def get_panel_pic(panel_type: str = "default") -> Optional[str]:
 
 async def get_panel_pic_async(panel_type: str = "default") -> Optional[str]:
     """
-    Get panel image URL — ALWAYS instant.
-    Also triggers background PANEL_DB_CHANNEL scan if needed.
-
-    Strategy:
-      1. Return cached value immediately (never waits)
-      2. Trigger background refresh if cache is stale
-      3. Background refresh honours primary source toggle (url vs api)
-
-    This means panels ALWAYS appear instantly. Images upgrade silently
-    in background after the 30-minute cache TTL expires.
+    Get panel image URL — ALWAYS instant (never blocks).
+    Returns cached value immediately; triggers background refresh if stale.
+    All panel types share the same image source so every panel loads equally fast.
     """
     # Synchronous cache check — instant
     quick = get_panel_pic(panel_type)
-    if not quick and PANEL_DB_CHANNEL and not _get_panel_db_images():
+    scan_channel = PANEL_DB_CHANNEL if PANEL_DB_CHANNEL else FALLBACK_IMAGE_CHANNEL
+    if not quick and scan_channel and not _get_panel_db_images():
         # No images yet — trigger background channel scan
-        import asyncio as _aio
         try:
-            _aio.create_task(_scan_panel_channel(None))
+            asyncio.create_task(_scan_panel_channel(None))
         except Exception:
             pass
     if quick:
@@ -3350,10 +3444,10 @@ async def get_panel_pic_async(panel_type: str = "default") -> Optional[str]:
         if _PANEL_IMAGE_AVAILABLE:
             try:
                 from panel_image import _is_cached
-                if not _is_cached(panel_type):
+                if not _is_cached("default"):
                     asyncio.create_task(
                         asyncio.get_event_loop().run_in_executor(
-                            None, lambda: __import__('panel_image').get_panel_image(panel_type, True)
+                            None, lambda: __import__('panel_image').get_panel_image("default", True)
                         )
                     )
             except Exception:
@@ -3363,7 +3457,7 @@ async def get_panel_pic_async(panel_type: str = "default") -> Optional[str]:
     # Fallback: async fetch with 3s timeout (only if cache completely empty)
     if _PANEL_IMAGE_AVAILABLE:
         try:
-            return await asyncio.wait_for(get_panel_image_async(panel_type), timeout=3.0)
+            return await asyncio.wait_for(get_panel_image_async("default"), timeout=3.0)
         except Exception:
             pass
     return None
@@ -4009,26 +4103,39 @@ async def handle_deep_link(
         expire_ts = int(
             (now_utc() + timedelta(minutes=LINK_EXPIRY_MINUTES + 1)).timestamp()
         )
+        # Check if this channel uses join_by_request mode
+        _ch_info = get_force_sub_channel_info(str(chat.id))
+        _jbr_mode = bool(_ch_info and _ch_info[2]) if _ch_info else False
+
         invite = await invite_bot.create_chat_invite_link(
             chat.id,
             expire_date=expire_ts,
             member_limit=1,
             name=f"DeepLink {link_id[:8]}",
+            creates_join_request=_jbr_mode,
         )
 
-        keyboard = [[bold_button("• Join Channel •", url=invite.invite_link)]]
-        # Use ENV-configurable text (can be edited from admin panel)
         try:
             _here_link = get_setting("env_HERE_IS_LINK_TEXT", HERE_IS_LINK_TEXT) or HERE_IS_LINK_TEXT
             _join_text = get_setting("env_JOIN_BTN_TEXT", JOIN_BTN_TEXT) or JOIN_BTN_TEXT
         except Exception:
             _here_link = HERE_IS_LINK_TEXT
             _join_text = JOIN_BTN_TEXT
-        _link_msg = small_caps(
-            f"<blockquote><b>{_here_link}</b>\n</blockquote>"
-            "<b><u>Note: If the link is expired, please click the post link again to get a new one.</u></b>"
+
+        _jbr_note = ""
+        if _jbr_mode:
+            _jbr_note = "\n" + b(small_caps("tap join → request sent → auto-approved instantly"))
+
+        _link_msg = (
+            b(_here_link) + "\n\n"
+            + bq(
+                b(small_caps("⚡ this link expires in ")) + f"<code>{LINK_EXPIRY_MINUTES}</code> "
+                + b(small_caps("minutes")) + "\n"
+                + b(small_caps("💡 if expired, tap the post button again for a fresh link"))
+                + _jbr_note
+            )
         )
-        keyboard[0] = [bold_button(_join_text, url=invite.invite_link)]
+        keyboard = [[bold_button(_join_text, url=invite.invite_link)]]
         await context.bot.send_message(
             chat_id, _link_msg,
             parse_mode=ParseMode.HTML,
@@ -4740,16 +4847,26 @@ async def add_channel_command(
         if title is None:
             title = chat_obj.title or str(channel_lookup)
         channel_id_str = str(chat_obj.id)
-        # Check bot is admin
+        # Check bot membership (not strictly admin-required for force-sub listing)
         try:
             bm = await context.bot.get_chat_member(chat_obj.id, context.bot.id)
-            if bm.status not in ("administrator", "creator"):
-                await safe_reply(update, b(f"❌ I must be an admin in {e(chat_obj.title or identifier)} first."))
+            bot_status = getattr(bm, "status", "")
+            # Only warn — still allow adding even if bot is member not admin
+            # (bot needs admin only to CREATE invite links, not to list channel)
+            if bot_status in ("kicked", "banned", "left", ""):
+                await safe_reply(update, b(
+                    f"⚠️ I am not a member of {e(chat_obj.title or str(channel_id_str))}. "
+                    "Add me first, then make me admin so I can create invite links."
+                ))
                 return
         except Exception:
-            pass
+            pass  # Channel may be public — proceed anyway
     except Exception as exc:
-        await safe_reply(update, b(f"⚠️ Cannot access {e(str(identifier))}. Make bot an admin there.\nError: {e(str(exc)[:100])}"))
+        await safe_reply(update, b(
+            f"⚠️ Cannot access {e(str(identifier))}.\n\n"
+            "Make sure:\n• The channel/group exists\n• I am a member (admin preferred)\n\n"
+            f"Error: {e(str(exc)[:100])}"
+        ))
         return
     add_force_sub_channel(channel_id_str, title, join_by_request=jbr)
     jbr_str = " (Join By Request)" if jbr else ""
@@ -6481,38 +6598,244 @@ async def group_message_handler(
             return
 
     # ── Filter-Poster Integration ──────────────────────────────────────────────
-    # If filter-poster is enabled for this chat, check if any registered
-    # keyword filter matches and if so generate/serve a cached poster.
+    # New logic:
+    #   1. Check if the message text matches any anime_channel_link keyword
+    #   2. If yes: check filter_poster_cache for a pre-built poster (file_id)
+    #   3. If cached: send instantly via file_id + expirable join button
+    #   4. If not cached: generate via poster_engine → save to POSTER_DB_CHANNEL
+    #      → cache file_id for future fast sends → send to user
+    #   5. Button = expirable Telegram invite link for the linked channel
+    #   6. Only fires for anime titles that have a generated channel link
     if _FILTER_POSTER_AVAILABLE and _get_filter_poster_enabled(chat_id):
+        asyncio.create_task(
+            _handle_anime_filter(update, context, lower)
+        )
+
+
+async def _handle_anime_filter(
+    update, context, lower_text: str
+) -> None:
+    """
+    Background task: detect anime title in message, deliver poster + join button.
+    Only fires for anime titles registered via the link generator.
+    """
+    try:
+        from database_dual import (
+            get_all_anime_channel_links, get_filter_poster_cache,
+            save_filter_poster_cache,
+        )
+        from filter_poster import (
+            _make_expirable_link, _auto_delete, _get_default_poster_template,
+            get_auto_delete_seconds, get_link_expiry_minutes, _join_btn_text,
+            _styled,
+        )
+        from poster_engine import (
+            _anilist_anime, _build_anime_data, _make_poster, _get_settings,
+        )
+        import hashlib as _hl
+        from io import BytesIO
+
+        chat_id = update.effective_chat.id
+        bot = context.bot
+
+        all_links = get_all_anime_channel_links()
+        if not all_links:
+            return
+
+        matched_anime = None
+        matched_channel_id = None
+        matched_channel_title = None
+        matched_link_id = None
+
+        for row in all_links:
+            # row: (id, anime_title, channel_id, channel_title, link_id, created_at)
+            a_title = (row[1] or "").strip().lower()
+            if not a_title:
+                continue
+            # Full match or whole-word match
+            if a_title in lower_text or re.search(
+                r'\b' + re.escape(a_title) + r'\b', lower_text
+            ):
+                matched_anime = row[1]          # original casing
+                matched_channel_id = row[2]
+                matched_channel_title = row[3] or matched_anime
+                matched_link_id = row[4]
+                break
+
+        if not matched_anime:
+            return
+
+        template = _get_default_poster_template(chat_id)
+        cache_key = _hl.md5(f"{matched_anime.lower()}:{template}".encode()).hexdigest()
+        auto_del  = get_auto_delete_seconds(chat_id)
+        exp_min   = get_link_expiry_minutes(chat_id)
+
+        # Build join button (expirable invite link for the matched channel)
+        join_url = None
         try:
-            from modules.sql import cust_filters_sql as _cf_sql
-            triggers = _cf_sql.get_chat_triggers(chat_id)
-            if triggers:
-                for trigger in triggers:
-                    # Match whole word / substring trigger
-                    trigger_lower = trigger.lower()
-                    if (trigger_lower in lower or
-                            re.search(r'\b' + re.escape(trigger_lower) + r'\b', lower)):
-                        # Only handle if trigger looks like an anime/manga title
-                        # (at least 3 chars, not a single punctuation or short word)
-                        if len(trigger.strip()) >= 3:
-                            template = _get_default_poster_template(chat_id)
-                            # Guess media type from context
-                            media_type = "ANIME"
-                            if any(w in trigger_lower for w in ["manga", "manhwa", "manhua", "comic"]):
-                                media_type = "MANGA"
-                            asyncio.create_task(get_or_generate_poster(
-                                bot=context.bot,
-                                chat_id=chat_id,
-                                title=trigger,
-                                template=template,
-                                media_type=media_type,
-                                reply_to_message_id=update.message.message_id,
-                            ))
-                            # Only trigger for the first matching filter
-                            break
-        except Exception as _fp_err:
-            logger.debug(f"filter_poster group handler: {_fp_err}")
+            expire_ts = int(__import__("time").time()) + (exp_min * 60)
+            inv = await bot.create_chat_invite_link(
+                chat_id=matched_channel_id,
+                expire_date=expire_ts,
+                member_limit=1,
+                creates_join_request=False,
+            )
+            join_url = inv.invite_link
+        except Exception as _ie:
+            logger.debug(f"[filter] invite link for {matched_channel_id}: {_ie}")
+
+        if not join_url:
+            # Fallback: try stored link_id deep link
+            if matched_link_id:
+                from beataniversebot_compat import BOT_USERNAME as _BUN
+                join_url = f"https://t.me/{_BUN}?start={matched_link_id}"
+            else:
+                import os
+                join_url = os.getenv("PUBLIC_ANIME_CHANNEL_URL", "https://t.me/BeatAnime")
+
+        join_text = _join_btn_text()
+        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton(join_text, url=join_url)]])
+
+        # Check poster cache (DB)
+        cached = get_filter_poster_cache(cache_key)
+        if cached and cached.get("file_id"):
+            try:
+                caption = cached.get("caption", "")
+                sent = await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=cached["file_id"],
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                    reply_to_message_id=update.message.message_id,
+                )
+                if sent and auto_del > 0:
+                    asyncio.create_task(
+                        _auto_delete(bot, chat_id, sent.message_id, delay=auto_del)
+                    )
+                return
+            except Exception:
+                pass  # Cached file_id stale → regenerate
+
+        # Generate poster
+        loop = asyncio.get_event_loop()
+        try:
+            data = await loop.run_in_executor(None, _anilist_anime, matched_anime)
+        except Exception:
+            data = None
+
+        poster_buf = None
+        caption = f"<b>{matched_anime}</b>"
+        site_url = ""
+
+        if data:
+            settings = _get_settings("anime")
+            try:
+                title_b, native, st, rows, desc, cover_url, score = await loop.run_in_executor(
+                    None, _build_anime_data, data
+                )
+                poster_buf = await loop.run_in_executor(
+                    None, _make_poster,
+                    template, title_b, native, st, rows, desc, cover_url, score,
+                    settings.get("watermark_text"),
+                    settings.get("watermark_position", "center"),
+                    None, "bottom",
+                )
+                site_url = data.get("siteUrl", "")
+                genres = ", ".join((data.get("genres") or [])[:3])
+                t_d    = data.get("title", {}) or {}
+                eng    = t_d.get("english") or t_d.get("romaji") or matched_anime
+                caption = f"<b>{__import__('html').escape(eng)}</b>"
+                if native:
+                    caption += f"\n<i>{__import__('html').escape(native)}</i>"
+                if genres:
+                    caption += f"\n\n» <b>Genre:</b> {__import__('html').escape(genres)}"
+                for lb, v in (rows or [])[:4]:
+                    if v and str(v) not in ("-", "N/A", "None", "?", "0"):
+                        caption += f"\n» <b>{__import__('html').escape(lb)}:</b> <code>{__import__('html').escape(str(v))}</code>"
+                if len(caption) > 900:
+                    caption = caption[:896] + "…"
+            except Exception as _be:
+                logger.debug(f"[filter] poster build error: {_be}")
+
+        if site_url:
+            btns = [[InlineKeyboardButton(join_text, url=join_url),
+                     InlineKeyboardButton("📋 Info", url=site_url)]]
+            kb = InlineKeyboardMarkup(btns)
+
+        sent_msg = None
+        file_id_to_cache = None
+
+        if poster_buf:
+            poster_buf.seek(0)
+            # Save to POSTER_DB_CHANNEL first for future fast fetching
+            db_channel = int(__import__("os").getenv("POSTER_DB_CHANNEL", "0") or "0")
+            if db_channel:
+                try:
+                    poster_buf.seek(0)
+                    db_msg = await bot.send_photo(
+                        chat_id=db_channel,
+                        photo=poster_buf,
+                        caption=f"FilterPoster | {matched_anime} | {template}",
+                        parse_mode="HTML",
+                    )
+                    if db_msg.photo:
+                        file_id_to_cache = db_msg.photo[-1].file_id
+                except Exception as _dbe:
+                    logger.debug(f"[filter] poster DB channel save: {_dbe}")
+
+            # Send to user
+            try:
+                poster_buf.seek(0)
+                sent_msg = await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=file_id_to_cache or poster_buf,
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                    reply_to_message_id=update.message.message_id,
+                )
+                if sent_msg and not file_id_to_cache and sent_msg.photo:
+                    file_id_to_cache = sent_msg.photo[-1].file_id
+            except Exception as _se:
+                logger.debug(f"[filter] poster send: {_se}")
+
+        if not sent_msg:
+            # Text fallback
+            try:
+                sent_msg = await bot.send_message(
+                    chat_id=chat_id,
+                    text=caption,
+                    parse_mode="HTML",
+                    reply_markup=kb,
+                    reply_to_message_id=update.message.message_id,
+                    disable_web_page_preview=True,
+                )
+            except Exception:
+                pass
+
+        # Cache the poster file_id for next time
+        if file_id_to_cache:
+            try:
+                save_filter_poster_cache(
+                    cache_key=cache_key,
+                    anime_title=matched_anime,
+                    template=template,
+                    file_id=file_id_to_cache,
+                    channel_id=matched_channel_id or 0,
+                    caption=caption,
+                )
+            except Exception as _ce:
+                logger.debug(f"[filter] cache save: {_ce}")
+
+        if sent_msg and auto_del > 0:
+            asyncio.create_task(
+                _auto_delete(bot, chat_id, sent_msg.message_id, delay=auto_del)
+            )
+
+    except Exception as _top:
+        logger.debug(f"[filter] _handle_anime_filter: {_top}")
 
 
 # ================================================================================
@@ -6849,42 +7172,57 @@ async def handle_admin_photo(
     if isinstance(state, str) and state.startswith("AWAITING_WATERMARK_"):
         cat = state[len("AWAITING_WATERMARK_"):].lower()
         user_states.pop(uid, None)
-        # Save as both watermark_logo (visual layer) and keep text watermark if set
-        update_category_field(cat, "logo_file_id", file_id)
-        update_category_field(cat, "logo_position", "bottom-right")
+        ok1 = update_category_field(cat, "logo_file_id", file_id)
+        ok2 = update_category_field(cat, "logo_position", "bottom-right")
         kind = {"sticker": "Sticker", "image": "Image", "pdf": "Document", "animation": "GIF"}.get(file_type, "File")
-        await msg.reply_text(
-            b(f"✅ {kind} watermark set for {cat}!") +
-            f"\n<i>It will appear as overlay on all {cat} posters.</i>\n"
-            f"<i>To also set text watermark, use the WATERMARK button again and send text.</i>",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[_back_btn(f"cat_settings_{cat}"), _close_btn()]]),
-        )
+        if ok1:
+            await msg.reply_text(
+                b(f"✅ {kind} watermark saved for {cat.upper()}!") +
+                "\n<i>It will appear as overlay on all posters for this category.</i>",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[_back_btn(f"cat_settings_{cat}"), _close_btn()]]),
+            )
+        else:
+            await msg.reply_text(
+                b(f"❌ Failed to save watermark for {cat}. Check DB connection."),
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[_back_btn(f"cat_settings_{cat}"), _close_btn()]]),
+            )
         return
 
     # ── LOGO states ───────────────────────────────────────────────────────────
     if isinstance(state, str) and state.startswith("AWAITING_LOGO_"):
         cat = state[len("AWAITING_LOGO_"):].lower()
         user_states.pop(uid, None)
-        update_category_field(cat, "logo_file_id", file_id)
-        await msg.reply_text(
-            b(f"✅ Logo set for {cat}!"),
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[_back_btn(f"cat_settings_{cat}"), _close_btn()]]),
-        )
+        ok = update_category_field(cat, "logo_file_id", file_id)
+        if ok:
+            await msg.reply_text(
+                b(f"✅ Logo saved for {cat.upper()}!"),
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[_back_btn(f"cat_settings_{cat}"), _close_btn()]]),
+            )
+        else:
+            await msg.reply_text(
+                b(f"❌ Failed to save logo. Check DB connection."),
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[_back_btn(f"cat_settings_{cat}"), _close_btn()]]),
+            )
         return
 
     # ── Legacy SET_CATEGORY_LOGO state ───────────────────────────────────────
     if state == SET_CATEGORY_LOGO:
         category = context.user_data.get("editing_category")
         if category:
-            update_category_field(category, "logo_file_id", file_id)
-            await msg.reply_text(b(f"✅ Logo updated for {e(category)}!"), parse_mode=ParseMode.HTML)
+            ok = update_category_field(category, "logo_file_id", file_id)
+            if ok:
+                await msg.reply_text(b(f"✅ Logo updated for {e(category.upper())}!"), parse_mode=ParseMode.HTML)
+            else:
+                await msg.reply_text(b(f"❌ Failed to save logo. Check DB connection."), parse_mode=ParseMode.HTML)
         user_states.pop(uid, None)
-        await send_admin_menu(update.effective_chat.id, context)
+        await show_category_settings_menu(context, update.effective_chat.id, category or "anime", None)
         return
 
-    # ── Poster watermark from AWAITING_WM_LAYER_C state ──────────────────────
+    # ── Poster watermark from AWAITING_WM_LAYER_C state (photo or sticker) ──
     if isinstance(state, str) and state.startswith("AWAITING_WM_LAYER_"):
         parts_s = state.split("_")
         layer = parts_s[3].lower() if len(parts_s) > 3 else "c"
@@ -6895,19 +7233,200 @@ async def handle_admin_photo(
         user_states.pop(uid, None)
         try:
             from filter_poster import get_wm_layer, set_wm_layer
-            ldata = get_wm_layer(fp_cid, "c")
+            ldata = get_wm_layer(fp_cid, layer)
             ldata["file_id"] = file_id
             ldata["enabled"] = True
-            set_wm_layer(fp_cid, "c", ldata)
+            ldata["is_sticker"] = (file_type == "sticker")
+            set_wm_layer(fp_cid, layer, ldata)
+            _kind_wm = "sticker" if file_type == "sticker" else "image"
             await msg.reply_text(
-                b("✅ Visual watermark set!"),
+                b(small_caps(f"✅ layer {layer.upper()} visual watermark set ({_kind_wm})!"))
+                + "\n" + bq(b(small_caps("it will appear as overlay on all posters."))),
                 parse_mode=ParseMode.HTML,
                 reply_markup=InlineKeyboardMarkup([[_back_btn("admin_filter_poster"), _close_btn()]]),
             )
         except Exception as exc:
-            await msg.reply_text(b(f"❌ Error: {e(str(exc)[:100])}"), parse_mode=ParseMode.HTML)
+            await msg.reply_text(b(f"❌ {e(str(exc)[:100])}"), parse_mode=ParseMode.HTML)
         return
 
+    # ── PENDING_CHANNEL_POST: forwarded message used to extract channel ID ────
+    if state == PENDING_CHANNEL_POST:
+        fwd_chat = None
+        if msg.forward_from_chat:
+            fwd_chat = msg.forward_from_chat
+        elif msg.forward_origin and hasattr(msg.forward_origin, "chat"):
+            fwd_chat = msg.forward_origin.chat
+        if not fwd_chat:
+            await msg.reply_text(
+                b("❌ This doesn't look like a forwarded channel post.\n\n")
+                + bq("Forward any message from the channel you want to add."),
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="manage_force_sub")]]),
+            )
+            return
+        try:
+            tg_chat = await context.bot.get_chat(fwd_chat.id)
+            context.user_data["new_ch_uname"] = str(tg_chat.id)
+            context.user_data["new_ch_title"] = tg_chat.title
+            user_states[uid] = ADD_CHANNEL_TITLE
+            ch_info = f"<b>Channel:</b> {e(tg_chat.title)}\n<b>ID:</b> <code>{tg_chat.id}</code>"
+            if tg_chat.username:
+                ch_info += f"\n<b>Username:</b> @{e(tg_chat.username)}"
+            await msg.reply_text(
+                b("✅ Channel detected from forwarded post!") + "\n\n"
+                + bq(ch_info) + "\n\n"
+                + b("Send a display title, or /skip to use the channel name:"),
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="manage_force_sub")]]),
+            )
+        except Exception as exc:
+            await msg.reply_text(
+                b("❌ Could not verify that channel.\n\n")
+                + bq(b("Make sure the bot is admin in ") + code(str(fwd_chat.id))
+                     + b(f"\n\nError: ") + code(e(str(exc)[:100]))),
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="manage_force_sub")]]),
+            )
+        return
+
+    # ── AF source from forwarded post ─────────────────────────────────────────
+    if state == AF_ADD_CONNECTION_SOURCE:
+        fwd_chat = None
+        if msg.forward_from_chat:
+            fwd_chat = msg.forward_from_chat
+        elif msg.forward_origin and hasattr(msg.forward_origin, "chat"):
+            fwd_chat = msg.forward_origin.chat
+        if fwd_chat:
+            try:
+                tg_chat = await context.bot.get_chat(fwd_chat.id)
+                context.user_data["af_source_id"] = tg_chat.id
+                context.user_data["af_source_uname"] = tg_chat.username
+                user_states[uid] = AF_ADD_CONNECTION_TARGET
+                await msg.reply_text(
+                    b(f"✅ Source detected: {e(tg_chat.title)}") + "\n\n"
+                    + bq(b("Step 2/2: Send the TARGET channel @username, ID, or forward a post:")),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="admin_autoforward")]]),
+                )
+            except Exception as exc:
+                await msg.reply_text(
+                    b("❌ Could not verify source channel: ") + code(e(str(exc)[:100])),
+                    parse_mode=ParseMode.HTML,
+                )
+            return
+
+    # ── AF target from forwarded post ─────────────────────────────────────────
+    if state == AF_ADD_CONNECTION_TARGET:
+        fwd_chat = None
+        if msg.forward_from_chat:
+            fwd_chat = msg.forward_from_chat
+        elif msg.forward_origin and hasattr(msg.forward_origin, "chat"):
+            fwd_chat = msg.forward_origin.chat
+        if fwd_chat:
+            try:
+                tg_chat = await context.bot.get_chat(fwd_chat.id)
+                src_id = context.user_data.get("af_source_id")
+                src_uname = context.user_data.get("af_source_uname", "")
+                if not src_id:
+                    await msg.reply_text(b("Session expired. Start over."), parse_mode=ParseMode.HTML)
+                    user_states.pop(uid, None)
+                    return
+                with db_manager.get_cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO auto_forward_connections
+                            (source_chat_id, source_chat_username, target_chat_id,
+                             target_chat_username, active)
+                        VALUES (%s, %s, %s, %s, TRUE)
+                        ON CONFLICT DO NOTHING
+                    """, (src_id, src_uname, tg_chat.id, tg_chat.username))
+                await msg.reply_text(
+                    b("✅ Auto-forward connection created!") + "\n\n"
+                    + bq(
+                        b("Source: ") + code(str(src_id)) + "\n"
+                        + b("Target: ") + code(str(tg_chat.id)) + " — " + e(tg_chat.title)
+                    ),
+                    parse_mode=ParseMode.HTML,
+                )
+                user_states.pop(uid, None)
+            except Exception as exc:
+                await msg.reply_text(b(f"❌ Error: {e(str(exc)[:100])}"), parse_mode=ParseMode.HTML)
+            return
+
+    # ── AU manga target from forwarded post ───────────────────────────────────
+    if state == AU_ADD_MANGA_TARGET:
+        fwd_chat = None
+        if msg.forward_from_chat:
+            fwd_chat = msg.forward_from_chat
+        elif msg.forward_origin and hasattr(msg.forward_origin, "chat"):
+            fwd_chat = msg.forward_origin.chat
+        if fwd_chat:
+            try:
+                tg_chat = await context.bot.get_chat(fwd_chat.id)
+                manga_id = context.user_data.get("au_manga_id")
+                manga_title = context.user_data.get("au_manga_title", "Unknown")
+                if not manga_id:
+                    await msg.reply_text(b("Session expired. Please start over."), parse_mode=ParseMode.HTML)
+                    user_states.pop(uid, None)
+                    return
+                success = MangaTracker.add_tracking(manga_id, manga_title, tg_chat.id)
+                if success:
+                    await msg.reply_text(
+                        b(f"✅ Now tracking: {e(manga_title)}") + "\n\n"
+                        + bq(
+                            f"<b>Channel:</b> {e(tg_chat.title or str(tg_chat.id))}\n"
+                            f"<b>Channel ID:</b> <code>{tg_chat.id}</code>\n\n"
+                            + b("New chapters will be sent automatically.")
+                        ),
+                        parse_mode=ParseMode.HTML,
+                    )
+                else:
+                    await msg.reply_text(b("❌ Failed to add tracking. Make sure bot is admin."), parse_mode=ParseMode.HTML)
+                user_states.pop(uid, None)
+                for k in ("au_manga_id", "au_manga_title", "au_manga_mode", "au_manga_interval"):
+                    context.user_data.pop(k, None)
+            except Exception as exc:
+                await msg.reply_text(b(f"❌ Error: {e(str(exc)[:100])}"), parse_mode=ParseMode.HTML)
+            return
+
+
+
+# ================================================================================
+#                      AUTO-APPROVE CHAT JOIN REQUESTS
+# ================================================================================
+
+async def auto_approve_join_request(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    Auto-approve chat join requests for channels using join_by_request mode.
+    Only approves if the channel has join_by_request enabled in the DB.
+    """
+    req = update.chat_join_request
+    if not req:
+        return
+    try:
+        ch_info = get_force_sub_channel_info(str(req.chat.id))
+        jbr_enabled = bool(ch_info and ch_info[2]) if ch_info else False
+        # Also check global JBR setting
+        if not jbr_enabled:
+            jbr_global = (get_setting("auto_approve_join_requests", "false") or "false").lower() == "true"
+            if not jbr_global:
+                return
+        await context.bot.approve_chat_join_request(req.chat.id, req.from_user.id)
+        logger.debug(f"[jbr] approved {req.from_user.id} in {req.chat.id}")
+        # Send confirmation DM
+        try:
+            ch_title = req.chat.title or str(req.chat.id)
+            await context.bot.send_message(
+                req.from_user.id,
+                b(small_caps(f"✅ your join request for {ch_title} has been approved!"))
+                + "\n" + bq(b(small_caps("welcome! you can now access the channel."))),
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+    except Exception as exc:
+        logger.debug(f"[jbr] auto-approve failed: {exc}")
 
 # ================================================================================
 #                     SCHEDULED BROADCAST JOB
@@ -7267,8 +7786,9 @@ def _register_all_handlers(app: Application) -> None:
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & filters.VIDEO & admin_filter, handle_upload_video))
     app.add_handler(MessageHandler(
-        filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.IMAGE) & admin_filter,
+        filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.IMAGE | filters.Sticker.ALL) & admin_filter,
         handle_admin_photo))
+    app.add_handler(ChatJoinRequestHandler(auto_approve_join_request))
     app.add_error_handler(error_handler)
 
 
@@ -7512,9 +8032,12 @@ async def post_init(application: Application) -> None:
         await health_server.start()
         logger.info("✅ Health check server started")
 
-        # Auto-scan PANEL_DB_CHANNEL for panel images in background (non-blocking)
-        if PANEL_DB_CHANNEL:
+        # Auto-scan panel image channel in background (non-blocking).
+        # Uses PANEL_DB_CHANNEL if set, otherwise falls back to FALLBACK_IMAGE_CHANNEL.
+        _scan_target = PANEL_DB_CHANNEL if PANEL_DB_CHANNEL else FALLBACK_IMAGE_CHANNEL
+        if _scan_target:
             asyncio.create_task(_scan_panel_channel(application.bot))
+            logger.info(f"✅ Panel image scan scheduled from channel {_scan_target}")
     except Exception as exc:
         logger.warning(f"Health server failed: {exc}")
 
@@ -8493,6 +9016,7 @@ async def button_handler(
             _btn("REMOVE CHANNEL",    "fsub_remove_menu"),
             _btn("LIST CHANNELS",     "fsub_list_full"),
             _btn("GEN LINK",          "generate_links"),
+            _btn("🎌 ANIME LINKS",   "admin_anime_links"),
             _btn("CLONE REDIRECT",    "manage_clones"),
             _btn("LINK STATS",        "fsub_link_stats"),
             _btn("📨 FWD SOURCE",    "fsub_fwd_source"),
@@ -8529,15 +9053,36 @@ async def button_handler(
             context.bot, chat_id,
             b("➕ ADD FORCE-SUB CHANNEL") + "\n\n"
             + bq(
-                b("Send channel @username or ID:\n\n")
-                + "• <code>@BeatAnime</code>\n"
-                + "• <code>-1001234567890</code>\n"
-                + "• Add <code>jbr</code> at end for join-by-request\n\n"
-                + "<i>Bot must be admin in the channel.</i>"
+                b("Choose any of these 3 methods:\n\n")
+                + "① <b>@username</b> — e.g. <code>@BeatAnime</code>\n"
+                + "② <b>Numeric ID</b> — e.g. <code>-1001234567890</code>\n"
+                + "③ <b>Forward a post</b> — forward any message from the channel here\n\n"
+                + "<i>Bot must be admin in the channel before adding.</i>\n\n"
+                + b("Send @username, channel ID, or forward a post now:")
             ),
-            reply_markup=InlineKeyboardMarkup([[_back_btn("manage_force_sub"), _close_btn()]]),
+            reply_markup=InlineKeyboardMarkup([
+                [bold_button("📩 How to forward a post", callback_data="fsub_fwd_help")],
+                [_back_btn("manage_force_sub"), _close_btn()],
+            ]),
         )
         await store_bot_prompt(context, msg)
+        return
+
+    if data == "fsub_fwd_help":
+        await safe_answer(query, "", show_alert=False)
+        await safe_edit_text(
+            query,
+            b("📩 METHOD 3: Forward a Post") + "\n\n"
+            + bq(
+                "1. Open the channel you want to add\n"
+                "2. Tap any message → Forward\n"
+                "3. Forward it to this bot (in this chat)\n\n"
+                "The bot will automatically read the channel ID from the forwarded post."
+            ),
+            reply_markup=InlineKeyboardMarkup([[_back_btn("fsub_add")]]),
+        )
+        # Set state so next message (forwarded post) is handled
+        user_states[uid] = PENDING_CHANNEL_POST
         return
 
     if data == "fsub_remove_menu":
@@ -8595,11 +9140,16 @@ async def button_handler(
     if data == "generate_links":
         if not is_admin:
             return
-        user_states[uid] = GENERATE_LINK_IDENTIFIER
+        user_states[uid] = GENERATE_LINK_ANIME_NAME
         await safe_edit_text(
             query,
-            b("🔗 Generate Deep Link") + "\n\n"
-            + bq(b("Send the channel @username or channel ID to generate a link for.")),
+            b("🔗 Generate Anime Channel Link") + "\n\n"
+            + bq(
+                b("Step 1/2: Send the ANIME NAME for this channel link.\n\n")
+                + "This name becomes the filter keyword — when users type it in a group, "
+                + "they automatically receive the poster + join button.\n\n"
+                + "Example: <code>Demon Slayer</code> or <code>Jujutsu Kaisen</code>"
+            ),
             reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="admin_back")]]),
         )
         return
@@ -8612,6 +9162,67 @@ async def button_handler(
         except Exception:
             pass
         await backup_command(update, context)
+        return
+
+    if data == "admin_anime_links":
+        if not is_admin:
+            return
+        try:
+            from database_dual import get_all_anime_channel_links
+            rows = get_all_anime_channel_links()
+        except Exception:
+            rows = []
+        text = b(f"🎌 ANIME CHANNEL LINKS ({len(rows)})") + "\n\n"
+        if rows:
+            for row in rows[:20]:
+                _, a_title, ch_id, ch_title, link_id, _ = row
+                text += (
+                    f"• <b>{e(a_title)}</b> → <code>{ch_id}</code>"
+                    + (f" ({e(ch_title)})" if ch_title else "")
+                    + "\n"
+                )
+        else:
+            text += bq(
+                "No anime channel links yet.\n\n"
+                "Use <b>GEN LINK</b> in the Channels panel to create one.\n"
+                "Each link auto-creates a filter keyword."
+            )
+        text += (
+            "\n\n" + bq(
+                "<b>How it works:</b>\n"
+                "When you generate a channel link for an anime, the anime title "
+                "becomes a filter keyword. When any user types that title in a group, "
+                "they get a poster + join button for that channel."
+            )
+        )
+        del_btns = []
+        for row in rows[:10]:
+            _, a_title, ch_id, _, _, _ = row
+            del_btns.append(
+                bold_button(f"🗑 {a_title[:20]}", callback_data=f"del_acl_{ch_id}_{a_title[:30]}")
+            )
+        rows_grid = [del_btns[i:i+2] for i in range(0, len(del_btns), 2)]
+        rows_grid.append([_back_btn("manage_force_sub"), _close_btn()])
+        await safe_send_message(
+            context.bot, chat_id, text,
+            reply_markup=InlineKeyboardMarkup(rows_grid),
+        )
+        return
+
+    if data.startswith("del_acl_"):
+        if not is_admin:
+            return
+        parts = data[len("del_acl_"):].split("_", 1)
+        if len(parts) == 2:
+            try:
+                from database_dual import remove_anime_channel_link
+                ch_id_int = int(parts[0])
+                a_title = parts[1]
+                remove_anime_channel_link(a_title, ch_id_int)
+                await safe_answer(query, f"Removed: {a_title}")
+                await button_handler(update, context, "admin_anime_links")
+            except Exception as _exc:
+                await safe_answer(query, f"Error: {str(_exc)[:80]}")
         return
 
     # ── Clone bot management ────────────────────────────────────────────────────────
@@ -10328,7 +10939,13 @@ async def button_handler(
             query,
             b(f"📚 {e(title)}") + f"\n<b>Mode:</b> {mode.title()} | "
             + f"<b>Interval:</b> {interval_minutes if interval_minutes > 0 else 'Random 5–10'} min\n\n"
-            + bq(b("Send the target channel @username or ID:")),
+            + bq(
+                b("Send the target channel using any method:\n\n")
+                + "• <code>@channelname</code>\n"
+                + "• <code>-1001234567890</code> (numeric ID)\n"
+                + "• <b>Forward any post</b> from the channel\n\n"
+                + "<i>Bot must be admin in the channel to post chapters.</i>"
+            ),
             reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="admin_autoupdate")]]),
         )
         return
@@ -10351,7 +10968,14 @@ async def button_handler(
         await safe_edit_text(
             query,
             b("♻️ Add Auto-Forward Connection") + "\n\n"
-            + bq(b("Step 1/2: Send the SOURCE channel @username or ID:")),
+            + bq(
+                b("Step 1/2: SOURCE channel\n\n")
+                + "Send the source channel using <b>any method</b>:\n"
+                + "• <code>@channelname</code>\n"
+                + "• <code>-1001234567890</code> (numeric ID)\n"
+                + "• <b>Forward any post</b> from the source channel\n\n"
+                + "<i>Bot must be a member of the source channel.</i>"
+            ),
             reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="admin_autoforward")]]),
         )
         return
@@ -10471,17 +11095,49 @@ async def button_handler(
             b("🔍 Auto-Forward Filters") + "\n\n"
             + bq(
                 f"<b>Enable in DM:</b> {dm_icon}\n"
-                f"<b>Enable in Group:</b> {grp_icon}"
+                f"<b>Enable in Group:</b> {grp_icon}\n\n"
+                "<b>BLACKLIST:</b> Words/phrases that BLOCK a message from being forwarded.\n"
+                "If any blacklisted word appears in the message → it is skipped.\n\n"
+                "<b>WHITELIST:</b> When set, ONLY messages containing a whitelisted word are forwarded.\n"
+                "Leave whitelist empty to forward everything (except blacklisted).\n\n"
+                "<b>How to use:</b>\n"
+                "• Tap <b>Blacklist Words</b> → send a word/phrase to block\n"
+                "• Tap <b>Whitelist Words</b> → send a word/phrase to require\n"
+                "• Words are matched case-insensitively\n"
+                "• Multiple words can be added one at a time"
             )
         )
         fkb = [
             [bold_button(f"{dm_icon} Toggle DM", callback_data="af_toggle_dm"),
              bold_button(f"{grp_icon} Toggle Group", callback_data="af_toggle_group")],
-            [bold_button("Blacklist Words", callback_data="af_blacklist"),
-             bold_button("Whitelist Words", callback_data="af_whitelist")],
-            [_back_btn("admin_autoforward")],
+            [bold_button("🚫 Blacklist Words", callback_data="af_blacklist"),
+             bold_button("✅ Whitelist Words", callback_data="af_whitelist")],
+            [bold_button("❓ Filter Guide", callback_data="af_filter_guide"),
+             _back_btn("admin_autoforward")],
         ]
         await safe_edit_text(query, ftext, reply_markup=InlineKeyboardMarkup(fkb))
+        return
+
+    if data == "af_filter_guide":
+        if not is_admin:
+            return
+        guide_text = (
+            b("📖 How Filters Work") + "\n\n"
+            + bq(
+                "<b>Example scenario:</b>\n"
+                "You're forwarding from an anime channel to your group, but you want to skip "
+                "posts about movies and only forward anime.\n\n"
+                "<b>Step 1:</b> Add <code>movie</code> to Blacklist → any post containing the word 'movie' is skipped.\n\n"
+                "<b>Step 2 (optional):</b> Add <code>episode</code> to Whitelist → only posts with the word 'episode' are forwarded.\n\n"
+                "<b>Result:</b> Only episode posts get through, movie posts are blocked.\n\n"
+                "<b>Note:</b> If Whitelist is EMPTY, all messages are allowed through (except blacklisted ones).\n"
+                "If Whitelist has entries, ONLY matching messages pass."
+            )
+        )
+        await safe_edit_text(
+            query, guide_text,
+            reply_markup=InlineKeyboardMarkup([[_back_btn("af_filters_menu")]]),
+        )
         return
 
     if data == "af_toggle_all":
@@ -11108,6 +11764,24 @@ async def handle_admin_message(
     text = update.message.text or ""
     chat_id = update.effective_chat.id
 
+    # ── Forwarded post early-exit: if the message is a channel forward and state
+    #    is one that accepts channel input, route to the forward handler path ──
+    _channel_states_that_accept_fwd = {
+        PENDING_CHANNEL_POST, ADD_CHANNEL_USERNAME,
+        AF_ADD_CONNECTION_SOURCE, AF_ADD_CONNECTION_TARGET,
+        AU_ADD_MANGA_TARGET,
+    }
+    if state in _channel_states_that_accept_fwd:
+        _fwd_src = (
+            getattr(update.message, "forward_from_chat", None)
+            or (getattr(update.message, "forward_origin", None)
+                and getattr(update.message.forward_origin, "chat", None))
+        )
+        if _fwd_src:
+            # Delegate to handle_admin_photo which handles all forwarded-post states
+            await handle_admin_photo(update, context)
+            return
+
     await delete_bot_prompt(context, chat_id)
     await delete_update_message(update, context)
 
@@ -11120,22 +11794,29 @@ async def handle_admin_message(
     # ── Channel states ─────────────────────────────────────────────────────────────
     if state == ADD_CHANNEL_USERNAME:
         uname = text.strip()
-        if not uname.startswith("@"):
+        # Accept both @username AND numeric IDs (e.g. -1001234567890)
+        if not uname.startswith("@") and not uname.lstrip("-").isdigit():
             msg = await safe_send_message(
                 context.bot, chat_id,
-                b("❌ Username must start with @. Try again:"),
+                b("❌ Invalid format. Use @username or numeric channel ID (e.g. -1001234567890). Try again:"),
                 reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="manage_force_sub")]]),
             )
             await store_bot_prompt(context, msg)
             return
+        # Normalise lookup
+        if uname.lstrip("-").isdigit():
+            channel_lookup = int(uname)
+        else:
+            channel_lookup = uname if uname.startswith("@") else f"@{uname}"
         try:
-            tg_chat = await context.bot.get_chat(uname)
-            context.user_data["new_ch_uname"] = uname
+            tg_chat = await context.bot.get_chat(channel_lookup)
+            context.user_data["new_ch_uname"] = str(tg_chat.id)   # always store numeric ID
             context.user_data["new_ch_title"] = tg_chat.title
             user_states[uid] = ADD_CHANNEL_TITLE
-            # Build channel preview link so admin can verify which channel they're naming
-            ch_link = f"https://t.me/{uname.lstrip('@')}" if not str(tg_chat.id).startswith("-100") else ""
-            ch_info = f"<b>Channel:</b> {e(tg_chat.title)}\n<b>Username:</b> {e(uname)}\n<b>ID:</b> <code>{tg_chat.id}</code>"
+            ch_link = f"https://t.me/{tg_chat.username}" if tg_chat.username else ""
+            ch_info = f"<b>Channel:</b> {e(tg_chat.title)}\n<b>ID:</b> <code>{tg_chat.id}</code>"
+            if tg_chat.username:
+                ch_info += f"\n<b>Username:</b> @{e(tg_chat.username)}"
             if ch_link:
                 ch_info += f"\n<b>Link:</b> {ch_link}"
             keyboard = [[bold_button("🔙 Cancel", callback_data="manage_force_sub")]]
@@ -11150,7 +11831,58 @@ async def handle_admin_message(
         except Exception as exc:
             msg = await safe_send_message(
                 context.bot, chat_id,
-                UserFriendlyError.get_user_message(exc),
+                b("❌ Cannot access that channel.\n\n") + bq(
+                    b("Make sure:\n• Bot is admin in the channel\n• Username/ID is correct\n\nError: ")
+                ) + code(e(str(exc)[:120])),
+                reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="manage_force_sub")]]),
+            )
+            await store_bot_prompt(context, msg)
+        return
+
+    # ── 3rd method: Admin forwards a post from any channel → auto-extract channel ID ────
+    if state == PENDING_CHANNEL_POST:
+        msg_obj = update.effective_message
+        # Check if this is a forwarded message from a channel
+        fwd_chat = None
+        if msg_obj:
+            if msg_obj.forward_from_chat:
+                fwd_chat = msg_obj.forward_from_chat
+            elif msg_obj.forward_origin and hasattr(msg_obj.forward_origin, "chat"):
+                fwd_chat = msg_obj.forward_origin.chat
+        if not fwd_chat:
+            msg = await safe_send_message(
+                context.bot, chat_id,
+                b("❌ No forwarded channel post detected.\n\n") + bq(
+                    b("Forward any post from the channel you want to add.\n")
+                    + "The bot reads the channel ID automatically."
+                ),
+                reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="manage_force_sub")]]),
+            )
+            await store_bot_prompt(context, msg)
+            return
+        try:
+            tg_chat = await context.bot.get_chat(fwd_chat.id)
+            context.user_data["new_ch_uname"] = str(tg_chat.id)
+            context.user_data["new_ch_title"] = tg_chat.title
+            user_states[uid] = ADD_CHANNEL_TITLE
+            ch_info = f"<b>Channel:</b> {e(tg_chat.title)}\n<b>ID:</b> <code>{tg_chat.id}</code>"
+            if tg_chat.username:
+                ch_info += f"\n<b>Username:</b> @{e(tg_chat.username)}"
+            msg = await safe_send_message(
+                context.bot, chat_id,
+                b("✅ Channel detected from forwarded post!") + "\n\n"
+                + bq(ch_info) + "\n\n"
+                + b("Send a display title, or /skip to use the channel name:"),
+                reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="manage_force_sub")]]),
+            )
+            await store_bot_prompt(context, msg)
+        except Exception as exc:
+            msg = await safe_send_message(
+                context.bot, chat_id,
+                b("❌ Could not access that channel.\n\n") + bq(
+                    b("Make sure the bot is admin in ") + code(e(str(fwd_chat.id)))
+                    + b(f"\n\nError: ") + code(e(str(exc)[:100]))
+                ),
                 reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="manage_force_sub")]]),
             )
             await store_bot_prompt(context, msg)
@@ -11175,34 +11907,73 @@ async def handle_admin_message(
         return
 
     # ── Link generation states ─────────────────────────────────────────────────────
+    # ── Anime name for link generation (Step 1) ─────────────────────────────────
+    if state == GENERATE_LINK_ANIME_NAME:
+        anime_name = text.strip()
+        if not anime_name:
+            msg = await safe_send_message(
+                context.bot, chat_id,
+                b("❌ Please send an anime name. Try again:"),
+                reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="admin_back")]]),
+            )
+            await store_bot_prompt(context, msg)
+            return
+        context.user_data["gen_anime_name"] = anime_name
+        user_states[uid] = GENERATE_LINK_IDENTIFIER
+        msg = await safe_send_message(
+            context.bot, chat_id,
+            b(f"📺 Anime: {e(anime_name)}") + "\n\n"
+            + bq(
+                b("Step 2/2: Send the CHANNEL @username, numeric ID, or forward a post:\n\n")
+                + "• <code>@BeatAnime</code>\n"
+                + "• <code>-1001234567890</code>\n"
+                + "• Forward any message from the channel\n\n"
+                + "<i>Bot must be admin in the channel to create invite links.</i>"
+            ),
+            reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="admin_back")]]),
+        )
+        await store_bot_prompt(context, msg)
+        return
+
+    # ── Channel identifier for link generation (Step 2) ──────────────────────
     if state == GENERATE_LINK_IDENTIFIER:
         identifier = text.strip()
+        # Normalise
+        if identifier.lstrip("-").isdigit():
+            identifier = int(identifier)
+        elif not identifier.startswith("@"):
+            identifier = f"@{identifier}"
         try:
             tg_chat = await context.bot.get_chat(identifier)
             context.user_data["gen_ch_id"] = tg_chat.id
-            context.user_data["gen_ch_title"] = tg_chat.title
+            context.user_data["gen_ch_title"] = tg_chat.title or str(tg_chat.id)
             user_states[uid] = GENERATE_LINK_TITLE
             msg = await safe_send_message(
                 context.bot, chat_id,
-                b(f"📢 Channel: {e(tg_chat.title)}") + "\n\n"
-                + bq(b("Send a title for this link (shown in link backup), or /skip:")),
+                b(f"📢 Channel: {e(tg_chat.title or str(tg_chat.id))}") + "\n\n"
+                + bq(b("Send a display title for this link, or /skip to use the channel name:")),
                 reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="admin_back")]]),
             )
             await store_bot_prompt(context, msg)
         except Exception as exc:
             msg = await safe_send_message(
                 context.bot, chat_id,
-                UserFriendlyError.get_user_message(exc),
+                b("❌ Cannot access that channel.\n\n") + bq(
+                    "Supported:\n• @username\n• -1001234567890\n• Forward a post\n\n"
+                    + b("Error: ") + code(e(str(exc)[:100]))
+                ),
                 reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="admin_back")]]),
             )
             await store_bot_prompt(context, msg)
         return
 
+    # ── Link title / final generation (Step 3) ───────────────────────────────
     if state == GENERATE_LINK_TITLE:
         title = text.strip()
         if title.lower() == "/skip":
             title = context.user_data.get("gen_ch_title", "")
         ch_id = context.user_data.get("gen_ch_id")
+        anime_name = context.user_data.get("gen_anime_name", title)
         if not ch_id:
             user_states.pop(uid, None)
             await safe_send_message(context.bot, chat_id, b("Session expired. Start over."))
@@ -11212,14 +11983,38 @@ async def handle_admin_message(
                 channel_username=ch_id,
                 user_id=uid,
                 never_expires=False,
-                channel_title=title,
+                channel_title=title or anime_name,
                 source_bot_username=BOT_USERNAME,
             )
             deep_link = f"https://t.me/{BOT_USERNAME}?start={link_id}"
+
+            # ── Auto-create filter: anime_name → channel_id ───────────────────
+            try:
+                from database_dual import add_anime_channel_link
+                add_anime_channel_link(
+                    anime_title=anime_name,
+                    channel_id=ch_id,
+                    channel_title=title or anime_name,
+                    link_id=link_id,
+                    added_by=uid,
+                )
+                filter_note = (
+                    "\n\n✅ <b>Filter auto-created!</b>\n"
+                    + bq(
+                        f"Keyword: <code>{e(anime_name)}</code>\n"
+                        "When users type this in any group where the bot is active, "
+                        "they receive a poster + join button for this channel."
+                    )
+                )
+            except Exception as _fe:
+                logger.warning(f"anime_channel_link save failed: {_fe}")
+                filter_note = ""
+
             await safe_send_message(
                 context.bot, chat_id,
-                b(f"✅ Link generated for {e(title)}:") + "\n\n"
-                + bq(code(deep_link)),
+                b(f"✅ Link generated for {e(anime_name)}:") + "\n\n"
+                + bq(code(deep_link))
+                + filter_note,
                 reply_markup=_back_kb(),
             )
         except Exception as exc:
@@ -11228,6 +12023,8 @@ async def handle_admin_message(
                 b("❌ Error generating link: ") + code(e(str(exc)[:200])),
             )
         user_states.pop(uid, None)
+        for k in ("gen_ch_id", "gen_ch_title", "gen_anime_name"):
+            context.user_data.pop(k, None)
         return
 
     # ── Clone token ────────────────────────────────────────────────────────────────
@@ -11299,13 +12096,17 @@ async def handle_admin_message(
         return
 
     if state == SET_CATEGORY_BRANDING:
-        update_category_field(category, "branding", text.strip())
-        await safe_send_message(
-            context.bot, chat_id,
-            b(f"✅ Branding for {e(category)} updated!")
-        )
+        val = text.strip()
+        if update_category_field(category, "branding", val):
+            await safe_send_message(
+                context.bot, chat_id,
+                b(f"✅ Branding for {e(category.upper())} updated!") + "\n"
+                + bq(code(e(val[:120])) if val else b("(cleared)")),
+            )
+        else:
+            await safe_send_message(context.bot, chat_id, b(f"❌ Failed to save branding. Check DB connection."))
         user_states.pop(uid, None)
-        await send_admin_menu(chat_id, context)
+        await show_category_settings_menu(context, chat_id, category, None)
         return
 
     if state == SET_CATEGORY_BUTTONS:
@@ -11315,34 +12116,41 @@ async def handle_admin_message(
             if " - " in line:
                 parts = line.split(" - ", 1)
                 buttons_list.append({"text": parts[0].strip(), "url": parts[1].strip()})
-        update_category_field(category, "buttons", json.dumps(buttons_list))
-        await safe_send_message(
-            context.bot, chat_id,
-            b(f"✅ {len(buttons_list)} button(s) configured for {e(category)}!")
-        )
+        if update_category_field(category, "buttons", json.dumps(buttons_list)):
+            await safe_send_message(
+                context.bot, chat_id,
+                b(f"✅ {len(buttons_list)} button(s) configured for {e(category.upper())}!"),
+            )
+        else:
+            await safe_send_message(context.bot, chat_id, b(f"❌ Failed to save buttons. Check DB connection."))
         user_states.pop(uid, None)
-        await send_admin_menu(chat_id, context)
+        await show_category_settings_menu(context, chat_id, category, None)
         return
 
     if state == SET_CATEGORY_THUMBNAIL:
-        val = "" if text.strip().lower() in ("default", "none", "remove") else text.strip()
-        update_category_field(category, "thumbnail_url", val)
-        await safe_send_message(
-            context.bot, chat_id,
-            b(f"✅ Thumbnail for {e(category)} {'reset to default' if not val else 'updated'}!")
-        )
+        val = "" if text.strip().lower() in ("default", "none", "remove", "clear") else text.strip()
+        if update_category_field(category, "thumbnail_url", val):
+            await safe_send_message(
+                context.bot, chat_id,
+                b(f"✅ Thumbnail for {e(category.upper())} {'reset' if not val else 'updated'}!"),
+            )
+        else:
+            await safe_send_message(context.bot, chat_id, b(f"❌ Failed to save thumbnail. Check DB connection."))
         user_states.pop(uid, None)
-        await send_admin_menu(chat_id, context)
+        await show_category_settings_menu(context, chat_id, category, None)
         return
 
     if state == SET_WATERMARK_TEXT:
-        update_category_field(category, "watermark_text", text.strip())
-        await safe_send_message(
-            context.bot, chat_id,
-            b(f"✅ Watermark text for {e(category)} set!")
-        )
+        val = text.strip()
+        if update_category_field(category, "watermark_text", val):
+            await safe_send_message(
+                context.bot, chat_id,
+                b(f"✅ Watermark text for {e(category.upper())} set!") + "\n" + bq(code(e(val[:80]))),
+            )
+        else:
+            await safe_send_message(context.bot, chat_id, b(f"❌ Failed to save watermark. Check DB connection."))
         user_states.pop(uid, None)
-        await send_admin_menu(chat_id, context)
+        await show_category_settings_menu(context, chat_id, category, None)
         return
 
     # ── Upload manager states ──────────────────────────────────────────────────────
@@ -11433,6 +12241,11 @@ async def handle_admin_message(
     # ── Auto-forward states ────────────────────────────────────────────────────────
     if state == AF_ADD_CONNECTION_SOURCE:
         identifier = text.strip()
+        # Normalise: support @username OR numeric ID
+        if identifier.lstrip("-").isdigit():
+            identifier = int(identifier)
+        elif not identifier.startswith("@"):
+            identifier = f"@{identifier}"
         try:
             tg_chat = await context.bot.get_chat(identifier)
             context.user_data["af_source_id"] = tg_chat.id
@@ -11441,13 +12254,20 @@ async def handle_admin_message(
             msg = await safe_send_message(
                 context.bot, chat_id,
                 b(f"✅ Source: {e(tg_chat.title)}") + "\n\n"
-                + bq(b("Step 2/2: Send the TARGET channel @username or ID:")),
+                + bq(b("Step 2/2: Send the TARGET channel @username or ID:\n")
+                     + "• <code>@channelname</code>\n"
+                     + "• <code>-1001234567890</code>\n"
+                     + "• Or <b>forward any post</b> from the target channel"),
                 reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="admin_autoforward")]]),
             )
             await store_bot_prompt(context, msg)
         except Exception as exc:
             msg = await safe_send_message(
-                context.bot, chat_id, UserFriendlyError.get_user_message(exc),
+                context.bot, chat_id,
+                b("❌ Cannot access that channel.\n\n") + bq(
+                    b("Supported:\n• @username\n• -1001234567890 (numeric ID)\n• Forward a post from the channel\n\nMake sure bot is admin there.\n\nError: ")
+                    + code(e(str(exc)[:100]))
+                ),
                 reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="admin_autoforward")]]),
             )
             await store_bot_prompt(context, msg)
@@ -11455,6 +12275,11 @@ async def handle_admin_message(
 
     if state == AF_ADD_CONNECTION_TARGET:
         identifier = text.strip()
+        # Normalise: support @username OR numeric ID
+        if identifier.lstrip("-").isdigit():
+            identifier = int(identifier)
+        elif not identifier.startswith("@"):
+            identifier = f"@{identifier}"
         try:
             tg_chat = await context.bot.get_chat(identifier)
             src_id = context.user_data.get("af_source_id")
@@ -11544,7 +12369,12 @@ async def handle_admin_message(
         await safe_send_message(
             context.bot, chat_id,
             b(f"📚 {e(title)}") + f"\n<b>Mode:</b> {mode.title()} | <b>Interval:</b> {mins} min\n\n"
-            + bq(b("Send the target channel @username or ID:")),
+            + bq(
+                b("Send the target channel using any method:\n\n")
+                + "• <code>@channelname</code>\n"
+                + "• <code>-1001234567890</code> (numeric ID)\n"
+                + "• <b>Forward any post</b> from the channel"
+            ),
             reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="admin_autoupdate")]]),
         )
         return
@@ -11560,10 +12390,12 @@ async def handle_admin_message(
             user_states.pop(uid, None)
             return
         try:
-            # Try to get the chat - supports @username, -100xxx ID, or plain ID
+            # Normalise: support @username, -100xxx numeric ID, or plain numeric ID
             _ident = identifier.strip()
             if _ident.lstrip('-').isdigit():
                 _ident = int(_ident)
+            elif not _ident.startswith("@"):
+                _ident = f"@{_ident}"
             tg_chat = await context.bot.get_chat(_ident)
             # Verify bot can send to this chat
             try:
@@ -11609,6 +12441,7 @@ async def handle_admin_message(
                     b(f"✅ Now tracking: {e(manga_title)}") + "\n\n"
                     + bq(
                         f"<b>Channel:</b> {e(tg_chat.title or tg_chat.username or str(tg_chat.id))}\n"
+                        f"<b>Channel ID:</b> <code>{tg_chat.id}</code>\n"
                         f"<b>Mode:</b> {manga_mode.title()}\n"
                         f"<b>Check interval:</b> {interval_label}\n\n"
                         + b("New chapters will be sent automatically.")
@@ -11629,7 +12462,13 @@ async def handle_admin_message(
         except Exception as exc:
             await safe_send_message(
                 context.bot, chat_id,
-                b("❌ Could not find that channel.\n\n") + bq(b("Make sure:\n• The bot is an admin in the channel\n• Username is correct (starts with @)\n\nError: ")) + code(e(str(exc)[:100])),
+                b("❌ Could not find that channel.\n\n") + bq(
+                    b("Supported formats:\n")
+                    + "• <code>@channelname</code>\n"
+                    + "• <code>-1001234567890</code> (numeric ID)\n"
+                    + "• Forward any post from the channel\n\n"
+                    + b("Make sure the bot is admin in the channel.\n\nError: ")
+                ) + code(e(str(exc)[:100])),
                 reply_markup=InlineKeyboardMarkup([[_back_btn("admin_autoupdate")]]),
             )
             return
@@ -11887,22 +12726,35 @@ async def handle_admin_message(
         return
 
     if state == "AWAITING_PANEL_IMGS":
-        # User sent a photo while in panel image add mode
-        msg_photos = update.effective_message.photo if update.effective_message else []
-        if msg_photos:
+        # User sent a photo/sticker while in panel image add mode
+        _msg_obj = update.effective_message
+        _file_id_panel = None
+        _is_sticker_panel = False
+        if _msg_obj and _msg_obj.photo:
+            _file_id_panel = _msg_obj.photo[-1].file_id
+        elif _msg_obj and _msg_obj.sticker:
+            _file_id_panel = _msg_obj.sticker.file_id
+            _is_sticker_panel = True
+        if _file_id_panel:
             if not PANEL_DB_CHANNEL:
                 user_states.pop(uid, None)
-                await safe_send_message(context.bot, chat_id, "❌ PANEL_DB_CHANNEL not set.")
+                await safe_send_message(context.bot, chat_id, b("❌ PANEL_DB_CHANNEL not set."))
                 return
             items = _get_panel_db_images()
             try:
-                sent = await context.bot.send_photo(
-                    chat_id=PANEL_DB_CHANNEL,
-                    photo=msg_photos[-1].file_id,
-                    caption=f"Panel image #{len(items) + 1}",
-                )
-                file_id = sent.photo[-1].file_id
-                items.append({"index": len(items)+1, "msg_id": sent.message_id, "file_id": file_id})
+                if _is_sticker_panel:
+                    sent = await context.bot.send_sticker(
+                        chat_id=PANEL_DB_CHANNEL, sticker=_file_id_panel,
+                    )
+                    fid = sent.sticker.file_id
+                else:
+                    sent = await context.bot.send_photo(
+                        chat_id=PANEL_DB_CHANNEL,
+                        photo=_file_id_panel,
+                        caption=b(small_caps(f"panel image #{len(items) + 1}")),
+                    )
+                    fid = sent.photo[-1].file_id
+                items.append({"index": len(items)+1, "msg_id": sent.message_id, "file_id": fid})
                 _save_panel_db_images(items)
                 if _PANEL_IMAGE_AVAILABLE:
                     try:
@@ -11910,16 +12762,18 @@ async def handle_admin_message(
                         clear_tg_fileid()
                     except Exception:
                         pass
+                _kind = "sticker" if _is_sticker_panel else "image"
                 await safe_send_message(
                     context.bot, chat_id,
-                    f"✅ Image #{len(items)} added! Send more photos or /done to finish.",
+                    b(small_caps(f"✅ {_kind} #{len(items)} added!"))
+                    + "\n" + bq(b(small_caps("send more, or tap done to finish."))),
                     reply_markup=InlineKeyboardMarkup([[
                         InlineKeyboardButton("🖼 View All", callback_data="panel_img_manage"),
                         InlineKeyboardButton("✖️ Done", callback_data="close_message"),
                     ]])
                 )
             except Exception as exc:
-                await safe_send_message(context.bot, chat_id, f"❌ Failed: {e(str(exc)[:100])}")
+                await safe_send_message(context.bot, chat_id, b(f"❌ {e(str(exc)[:100])}"))
         return
 
     if state == "AWAITING_PANEL_IMG_URLS":
