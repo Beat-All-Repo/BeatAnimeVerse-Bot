@@ -242,6 +242,9 @@ WEBHOOK_URL: str = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/") + "/"
 # Source content
 WELCOME_SOURCE_CHANNEL: int = int(os.getenv("WELCOME_SOURCE_CHANNEL", "-1002530952988"))
 WELCOME_SOURCE_MESSAGE_ID: int = int(os.getenv("WELCOME_SOURCE_MESSAGE_ID", "32"))
+# Panel DB channel — bot forwards panel images here and stores message IDs
+# Same concept as WELCOME_SOURCE_CHANNEL. Add bot as admin to this channel.
+PANEL_DB_CHANNEL: int = int(os.getenv("PANEL_DB_CHANNEL", "0"))
 
 # Public links / branding
 PUBLIC_ANIME_CHANNEL_URL: str = os.getenv("PUBLIC_ANIME_CHANNEL_URL", "https://t.me/BeatAnime")
@@ -254,6 +257,12 @@ HELP_IMAGE_URL: str = os.getenv("HELP_IMAGE_URL", "")
 SETTINGS_IMAGE_URL: str = os.getenv("SETTINGS_IMAGE_URL", "")
 STATS_IMAGE_URL: str = os.getenv("STATS_IMAGE_URL", "")
 ADMIN_PANEL_IMAGE_URL: str = os.getenv("ADMIN_PANEL_IMAGE_URL", "")
+
+# ── PANEL_IMAGE_FILE_ID: permanent Telegram file_id for the admin panel image ──
+# How to get yours: forward any image to the bot and use /getfileid command.
+# Set this in your .env / Render env vars for truly instant panels from boot.
+# Example: PANEL_IMAGE_FILE_ID=AgACAgIAAxkBAAIB...
+PANEL_IMAGE_FILE_ID: str = os.getenv("PANEL_IMAGE_FILE_ID", "")
 WELCOME_IMAGE_URL: str = os.getenv("WELCOME_IMAGE_URL", "")
 BROADCAST_PANEL_IMAGE_URL: str = os.getenv("BROADCAST_PANEL_IMAGE_URL", "")
 
@@ -1055,6 +1064,195 @@ async def safe_edit_panel(
         return True
     except Exception:
         return False
+
+
+async def addpanelimg_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /addpanelimg — send one or more photos (or reply to a photo) to add them
+    to the panel DB channel. The bot forwards each to PANEL_DB_CHANNEL, saves
+    the file_id + message_id, and shows the numbered list.
+    Works exactly like the welcome image system.
+    """
+    uid = update.effective_user.id if update.effective_user else 0
+    if uid not in (ADMIN_ID, OWNER_ID):
+        return
+
+    msg = update.effective_message
+    chat_id = msg.chat_id
+
+    if not PANEL_DB_CHANNEL:
+        await safe_send_message(
+            context.bot, chat_id,
+            "❌ <b>PANEL_DB_CHANNEL not set.</b>\n\n"
+            "Add <code>PANEL_DB_CHANNEL</code> to your Render env vars.\n"
+            "Create a private channel, add the bot as admin, and paste the channel ID (e.g. <code>-1001234567890</code>)."
+        )
+        return
+
+    # Collect photos from replied-to message or current message
+    photos = []
+    if msg.reply_to_message and msg.reply_to_message.photo:
+        photos = [msg.reply_to_message.photo[-1]]
+    elif msg.photo:
+        photos = [msg.photo[-1]]
+
+    if not photos:
+        # Show current list instead
+        await _show_panel_img_list(context.bot, chat_id, query=None)
+        return
+
+    items = _get_panel_db_images()
+    added = 0
+    for photo in photos:
+        try:
+            # Forward to panel DB channel — same pattern as welcome source channel
+            sent = await context.bot.send_photo(
+                chat_id=PANEL_DB_CHANNEL,
+                photo=photo.file_id,
+                caption=f"Panel image #{len(items) + 1}",
+            )
+            file_id = sent.photo[-1].file_id
+            msg_id  = sent.message_id
+            items.append({"index": len(items) + 1, "msg_id": msg_id, "file_id": file_id})
+            added += 1
+        except Exception as exc:
+            logger.error(f"addpanelimg: forward to channel failed: {exc}")
+
+    if added:
+        _save_panel_db_images(items)
+        # Also update session cache so it takes effect immediately
+        if _PANEL_IMAGE_AVAILABLE:
+            try:
+                from panel_image import set_tg_fileid, clear_tg_fileid
+                clear_tg_fileid()
+            except Exception:
+                pass
+
+    await _show_panel_img_list(context.bot, chat_id, query=None, just_added=added)
+
+
+async def _show_panel_img_list(
+    bot, chat_id: int, query=None, page: int = 0, just_added: int = 0
+) -> None:
+    """Show numbered panel image list with ◀ ▶ navigation (1 image per page)."""
+    items = _get_panel_db_images()
+    total = len(items)
+
+    if not items:
+        text = (
+            "<b>🖼 Panel Images</b>\n\n"
+            "No images added yet.\n\n"
+            "Send a photo and use /addpanelimg, or reply to a photo with /addpanelimg."
+        )
+        kb = [[InlineKeyboardButton("🔙 Back", callback_data="admin_env_panel"), InlineKeyboardButton("✖️", callback_data="close_message")]]
+        if query:
+            try:
+                await query.delete_message()
+            except Exception:
+                pass
+        await safe_send_message(bot, chat_id, text, reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    # Clamp page
+    page = max(0, min(page, total - 1))
+    item = items[page]
+    file_id = item.get("file_id")
+    idx     = page + 1  # 1-based display number
+
+    added_note = f"\n✅ Added {just_added} image(s)." if just_added else ""
+    caption = (
+        f"<b>🖼 Panel Image {idx}/{total}</b>{added_note}\n\n"
+        f"This image rotates randomly as your panel background.\n"
+        f"<i>Image #{idx} of {total} stored in panel DB channel.</i>"
+    )
+
+    # Nav row: ◀ · idx/total · ▶
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("🔙", callback_data=f"panel_img_view_{page - 1}"))
+    nav.append(InlineKeyboardButton(f"{idx}/{total}", callback_data="noop"))
+    if page < total - 1:
+        nav.append(InlineKeyboardButton("🔜", callback_data=f"panel_img_view_{page + 1}"))
+
+    kb = [
+        nav,
+        [
+            InlineKeyboardButton(f"🗑 Delete #{idx}", callback_data=f"panel_img_del_{page}"),
+            InlineKeyboardButton("🔙 Back", callback_data="admin_env_panel"),
+            InlineKeyboardButton("✖️", callback_data="close_message"),
+        ],
+    ]
+    markup = InlineKeyboardMarkup(kb)
+
+    if query:
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+
+    if file_id:
+        try:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=file_id,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=markup,
+            )
+            return
+        except Exception:
+            pass
+    await safe_send_message(bot, chat_id, caption, reply_markup=markup)
+
+
+async def getfileid_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /getfileid — reply to any photo with this command to get its Telegram file_id.
+    Set PANEL_IMAGE_FILE_ID=<file_id> in your Render env vars for instant panels from boot.
+    """
+    uid = update.effective_user.id if update.effective_user else 0
+    if uid not in (ADMIN_ID, OWNER_ID):
+        return
+
+    msg = update.effective_message
+    photo = None
+
+    # Check if replying to a photo
+    if msg.reply_to_message and msg.reply_to_message.photo:
+        photo = msg.reply_to_message.photo[-1]  # largest size
+    elif msg.photo:
+        photo = msg.photo[-1]
+
+    if not photo:
+        await safe_send_message(
+            context.bot, msg.chat_id,
+            "📎 <b>How to use:</b> Send or forward any image, then reply to it with /getfileid. "
+            "Then copy the file_id and set it as <code>PANEL_IMAGE_FILE_ID</code> in your Render env vars. "
+            "This makes every panel load instantly from the very first boot — no warmup needed.",
+        )
+        return
+
+    file_id = photo.file_id
+    # Also cache it immediately for this session
+    if _PANEL_IMAGE_AVAILABLE:
+        try:
+            from panel_image import set_tg_fileid
+            for ptype in ["admin", "stats", "settings", "broadcast", "default"]:
+                set_tg_fileid(ptype, file_id)
+        except Exception:
+            pass
+
+    await safe_send_message(
+        context.bot, msg.chat_id,
+        (
+            "✅ <b>File ID captured and cached for this session!</b>\n\n"
+            f"<code>{file_id}</code>\n\n"
+            "To make this permanent (instant panels even after restart), "
+            "add to Render env vars:\n"
+            "<b>Key:</b> <code>PANEL_IMAGE_FILE_ID</code>\n"
+            f"<b>Value:</b> <code>{file_id}</code>"
+        ),
+    )
 
 
 async def delete_update_message(
@@ -2749,9 +2947,9 @@ async def generate_and_send_post(
         # Store urls + caption so navigation can restore info text
         _cache_set(img_key, {"urls": _alt_images, "caption": caption_text, "shown": set()})
         nav_row = [
-            InlineKeyboardButton("◀", callback_data=f"imgn:0:{img_key}:prev"),
+            InlineKeyboardButton("🔙", callback_data=f"imgn:0:{img_key}:prev"),
             InlineKeyboardButton("✕", callback_data="close_message"),
-            InlineKeyboardButton("▶", callback_data=f"imgn:0:{img_key}:next"),
+            InlineKeyboardButton("🔜", callback_data=f"imgn:0:{img_key}:next"),
         ]
     else:
         nav_row = [InlineKeyboardButton("✕", callback_data="close_message")]
@@ -2881,11 +3079,11 @@ def _build_pagination_kb(
     """Build a pagination keyboard row."""
     nav = []
     if current_page > 0:
-        nav.append(bold_button("PREV", callback_data=f"{base_callback}_{current_page - 1}"))
+        nav.append(InlineKeyboardButton("🔙", callback_data=f"{base_callback}_{current_page - 1}"))
     if total_pages > 1:
-        nav.append(bold_button(f"{current_page + 1}/{total_pages}", callback_data="noop"))
+        nav.append(InlineKeyboardButton(f"{current_page + 1}/{total_pages}", callback_data="noop"))
     if current_page < total_pages - 1:
-        nav.append(bold_button("NEXT", callback_data=f"{base_callback}_{current_page + 1}"))
+        nav.append(InlineKeyboardButton("🔜", callback_data=f"{base_callback}_{current_page + 1}"))
     keyboard = []
     if extra_buttons:
         keyboard.extend(extra_buttons)
@@ -2912,7 +3110,7 @@ def _style_label(label: str) -> str:
     except Exception:
         style = BUTTON_STYLE
     # Preserve allowed emojis at start/end
-    _ALLOWED_PFXS = ('➕ ','🔙 ','✔️ ','🔜 ','♻️ ','❗ ','✨ ','🟢 ','🔴 ','➕','🔙','✔️','🔜','♻️','❗','✨','🟢','🔴')
+    _ALLOWED_PFXS = ('◀ ','▶ ','✖️ ','🔙 ','🔜 ','➕ ','✔️ ','♻️ ','❗ ','✨ ','🟢 ','🔴 ','◀','▶','✖️','🔙','🔜','➕','✔️','♻️','❗','✨','🟢','🔴')
     prefix = ""
     clean = label
     for p in _ALLOWED_PFXS:
@@ -2932,10 +3130,13 @@ def _btn(label: str, cb: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(_style_label(label), callback_data=cb)
 
 def _close_btn() -> InlineKeyboardButton:
-    return InlineKeyboardButton(_style_label("ᴄʟᴏsᴇ"), callback_data="close_message")
+    return InlineKeyboardButton("✖️", callback_data="close_message")
 
 def _back_btn(cb: str = "admin_back") -> InlineKeyboardButton:
     return InlineKeyboardButton("🔙 " + _style_label("ʙᴀᴄᴋ"), callback_data=cb)
+
+def _next_btn(cb: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton("🔜", callback_data=cb)
 
 def bold_button(label: str, **kwargs) -> InlineKeyboardButton:
     """Styled button — respects BUTTON_STYLE setting."""
@@ -2961,17 +3162,63 @@ def _panel_kb(grid_items: list, back_cb: str = "admin_back",
     return InlineKeyboardMarkup(rows)
 
 
+# ── Panel DB channel helpers ──────────────────────────────────────────────────
+def _get_panel_db_images() -> list:
+    """Return list of {index, msg_id, file_id} dicts stored in DB."""
+    try:
+        import json as _j
+        raw = get_setting("panel_db_images", "[]") or "[]"
+        items = _j.loads(raw)
+        if isinstance(items, list):
+            return items
+    except Exception:
+        pass
+    return []
+
+def _save_panel_db_images(items: list) -> None:
+    import json as _j
+    set_setting("panel_db_images", _j.dumps(items))
+
+def _get_panel_db_fileid() -> Optional[str]:
+    """Return a random file_id from the panel DB channel image list, or None."""
+    items = _get_panel_db_images()
+    if not items:
+        return None
+    item = random.choice(items)
+    return item.get("file_id") or None
+
+
 def get_panel_pic(panel_type: str = "default") -> Optional[str]:
     """
-    Get panel image URL — synchronous, instant.
-    Returns from cache (pre-warmed at startup) or env vars.
-    Never calls external APIs (use get_panel_pic_async for that).
+    Get panel image — synchronous, always instant.
     Priority:
-      1. panel_image module cache (pre-warmed with static on startup)
-      2. PANEL_PICS env / custom URLs from DB
-      3. Per-panel env vars
+      1. Panel DB channel file_ids (set via bot) — fastest, zero external HTTP
+      2. PANEL_IMAGE_FILE_ID env var
+      3. session file_id cache
+      4. panel_image URL cache
+      5. PANEL_PICS env
+      6. Per-panel env vars
     """
-    # Return from panel_image cache — always instant (pre-warmed)
+    # Priority 1: channel-stored file_ids — always instant
+    fid = _get_panel_db_fileid()
+    if fid:
+        return fid
+
+    # Priority 2: permanent file_id from env
+    if PANEL_IMAGE_FILE_ID:
+        return PANEL_IMAGE_FILE_ID
+
+    # Priority 3: session file_id cache
+    if _PANEL_IMAGE_AVAILABLE:
+        try:
+            from panel_image import get_tg_fileid
+            cached_fid = get_tg_fileid(panel_type)
+            if cached_fid:
+                return cached_fid
+        except Exception:
+            pass
+
+    # Priority 4: URL cache (pre-warmed with static fallbacks at startup)
     if _PANEL_IMAGE_AVAILABLE:
         try:
             from panel_image import _img_cache
@@ -2980,10 +3227,12 @@ def get_panel_pic(panel_type: str = "default") -> Optional[str]:
                 return cached
         except Exception:
             pass
-    # PANEL_PICS env
+
+    # Priority 5: PANEL_PICS env
     if PANEL_PICS:
         return random.choice(PANEL_PICS)
-    # Per-panel env
+
+    # Priority 6: Per-panel env vars
     _per_panel = {
         "admin":     ADMIN_PANEL_IMAGE_URL,
         "stats":     STATS_IMAGE_URL,
@@ -3073,10 +3322,10 @@ def _build_panel_pages(maint: bool, clone_red: bool, clean_gc: bool) -> dict:
         """Navigation row — ◀ page_num/total ▶."""
         row = []
         if cur > 0:
-            row.append(InlineKeyboardButton("◀", callback_data=f"adm_page_{cur-1}"))
+            row.append(InlineKeyboardButton("🔙", callback_data=f"adm_page_{cur-1}"))
         row.append(InlineKeyboardButton(f"· {cur+1}/{total} ·", callback_data="noop"))
         if cur < total - 1:
-            row.append(InlineKeyboardButton("▶", callback_data=f"adm_page_{cur+1}"))
+            row.append(InlineKeyboardButton("🔜", callback_data=f"adm_page_{cur+1}"))
         row.append(_close_btn())
         return row
 
@@ -3225,16 +3474,15 @@ async def send_admin_menu(
     """
     global _PANEL_PAGES, _PANEL_PAGES_TS
 
-    # ── Debounce: prevent rapid-click pile-up that hangs ping ─────────────────
+    # ── Debounce: drop duplicate CALLBACK clicks only, never drop /start commands ──
     uid = chat_id  # for DM admin panels uid == chat_id
     lock = _get_panel_lock(uid)
-    if lock.locked():
-        # Already processing a panel for this user — silently drop duplicate
-        if query:
-            try:
-                await query.answer()
-            except Exception:
-                pass
+    if query and lock.locked():
+        # Already processing a panel callback for this user — drop the duplicate click
+        try:
+            await query.answer()
+        except Exception:
+            pass
         return
 
     async with lock:
@@ -6919,6 +7167,8 @@ def _register_all_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("connect", connect_command, filters=admin_filter))
     app.add_handler(CommandHandler("disconnect", disconnect_command, filters=admin_filter))
     app.add_handler(CommandHandler("connections", connections_command, filters=admin_filter))
+    app.add_handler(CommandHandler("addpanelimg", addpanelimg_command))
+    app.add_handler(CommandHandler("getfileid", getfileid_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(admin_filter & ~filters.COMMAND, handle_admin_message))
     app.add_handler(MessageHandler(
@@ -8536,11 +8786,10 @@ async def button_handler(
         # Panel image controls
         rows.append([
             bold_button(_img_src_label, callback_data="panel_img_toggle_source"),
-            bold_button(" Add Panel URLs", callback_data="panel_img_add_urls"),
-            bold_button("🗑 Clear URL List", callback_data="panel_img_clear_urls"),
+            bold_button("🖼 Panel Images", callback_data="panel_img_manage"),
+            bold_button("♻️ Refresh Cache", callback_data="panel_img_refresh_cache"),
         ])
-        rows.append([bold_button("♻️ Refresh Panel Cache", callback_data="panel_img_refresh_cache"),
-                     _back_btn("admin_settings"), _close_btn()])
+        rows.append([_back_btn("admin_settings"), _close_btn()])
         img_url = None
         if _PANEL_IMAGE_AVAILABLE:
             try:
@@ -8597,6 +8846,61 @@ async def button_handler(
         return
 
     # ── Panel Image Source controls ───────────────────────────────────────────────
+    # ── Panel image gallery navigation ───────────────────────────────────────────
+    if data.startswith("panel_img_view_"):
+        if not is_admin:
+            return
+        try:
+            page = int(data.split("_")[-1])
+        except Exception:
+            page = 0
+        await _show_panel_img_list(context.bot, chat_id, query=query, page=page)
+        return
+
+    if data.startswith("panel_img_del_"):
+        if not is_admin:
+            return
+        try:
+            page = int(data.split("_")[-1])
+        except Exception:
+            page = 0
+        items = _get_panel_db_images()
+        if 0 <= page < len(items):
+            removed = items.pop(page)
+            # Re-index remaining items
+            for i, it in enumerate(items):
+                it["index"] = i + 1
+            _save_panel_db_images(items)
+            # Clear session file_id cache so next panel uses new list
+            if _PANEL_IMAGE_AVAILABLE:
+                try:
+                    from panel_image import clear_tg_fileid
+                    clear_tg_fileid()
+                except Exception:
+                    pass
+            try:
+                await query.answer(f"✅ Image #{page + 1} deleted", show_alert=False)
+            except Exception:
+                pass
+            # Try to also delete from panel DB channel (non-fatal if fails)
+            if PANEL_DB_CHANNEL and removed.get("msg_id"):
+                try:
+                    await context.bot.delete_message(PANEL_DB_CHANNEL, removed["msg_id"])
+                except Exception:
+                    pass
+            # Show updated list
+            new_page = max(0, page - 1) if items else 0
+            await _show_panel_img_list(context.bot, chat_id, query=None, page=new_page)
+        else:
+            await query.answer("❌ Image not found", show_alert=True)
+        return
+
+    if data == "panel_img_manage":
+        if not is_admin:
+            return
+        await _show_panel_img_list(context.bot, chat_id, query=query, page=0)
+        return
+
     if data == "panel_img_toggle_source":
         if not is_admin:
             return
@@ -11483,6 +11787,42 @@ async def handle_admin_message(
                 [_btn("\U0001f465 VIEW USERS", "user_management"), _back_btn("admin_back")],
             ]),
         )
+        return
+
+    if state == "AWAITING_PANEL_IMGS":
+        # User sent a photo while in panel image add mode
+        msg_photos = update.effective_message.photo if update.effective_message else []
+        if msg_photos:
+            if not PANEL_DB_CHANNEL:
+                user_states.pop(uid, None)
+                await safe_send_message(context.bot, chat_id, "❌ PANEL_DB_CHANNEL not set.")
+                return
+            items = _get_panel_db_images()
+            try:
+                sent = await context.bot.send_photo(
+                    chat_id=PANEL_DB_CHANNEL,
+                    photo=msg_photos[-1].file_id,
+                    caption=f"Panel image #{len(items) + 1}",
+                )
+                file_id = sent.photo[-1].file_id
+                items.append({"index": len(items)+1, "msg_id": sent.message_id, "file_id": file_id})
+                _save_panel_db_images(items)
+                if _PANEL_IMAGE_AVAILABLE:
+                    try:
+                        from panel_image import clear_tg_fileid
+                        clear_tg_fileid()
+                    except Exception:
+                        pass
+                await safe_send_message(
+                    context.bot, chat_id,
+                    f"✅ Image #{len(items)} added! Send more photos or /done to finish.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🖼 View All", callback_data="panel_img_manage"),
+                        InlineKeyboardButton("✖️ Done", callback_data="close_message"),
+                    ]])
+                )
+            except Exception as exc:
+                await safe_send_message(context.bot, chat_id, f"❌ Failed: {e(str(exc)[:100])}")
         return
 
     if state == "AWAITING_PANEL_IMG_URLS":
