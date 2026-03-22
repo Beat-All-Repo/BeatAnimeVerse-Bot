@@ -14,6 +14,11 @@ Admin can toggle PRIMARY source between URL and API via:
   Admin Panel → SETTINGS → 🖼 PANEL IMAGE SOURCE
 
 Results cached 30 min. First load always instant (pre-warmed with static).
+
+SPEED UPGRADE: Telegram file_id cache
+  After any panel photo is sent, store the Telegram file_id.
+  Subsequent sends use the file_id directly — Telegram serves from its own CDN,
+  zero re-download, near-instant delivery.
 """
 
 import os, time, random, logging, asyncio
@@ -37,6 +42,29 @@ _CACHE_TTL = 1800   # 30 min
 
 _img_cache: Dict[str, str]   = {}
 _cache_ts:  Dict[str, float] = {}
+
+# ── Telegram file_id cache — persists for the bot session ─────────────────────
+# Maps panel_type → Telegram file_id string (e.g. "AgACAgIAAxk...")
+# These are permanent for the bot and never expire — only cleared on restart.
+# Using a file_id instead of a URL skips URL fetch entirely: ~0.05s vs ~1-3s.
+_tg_fileid_cache: Dict[str, str] = {}
+
+def get_tg_fileid(panel: str) -> Optional[str]:
+    """Return cached Telegram file_id for this panel, or None."""
+    return _tg_fileid_cache.get(panel)
+
+def set_tg_fileid(panel: str, file_id: str) -> None:
+    """Store a Telegram file_id for this panel type after a successful send."""
+    if file_id:
+        _tg_fileid_cache[panel] = file_id
+        logger.debug(f"Panel [{panel}] file_id cached: {file_id[:20]}...")
+
+def clear_tg_fileid(panel: str = None) -> None:
+    """Clear file_id cache (call when user changes the panel image source)."""
+    if panel:
+        _tg_fileid_cache.pop(panel, None)
+    else:
+        _tg_fileid_cache.clear()
 
 # ── Static fallbacks — always work, pre-warm cache ────────────────────────────
 _STATIC_FALLBACKS = [
@@ -78,10 +106,6 @@ for _pk in list(_PANEL_TAGS.keys()) + ["default"]:
 
 # ── DB helpers (read primary source setting) ──────────────────────────────────
 def _get_primary_source() -> str:
-    """
-    Returns 'url' or 'api'.
-    Reads from DB setting 'panel_image_source'. Default = 'url'.
-    """
     try:
         from database_dual import get_setting
         return get_setting("panel_image_source", "url") or "url"
@@ -89,10 +113,6 @@ def _get_primary_source() -> str:
         return "url"
 
 def _get_custom_urls() -> list:
-    """
-    Returns list of custom URLs saved via admin panel (panel_image_urls setting).
-    Falls back to PANEL_PICS env.
-    """
     try:
         from database_dual import get_setting
         import json as _j
@@ -334,15 +354,21 @@ def clear_image_cache(panel: str = None) -> int:
             del _img_cache[panel]
             del _cache_ts[panel]
             count = 1
+        clear_tg_fileid(panel)   # also clear file_id so next send re-uploads
     else:
         count = len(_img_cache)
         _img_cache.clear()
         _cache_ts.clear()
+        clear_tg_fileid()        # clear all file_ids too
     return count
 
 def get_cache_status() -> Dict[str, Any]:
     now = _now()
     return {
-        p: {"url": u[:60] + "...", "age_sec": int(now - _cache_ts.get(p, now))}
+        p: {
+            "url": u[:60] + "...",
+            "age_sec": int(now - _cache_ts.get(p, now)),
+            "has_fileid": p in _tg_fileid_cache,
+        }
         for p, u in _img_cache.items()
     }
