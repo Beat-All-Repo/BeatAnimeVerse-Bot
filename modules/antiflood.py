@@ -420,7 +420,10 @@ will result in restricting that user.
 __mod_name__ = "Aɴᴛɪ-Fʟᴏᴏᴅ"
 
 FLOOD_BAN_HANDLER = MessageHandler(
-    Filters.all & ~Filters.status_update & Filters.chat_type.groups,
+    # Use filters module directly — ~operator needs a BaseFilter instance, not a class
+    __import__('telegram.ext', fromlist=['filters']).filters.ALL
+    & ~__import__('telegram.ext', fromlist=['filters']).filters.StatusUpdate.ALL
+    & __import__('telegram.ext', fromlist=['filters']).filters.ChatType.GROUPS,
     check_flood,
     run_async=True,
 )
