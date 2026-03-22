@@ -187,7 +187,7 @@ def _get_cached_poster(title: str, template: str) -> Optional[Dict]:
                      "channel_id": row[2], "caption": row[3], "ts": row[4] or datetime.utcnow()}
             _poster_cache[key] = entry
             return entry
-        if _MG.db:
+        if _MG.db is not None:
             doc = _MG.db.poster_cache.find_one({"cache_key": key})
             if doc:
                 entry = {"file_id": doc.get("file_id"), "channel_msg_id": doc.get("channel_msg_id"),
@@ -217,7 +217,7 @@ def _save_poster_cache(title: str, template: str, file_id: str,
                     channel_msg_id = EXCLUDED.channel_msg_id,
                     created_at = NOW()
         """, (key, title, template, file_id, channel_msg_id, channel_id, caption))
-        if _MG.db:
+        if _MG.db is not None:
             _MG.db.poster_cache.update_one(
                 {"cache_key": key},
                 {"$set": {**entry, "cache_key": key, "title": title, "template": template,
@@ -1235,7 +1235,7 @@ def _get_cache_count() -> int:
         row = _pg_exec("SELECT COUNT(*) FROM poster_cache")
         if row:
             return row[0]
-        if _MG.db:
+        if _MG.db is not None:
             return _MG.db.poster_cache.count_documents({})
     except Exception:
         pass
@@ -1264,7 +1264,7 @@ def _clear_poster_cache() -> int:
     try:
         from database_dual import _pg_run, _MG
         _pg_run("DELETE FROM poster_cache")
-        if _MG.db:
+        if _MG.db is not None:
             _MG.db.poster_cache.delete_many({})
     except Exception:
         pass
