@@ -45,10 +45,26 @@ def _stub_module(name: str, **attrs):
     _sys.modules[name] = m
     return m
 
+# ── pyrate_limiter v2/v3 compatibility ────────────────────────────────────────
+# v2 uses Rate; v3 uses RequestRate. Patch whichever is installed.
 try:
-    import pyrate_limiter  # noqa
+    import pyrate_limiter as _prl
+    if not hasattr(_prl, 'Rate'):
+        # v3 installed — add v2 aliases
+        if hasattr(_prl, 'RequestRate'):
+            _prl.Rate = _prl.RequestRate
+        else:
+            class _Rate:
+                def __init__(self, *a, **k): pass
+            _prl.Rate = _Rate
+        # Duration.CUSTOM missing in v3
+        if hasattr(_prl, 'Duration') and not hasattr(_prl.Duration, 'CUSTOM'):
+            _prl.Duration.CUSTOM = 15
+        logger.info("[telegram_compat] pyrate_limiter v3→v2 aliases patched")
+    # Also patch into sys.modules so all importers see the patched version
+    _sys.modules['pyrate_limiter'] = _prl
 except ImportError:
-    # Stub pyrate_limiter so modules/helper_funcs/handlers.py loads
+    # Not installed at all — full stub
     class _Rate:
         def __init__(self, *a, **k): pass
     class _Duration:
@@ -58,11 +74,9 @@ except ImportError:
         def __init__(self, *a, **k): pass
         def try_acquire(self, *a, **k): pass
     _pl = _stub_module("pyrate_limiter")
-    _pl.Rate = _Rate
-    _pl.Duration = _Duration
-    _pl.BucketFullException = _BucketFullException
-    _pl.Limiter = _Limiter
-    logger.info("[telegram_compat] pyrate_limiter stubbed")
+    _pl.Rate = _Rate; _pl.Duration = _Duration
+    _pl.BucketFullException = _BucketFullException; _pl.Limiter = _Limiter
+    logger.info("[telegram_compat] pyrate_limiter fully stubbed (not installed)")
 
 try:
     import markdown2  # noqa
@@ -295,6 +309,42 @@ else:
     _u = sys.modules['telegram.utils']
     if not hasattr(_u, 'helpers'):
         _make_utils()
+
+
+# ── SQLAlchemy: prevent "Table already defined" errors ────────────────────────
+try:
+    import sqlalchemy as _sa
+    _orig_table_new = _sa.Table.__new__
+
+    class _PatchedTable(_sa.Table):
+        """Subclass that silently accepts extend_existing."""
+        def __new__(cls, name, metadata, *args, **kwargs):
+            if name in metadata.tables:
+                kwargs.setdefault('extend_existing', True)
+            return super().__new__(cls, name, metadata, *args, **kwargs)
+
+    # Monkey-patch at the MetaData level instead
+    _orig_meta_init = _sa.MetaData.__init__
+    def _patched_meta_init(self, *a, **kw):
+        _orig_meta_init(self, *a, **kw)
+    # Simpler: patch Table.__init_subclass__ won't work
+    # Use event approach instead
+    from sqlalchemy import event
+    @event.listens_for(_sa.MetaData, "before_create")
+    def _allow_extend(*a, **k): pass
+    # Most reliable: patch _sa.Table directly
+    _orig_Table = _sa.Table
+    def _Table(name, metadata=None, *cols, **kwargs):
+        if metadata is not None and name in metadata.tables:
+            kwargs.setdefault('extend_existing', True)
+            kwargs.setdefault('keep_existing', False)
+        if metadata is not None:
+            return _orig_Table(name, metadata, *cols, **kwargs)
+        return _orig_Table(name, *cols, **kwargs)
+    _sa.Table = _Table
+    logger.info("[telegram_compat] SQLAlchemy Table duplicate-definition patched")
+except Exception as _sq_exc:
+    logger.debug(f"[telegram_compat] SQLAlchemy patch failed: {_sq_exc}")
 
 logger.info("[telegram_compat] ✅ PTB v13→v21 shim loaded")
 
