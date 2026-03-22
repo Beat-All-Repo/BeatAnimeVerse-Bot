@@ -115,7 +115,12 @@ def _init_mongo(uri: str) -> None:
     try:
         client = MongoClient(uri, serverSelectionTimeoutMS=8000)
         client.server_info()          # force connection
-        _MG.db = client.get_default_database() or client["beataniversebot"]
+        # NOTE: MongoDB Database objects raise on bool() — use explicit None check
+        try:
+            _default = client.get_default_database()
+        except Exception:
+            _default = None
+        _MG.db = _default if _default is not None else client["beataniversebot"]
         _migrate_mongo()
         logger.info("✅ [MongoDB] Connected and indexed")
     except Exception as exc:
@@ -158,7 +163,9 @@ def _pg_exec(sql: str, params=()) -> Optional[Any]:
         cur = conn.cursor()
         cur.execute(sql, params)
         try:
-            return cur.fetchone()
+            row = cur.fetchone()
+            # Guard: return None if empty tuple (some drivers return () instead of None)
+            return row if row else None
         except Exception:
             return None
 
@@ -1265,10 +1272,19 @@ def update_broadcast_history(b_id, success, blocked, deleted, failed) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def cache_post(category, title, anilist_id, media_data) -> None:
-    _pg_run("""
-        INSERT INTO posts_cache (category, title, anilist_id, media_data)
-        VALUES (%s, %s, %s, %s)
-    """, (category, title, anilist_id, json.dumps(media_data)))
+    try:
+        # Use psycopg2.extras.Json so large/special-char JSON is never truncated
+        try:
+            from psycopg2.extras import Json as _PgJson
+            json_val = _PgJson(media_data)
+        except ImportError:
+            json_val = json.dumps(media_data, ensure_ascii=False)
+        _pg_run("""
+            INSERT INTO posts_cache (category, title, anilist_id, media_data)
+            VALUES (%s, %s, %s, %s)
+        """, (category, title, anilist_id, json_val))
+    except Exception as exc:
+        logger.error(f"cache_post failed: {exc}")
 
 def get_cached_post(anilist_id) -> Optional[dict]:
     row = _pg_exec(
