@@ -251,27 +251,19 @@ async def set_bot_description_and_help(bot: Bot) -> None:
         "Use /start to begin."
     )
     full_desc = (
-        f"🎌 {bot_name.upper()}\n\n"
-        "Your all-in-one anime Telegram bot.\n\n"
-        "FEATURES:\n"
-        "• Force-subscribe channel management\n"
-        "• Deep link generation (expiring channel links)\n"
-        "• Clone bot support\n"
-        "• Anime / Manga / Movie post generation\n"
-        "• 12 poster templates with watermarks\n"
-        "• Manga chapter tracker (MangaDex)\n"
-        "• Auto-forward system\n"
-        "• Broadcast manager\n"
-        "• Full group management (bans, warns, notes…)\n"
-        "• Couples, anime requests, inline search\n"
-        "• Dual database: NeonDB + MongoDB\n\n"
-        "GET STARTED:\n"
-        "/start — main menu\n"
-        "/help  — support & channels\n\n"
-        f"SUPPORT: @{support}\n"
-        f"CHANNEL: {channel}\n\n"
-        "Credits: @BeatAnime | @Beat_Anime_Discussion"
+        f"🎌 {bot_name}\n\n"
+        "All-in-one anime Telegram bot.\n\n"
+        "• Force-sub & deep links\n"
+        "• 12 poster templates\n"
+        "• Manga tracker (MangaDex)\n"
+        "• Auto-forward & broadcasts\n"
+        "• Full group management\n"
+        "• Dual DB: NeonDB + MongoDB\n\n"
+        f"/start — begin | /help — support\n"
+        f"@{support} | @BeatAnime"
     )
+    # Telegram hard limit: 512 chars for bot description
+    full_desc = full_desc[:512]
 
     try:
         await bot.set_my_short_description(short_description=short_desc)
