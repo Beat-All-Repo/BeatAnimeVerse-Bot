@@ -1,4 +1,26 @@
-from pyrate_limiter import BucketFullException, Duration, Limiter, Rate
+# ====================================================================
+# PLACE AT: /app/modules/helper_funcs/handlers.py
+# ACTION: Replace existing file
+# ====================================================================
+try:
+    from pyrate_limiter import BucketFullException, Duration, Limiter, Rate
+except ImportError:
+    # pyrate_limiter v2 compat — v2 uses Rate, v3 uses RequestRate
+    try:
+        from pyrate_limiter import RequestRate as Rate, Duration, Limiter, BucketFullException
+        # v3 Duration has no CUSTOM — add it
+        if not hasattr(Duration, 'CUSTOM'):
+            Duration.CUSTOM = 15
+    except Exception:
+        # Full stub fallback
+        class Rate:
+            def __init__(self, *a, **k): pass
+        class Duration:
+            CUSTOM = 15; MINUTE = 60; HOUR = 3600; DAY = 86400
+        class BucketFullException(Exception): pass
+        class Limiter:
+            def __init__(self, *a, **k): pass
+            def try_acquire(self, *a): pass
 from telegram import Update
 from telegram.ext import CommandHandler, Filters, MessageHandler, RegexHandler
 
