@@ -1,3 +1,7 @@
+# ====================================================================
+# PLACE AT: /app/modules/helper_funcs/chat_status.py
+# ACTION: Replace existing file
+# ====================================================================
 from functools import wraps
 from threading import RLock
 from time import perf_counter
@@ -402,6 +406,10 @@ def connection_status(func):
 
 
 # Workaround for circular import with connection.py
-from BeatVerseProbot.modules import connection
-
-connected = connection.connected
+# Use direct import instead of BeatVerseProbot.modules shim
+try:
+    from modules.connection import connected
+except ImportError:
+    # Fallback stub
+    def connected(update, chat, via_message=True, need_admin=None):
+        return update.effective_chat.id
