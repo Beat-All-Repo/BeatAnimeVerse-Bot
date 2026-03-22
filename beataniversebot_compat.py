@@ -172,15 +172,40 @@ class _LazyDispatcher:
         if self._real is not None:
             return self._real.bot
         # Return stub bot so modules don't crash with NoneType.id
+        # Return stub bot with all commonly-used methods as no-ops
+        _noop = lambda *a, **k: None
         return type('_StubBot', (), {
             'id': 0, 'username': '', 'first_name': 'Bot',
-            'send_message': lambda *a, **k: None,
-            'get_chat_member': lambda *a, **k: None,
+            'send_message':   _noop,
+            'send_sticker':   _noop,
+            'send_photo':     _noop,
+            'send_document':  _noop,
+            'send_audio':     _noop,
+            'send_voice':     _noop,
+            'send_video':     _noop,
+            'send_animation': _noop,
+            'forward_message':_noop,
+            'delete_message': _noop,
+            'pin_message':    _noop,
+            'get_chat':       _noop,
+            'get_chat_member':_noop,
+            'get_chat_administrators': _noop,
+            'restrict_chat_member': _noop,
+            'kick_chat_member': _noop,
+            'ban_chat_member':  _noop,
+            'unban_chat_member': _noop,
+            'promote_chat_member': _noop,
+            'answer_callback_query': _noop,
+            'edit_message_text': _noop,
+            '__getattr__': lambda self, name: _noop,   # catch-all for any other attr
         })()
 
     def __getattr__(self, name):
         if self._real is not None:
             return getattr(self._real, name)
+        # handlers is accessed by cleaner.py at module load — return empty dict
+        if name == 'handlers':
+            return {}
         # Return a no-op for unknown attrs
         def _noop(*a, **k): pass
         return _noop
