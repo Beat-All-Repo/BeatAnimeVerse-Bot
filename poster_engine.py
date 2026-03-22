@@ -1212,17 +1212,17 @@ async def cmd_plans(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         bronze, silver, gold, free = 30, 40, 50, 20
 
-await update.effective_message.reply_text(
-        f"<b> ʙᴇᴀᴛᴀɴɪᴠᴇʀsᴇ ᴘᴏsᴛᴇʀ ᴘʟᴀɴs</b>\n\n"
-        f" <b>ғʀᴇᴇ</b> — {free} ᴘᴏsᴛᴇʀs/ᴅᴀʏ\n"
-        f" <b>ʙʀᴏɴᴢᴇ</b> — {bronze} ᴘᴏsᴛᴇʀs/ᴅᴀʏ\n"
-        f" <b>sɪʟᴠᴇʀ</b> — {silver} ᴘᴏsᴛᴇʀs/ᴅᴀʏ\n"
-        f" <b>ɢᴏʟᴅ</b> — {gold} ᴘᴏsᴛᴇʀs/ᴅᴀʏ\n\n"
-        f"<i>ᴄᴏɴᴛᴀᴄᴛ ᴀᴅᴍɪɴ ᴛᴏ ᴜᴘɢʀᴀᴅᴇ ʏᴏᴜʀ ᴘʟᴀɴ!</i>",
+    await update.effective_message.reply_text(
+        f"<b>💎 BeatAniVerse Poster Plans</b>\n\n"
+        f"🆓 <b>Free</b> — {free} posters/day\n"
+        f"🥉 <b>Bronze</b> — {bronze} posters/day\n"
+        f"🥈 <b>Silver</b> — {silver} posters/day\n"
+        f"🥇 <b>Gold</b> — {gold} posters/day\n\n"
+        f"<i>Contact admin to upgrade your plan!</i>",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton(" ᴄᴏɴᴛᴀᴄᴛ ᴀᴅᴍɪɴ", url=f"https://t.me/{os.getenv('ADMIN_CONTACT_USERNAME','Beat_Anime_Ocean')}")],
-            [InlineKeyboardButton(" ʙᴇᴀᴛᴀɴɪᴍᴇ", url=PUBLIC_ANIME_CHANNEL_URL)],
+            [InlineKeyboardButton("💬 Contact Admin", url=f"https://t.me/{os.getenv('ADMIN_CONTACT_USERNAME','Beat_Anime_Ocean')}")],
+            [InlineKeyboardButton("📢 BeatAnime", url=PUBLIC_ANIME_CHANNEL_URL)],
         ]),
     )
 
@@ -1321,7 +1321,7 @@ async def cmd_remove_premium(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     try:
         await context.bot.send_message(
-            target, "<b> Your premium plan has been removed by the administrator.</b>",
+            target, "<b>ℹ️ Your premium plan has been removed by the administrator.</b>",
             parse_mode=ParseMode.HTML,
         )
     except Exception:
