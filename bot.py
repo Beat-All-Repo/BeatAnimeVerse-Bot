@@ -2862,15 +2862,27 @@ def _panel_kb(grid_items: list, back_cb: str = "admin_back",
 
 def get_panel_pic(panel_type: str = "default") -> Optional[str]:
     """
-    Get panel image URL:
-      1. PANEL_PICS env (comma-separated) — pick random
-      2. Per-panel env vars (ADMIN_PANEL_IMAGE_URL etc.)
-      3. panel_image API (waifu.im / anilist — pre-cached for instant return)
+    Get panel image URL — synchronous, instant.
+    Returns from cache (pre-warmed at startup) or env vars.
+    Never calls external APIs (use get_panel_pic_async for that).
+    Priority:
+      1. panel_image module cache (pre-warmed with static on startup)
+      2. PANEL_PICS env / custom URLs from DB
+      3. Per-panel env vars
     """
-    import random
+    # Return from panel_image cache — always instant (pre-warmed)
+    if _PANEL_IMAGE_AVAILABLE:
+        try:
+            from panel_image import _img_cache
+            cached = _img_cache.get(panel_type) or _img_cache.get("default")
+            if cached:
+                return cached
+        except Exception:
+            pass
+    # PANEL_PICS env
     if PANEL_PICS:
         return random.choice(PANEL_PICS)
-    # Per-panel env fallback
+    # Per-panel env
     _per_panel = {
         "admin":     ADMIN_PANEL_IMAGE_URL,
         "stats":     STATS_IMAGE_URL,
@@ -2879,25 +2891,43 @@ def get_panel_pic(panel_type: str = "default") -> Optional[str]:
         "help":      HELP_IMAGE_URL,
         "welcome":   WELCOME_IMAGE_URL,
     }
-    env_url = _per_panel.get(panel_type, "")
-    if env_url:
-        return env_url
-    return None   # Caller will use panel_image API
+    return _per_panel.get(panel_type, "") or None
 
 
 async def get_panel_pic_async(panel_type: str = "default") -> Optional[str]:
     """
-    Get panel image URL — instant first, API fallback with 2s timeout.
-    Env vars (PANEL_PICS, ADMIN_PANEL_IMAGE_URL etc.) are returned instantly.
-    API call (waifu.im / anilist) is capped at 2s to never block the panel.
+    Get panel image URL — ALWAYS instant.
+
+    Strategy:
+      1. Return cached value immediately (never waits)
+      2. Trigger background refresh if cache is stale
+      3. Background refresh honours primary source toggle (url vs api)
+
+    This means panels ALWAYS appear instantly. Images upgrade silently
+    in background after the 30-minute cache TTL expires.
     """
-    quick = get_panel_pic(panel_type)  # synchronous env/cache check
+    # Synchronous cache check — instant
+    quick = get_panel_pic(panel_type)
     if quick:
+        # Trigger background refresh of stale cache (fire-and-forget)
+        if _PANEL_IMAGE_AVAILABLE:
+            try:
+                from panel_image import _is_cached
+                if not _is_cached(panel_type):
+                    asyncio.create_task(
+                        asyncio.get_event_loop().run_in_executor(
+                            None, lambda: __import__('panel_image').get_panel_image(panel_type, True)
+                        )
+                    )
+            except Exception:
+                pass
         return quick
+
+    # Fallback: async fetch with 3s timeout (only if cache completely empty)
     if _PANEL_IMAGE_AVAILABLE:
         try:
-            return await asyncio.wait_for(get_panel_image_async(panel_type), timeout=2.0)
-        except (asyncio.TimeoutError, Exception):
+            return await asyncio.wait_for(get_panel_image_async(panel_type), timeout=3.0)
+        except Exception:
             pass
     return None
 
@@ -5074,7 +5104,7 @@ async def rules_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     rules = get_setting(f"rules_{chat_id}", "")
     if rules:
         await update.message.reply_text(
-            f"<b>📋 Group Rules:</b>\n\n{html.escape(rules)}", parse_mode=ParseMode.HTML
+            f"<b> Group Rules:</b>\n\n{html.escape(rules)}", parse_mode=ParseMode.HTML
         )
     else:
         await update.message.reply_text("<b>No rules set for this group yet.</b>", parse_mode=ParseMode.HTML)
@@ -5157,10 +5187,10 @@ async def _chatbot_reply(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         # Simple fallback responses
         import random
         fallbacks = [
-            "Interesting! Tell me more! 🎌",
-            "That's cool! What anime are you watching? 📺",
+            "Interesting! Tell me more! ",
+            "That's cool! What anime are you watching? ",
             "I'm here to chat! What's on your mind? 😊",
-            "Nice! Have you seen Demon Slayer? It's amazing! ⚔️",
+            "Nice! Have you seen Demon Slayer? It's amazing! ",
         ]
         reply_text = random.choice(fallbacks)
 
@@ -5246,7 +5276,7 @@ async def set_loader_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         kind = f"Custom Sticker (<code>{sticker_id[:20]}…</code>)" if sticker_id else "Default ❗ Animation"
         await safe_send_message(
             context.bot, update.effective_chat.id,
-            f"<b>🎬 Loading Animation Settings</b>\n\n"
+            f"<b> Loading Animation Settings</b>\n\n"
             f"<b>Status:</b> {status}\n"
             f"<b>Type:</b> {kind}\n\n"
             f"<b>How to change:</b>\n"
@@ -5703,14 +5733,14 @@ async def _do_broadcast(
             logger.debug(f"Purge deleted users error: {exc}")
 
     result = (
-        b("📣 Broadcast Complete!") + "\n\n"
+        b(" Broadcast Complete!") + "\n\n"
         + bq(
-            f"<b>✅ Sent:</b> {code(format_number(sent))}\n"
-            f"<b>🚫 Blocked:</b> {code(format_number(blocked))}\n"
-            f"<b>🗑 Deleted accounts:</b> {code(format_number(deleted_count))}\n"
-            f"<b>🧹 Purged from DB:</b> {code(format_number(purged))}\n"
-            f"<b>❌ Other failures:</b> {code(format_number(fail - blocked - deleted_count if fail > 0 else 0))}\n"
-            f"<b>📊 Total users:</b> {code(format_number(total))}"
+            f"<b> Sent:</b> {code(format_number(sent))}\n"
+            f"<b> Blocked:</b> {code(format_number(blocked))}\n"
+            f"<b> Deleted accounts:</b> {code(format_number(deleted_count))}\n"
+            f"<b> Purged from DB:</b> {code(format_number(purged))}\n"
+            f"<b> Other failures:</b> {code(format_number(fail - blocked - deleted_count if fail > 0 else 0))}\n"
+            f"<b> Total users:</b> {code(format_number(total))}"
         )
     )
 
@@ -6820,7 +6850,7 @@ def _register_all_handlers(app: Application) -> None:
 
 async def _run_clone_polling(token: str, uname: str) -> None:
     """Run a clone bot as an independent Application with all handlers."""
-    logger.info(f"🤖 Starting clone bot @{uname} polling...")
+    logger.info(f" Starting clone bot @{uname} polling...")
     try:
         app = (
             Application.builder()
@@ -6985,8 +7015,8 @@ async def manga_update_job(context: ContextTypes.DEFAULT_TYPE) -> None:
                 + bq(b("Enjoy reading! 🎉"))
             )
             keyboard = [[
-                InlineKeyboardButton("📖 Read Now", url=f"https://mangadex.org/chapter/{ch_id}"),
-                InlineKeyboardButton("📚 Manga Page", url=f"https://mangadex.org/title/{manga_id}"),
+                InlineKeyboardButton(" Read Now", url=f"https://mangadex.org/chapter/{ch_id}"),
+                InlineKeyboardButton(" Manga Page", url=f"https://mangadex.org/title/{manga_id}"),
             ]]
 
             if target_chat_id:
@@ -7447,9 +7477,9 @@ async def button_handler(
                     new_url = images[new_idx]
                     # Rebuild navigation keyboard with updated index
                     new_kb = [
-                        [InlineKeyboardButton("◀", callback_data=f"imgn:{new_idx}:{img_key}:prev"),
-                         InlineKeyboardButton("✕", callback_data="close_message"),
-                         InlineKeyboardButton("▶", callback_data=f"imgn:{new_idx}:{img_key}:next")],
+                        [InlineKeyboardButton("🔙", callback_data=f"imgn:{new_idx}:{img_key}:prev"),
+                         InlineKeyboardButton("✖️", callback_data="close_message"),
+                         InlineKeyboardButton("🔜", callback_data=f"imgn:{new_idx}:{img_key}:next")],
                     ]
                     # Preserve existing top rows from the current keyboard (except last nav row)
                     if query.message and query.message.reply_markup:
@@ -7543,11 +7573,11 @@ async def button_handler(
         # Navigation: ◀ and ▶ have arrows only, page indicator, ✕ close
         nav = []
         if page > 0:
-            nav.append(InlineKeyboardButton("◀", callback_data=f"user_features_{page-1}"))
+            nav.append(InlineKeyboardButton("🔙", callback_data=f"user_features_{page-1}"))
         nav.append(InlineKeyboardButton(f"{page+1} / {total_pages}", callback_data="noop"))
         if page < total_pages - 1:
-            nav.append(InlineKeyboardButton("▶", callback_data=f"user_features_{page+1}"))
-        nav.append(InlineKeyboardButton("✕", callback_data="close_message"))
+            nav.append(InlineKeyboardButton("🔜", callback_data=f"user_features_{page+1}"))
+        nav.append(InlineKeyboardButton("✖️", callback_data="close_message"))
 
         feat_rows.append(nav)
         markup = InlineKeyboardMarkup(feat_rows)
@@ -7760,8 +7790,8 @@ async def button_handler(
             f"<b>{title}</b>\n\n" + bq(desc),
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("◀", callback_data=f"user_features_{back_page}"),
-                 InlineKeyboardButton("✕", callback_data="close_message")],
+                [InlineKeyboardButton("🔙", callback_data=f"user_features_{back_page}"),
+                 InlineKeyboardButton("✖️", callback_data="close_message")],
             ]),
         )
         return
@@ -7772,18 +7802,12 @@ async def button_handler(
         except Exception:
             pass
         text = (
-            b(f"ℹ️ About {e(BOT_NAME)}") + "\n\n"
+            b(f" About {e(BOT_NAME)}") + "\n\n"
             + bq(
                 b("🤖 Powered by @Beat_Anime_Ocean\n\n")
                 + b("Features:\n")
-                + "• Force-Sub channels\n"
-                + "• Anime/Manga/Movie posts\n"
-                + "• Deep link generation\n"
-                + "• Auto-forward system\n"
-                + "• Clone bot support\n"
-                + "• Broadcast manager\n"
-                + "• Manga chapter tracker\n"
-                + "• Upload manager"
+                + "• Force-Sub channels"
+        
             )
         )
         await safe_send_message(
@@ -8176,7 +8200,7 @@ async def button_handler(
         user_states[uid] = ADD_CLONE_TOKEN
         await safe_edit_text(
             query,
-            b("🤖 Add Clone Bot") + "\n\n"
+            b(" Add Clone Bot") + "\n\n"
             + bq(b("Send the BOT TOKEN of the clone bot.\n⚠️ Keep tokens secret!")),
             reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="manage_clones")]]),
         )
@@ -8386,6 +8410,13 @@ async def button_handler(
             )
         )
         # 3x3 env editing grid
+        # Read current panel image source setting
+        try:
+            _img_src = get_setting("panel_image_source", "url") or "url"
+        except Exception:
+            _img_src = "url"
+        _img_src_label = "🔗 Source: URL-first" if _img_src == "url" else "🌐 Source: API-first"
+
         grid = [
             _btn("BOT NAME",         "env_edit_BOT_NAME"),
             _btn("JOIN BTN TEXT",    "env_edit_JOIN_BTN_TEXT"),
@@ -8401,7 +8432,14 @@ async def button_handler(
             _btn("WELCOME TEXT",     "env_edit_BOT_WELCOME_TEXT"),
         ]
         rows = _grid3(grid)
-        rows.append([_btn("♻️ REFRESH", "admin_env_panel"), _back_btn("admin_settings"), _close_btn()])
+        # Panel image controls
+        rows.append([
+            bold_button(_img_src_label, callback_data="panel_img_toggle_source"),
+            bold_button(" Add Panel URLs", callback_data="panel_img_add_urls"),
+            bold_button("🗑 Clear URL List", callback_data="panel_img_clear_urls"),
+        ])
+        rows.append([bold_button("♻️ Refresh Panel Cache", callback_data="panel_img_refresh_cache"),
+                     _back_btn("admin_settings"), _close_btn()])
         img_url = None
         if _PANEL_IMAGE_AVAILABLE:
             try:
@@ -8451,10 +8489,86 @@ async def button_handler(
         user_states[uid] = SET_BACKUP_CHANNEL
         await safe_edit_text(
             query,
-            b("📢 Set Backup Channel URL") + "\n\n"
+            b(" Set Backup Channel URL") + "\n\n"
             + bq(b("Send the backup channel URL (e.g., https://t.me/backup_channel)")),
             reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="admin_settings")]]),
         )
+        return
+
+    # ── Panel Image Source controls ───────────────────────────────────────────────
+    if data == "panel_img_toggle_source":
+        if not is_admin:
+            return
+        try:
+            current = get_setting("panel_image_source", "url") or "url"
+            new_src = "api" if current == "url" else "url"
+            set_setting("panel_image_source", new_src)
+            label = "🌐 API-first (waifu.im → anilist → nekos → safone)" if new_src == "api"                     else "🔗 URL-first (your custom URLs / PANEL_PICS env)"
+            try:
+                await query.answer(f"✅ Panel source: {label[:40]}", show_alert=True)
+            except Exception:
+                pass
+            # Invalidate all panel caches so next panel uses new source
+            if _PANEL_IMAGE_AVAILABLE:
+                try:
+                    clear_image_cache()
+                    logger.info(f"[panel] source toggled to {new_src}, cache cleared")
+                except Exception:
+                    pass
+        except Exception as exc:
+            logger.error(f"panel_img_toggle: {exc}")
+        # Re-show settings panel
+        await button_handler(update, context, "admin_settings")
+        return
+
+    if data == "panel_img_add_urls":
+        if not is_admin:
+            return
+        user_states[uid] = "AWAITING_PANEL_IMG_URLS"
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+        try:
+            import json as _j
+            existing = _j.loads(get_setting("panel_image_urls", "[]") or "[]")
+        except Exception:
+            existing = []
+        existing_text = "\n".join(existing[:5]) + ("\n..." if len(existing) > 5 else "") if existing else "(none)"
+        await safe_send_message(
+            context.bot, chat_id,
+            b(" Add Panel Image URLs") + "\n\n"
+            + bq(
+                "<b>Send one or more image URLs (one per line).</b>\n\n"
+                "These will be used as panel backgrounds (URL-first mode).\n"
+                "Direct links to .jpg/.png/.webp images work best.\n\n"
+                f"<b>Current URLs ({len(existing)}):</b>\n{e(existing_text)}"
+            ),
+            reply_markup=InlineKeyboardMarkup([[_back_btn("admin_settings"), _close_btn()]]),
+        )
+        return
+
+    if data == "panel_img_clear_urls":
+        if not is_admin:
+            return
+        try:
+            set_setting("panel_image_urls", "[]")
+            clear_image_cache()
+            await query.answer("✅ Custom URL list cleared. Using PANEL_PICS env or APIs.", show_alert=True)
+        except Exception as exc:
+            await query.answer(f"❌ {str(exc)[:60]}", show_alert=True)
+        await button_handler(update, context, "admin_settings")
+        return
+
+    if data == "panel_img_refresh_cache":
+        if not is_admin:
+            return
+        try:
+            n = clear_image_cache()
+            await query.answer(f"✅ Cache cleared ({n} entries). Next panel load fetches fresh image.", show_alert=False)
+        except Exception:
+            await query.answer("✅ Cache cleared", show_alert=False)
+        await button_handler(update, context, "admin_settings")
         return
 
     # ── Text Style panel ───────────────────────────────────────────────────────────
@@ -8866,7 +8980,7 @@ async def button_handler(
             )
             await safe_edit_text(
                 query,
-                b(f"📝 Set Caption Template for {e(cat_name.upper())}") + "\n\n"
+                b(f" Set Caption Template for {e(cat_name.upper())}") + "\n\n"
                 + bq(b("Send the caption template text.\n\n") + b("Available placeholders:\n") + e(placeholders)),
                 reply_markup=InlineKeyboardMarkup([[
                     bold_button("🔙 Cancel", callback_data=f"admin_category_settings_{cat_name}")
@@ -8909,7 +9023,7 @@ async def button_handler(
             context.user_data["editing_category"] = cat_name
             await safe_edit_text(
                 query,
-                b(f"🔘 Configure Buttons for {e(cat_name.upper())}") + "\n\n"
+                b(f" Configure Buttons for {e(cat_name.upper())}") + "\n\n"
                 + bq(
                     b("Send button config, one per line:\n")
                     + b("Format: Button Text - https://url\n\n")
@@ -8966,14 +9080,14 @@ async def button_handler(
                 )],
             ]
             action_btns = [
-                [bold_button("📝 Set Text Watermark", callback_data=f"cat_wm_text_{cat_name}")],
-                [bold_button("🖼 Send Image/Sticker as Watermark", callback_data=f"cat_wm_image_{cat_name}")],
+                [bold_button(" Set Text Watermark", callback_data=f"cat_wm_text_{cat_name}")],
+                [bold_button(" Send Image/Sticker as Watermark", callback_data=f"cat_wm_image_{cat_name}")],
                 [bold_button("❌ Remove Watermark", callback_data=f"cat_wm_clear_{cat_name}")],
                 [_back_btn(f"cat_settings_{cat_name}"), _close_btn()],
             ]
             markup = InlineKeyboardMarkup(pos_btns + action_btns)
             text = (
-                b(f"💧 {cat_name.upper()} WATERMARK SETTINGS") + "\n\n"
+                b(f" {cat_name.upper()} WATERMARK SETTINGS") + "\n\n"
                 + bq(
                     f"<b>Current Text:</b> {code(e(str(wm)[:30]))}\n"
                     f"<b>Position:</b> {code(wm_pos)}\n"
@@ -9036,7 +9150,7 @@ async def button_handler(
             except Exception:
                 pass
             await safe_send_message(context.bot, chat_id,
-                b(f"💧 Set Text Watermark for {cat_name}") + "\n\n"
+                b(f" Set Text Watermark for {cat_name}") + "\n\n"
                 + bq(
                     "Send your watermark text now.\n\n"
                     "<b>Format:</b> <code>Your Text</code>\n"
@@ -9059,12 +9173,12 @@ async def button_handler(
             except Exception:
                 pass
             await safe_send_message(context.bot, chat_id,
-                b(f"🖼 Set Image/Sticker Watermark for {cat_name}") + "\n\n"
+                b(f" Set Image/Sticker Watermark for {cat_name}") + "\n\n"
                 + bq(
                     "Send one of these as watermark overlay:\n"
-                    "• 🖼 Photo / image\n"
-                    "• 🎭 Sticker (static or animated)\n"
-                    "• 📄 Image document (.png .jpg .webp)\n\n"
+                    "•  Photo / image\n"
+                    "•  Sticker (static or animated)\n"
+                    "•  Image document (.png .jpg .webp)\n\n"
                     "It will appear as logo overlay on all posters for this category.\n"
                     "Position is set from the Watermark panel."
                 ),
@@ -9116,7 +9230,7 @@ async def button_handler(
             context.user_data["editing_category"] = cat_name
             await safe_edit_text(
                 query,
-                b(f"🖼 Set Thumbnail for {e(cat_name.upper())}") + "\n\n"
+                b(f" Set Thumbnail for {e(cat_name.upper())}") + "\n\n"
                 + bq(b("Send the thumbnail URL, or send 'default' to reset.")),
                 reply_markup=InlineKeyboardMarkup([[
                     bold_button("🔙 Cancel", callback_data=f"admin_category_settings_{cat_name}")
@@ -9130,7 +9244,7 @@ async def button_handler(
                 return
             await safe_edit_text(
                 query,
-                b(f"🔤 Font Style for {e(cat_name.upper())}"),
+                b(f" Font Style for {e(cat_name.upper())}"),
                 reply_markup=InlineKeyboardMarkup([
                     [bold_button("Normal", callback_data=f"cat_font_set_{cat_name}_normal"),
                      bold_button("Small Caps", callback_data=f"cat_font_set_{cat_name}_smallcaps")],
@@ -9157,7 +9271,7 @@ async def button_handler(
             current = get_category_settings(cat_name).get("watermark_text", "")
             await safe_edit_text(
                 query,
-                b(f"💧 Set Watermark for {e(cat_name.upper())}") + "\n\n"
+                b(f" Set Watermark for {e(cat_name.upper())}") + "\n\n"
                 + bq(b("Send the watermark text to stamp on images.\n\n")
                      + b("Current: ") + code(e(current[:50] if current else "None"))),
                 reply_markup=InlineKeyboardMarkup([
@@ -9213,7 +9327,7 @@ async def button_handler(
             context.user_data["editing_category"] = cat_name
             await safe_edit_text(
                 query,
-                b(f"🖼 Set Logo for {e(cat_name.upper())}") + "\n\n"
+                b(f" Set Logo for {e(cat_name.upper())}") + "\n\n"
                 + bq(b("Send a photo or image document to use as logo.")),
                 reply_markup=InlineKeyboardMarkup([[
                     bold_button("Remove Logo", callback_data=f"cat_logo_clear_{cat_name}"),
@@ -9917,7 +10031,7 @@ async def button_handler(
             pass
         await safe_edit_text(
             query,
-            b(f"📝 {kind} Words") + "\n\n"
+            b(f" {kind} Words") + "\n\n"
             + bq(
                 f"<b>Current:</b> {code(e(words or 'None'))}\n\n"
                 "Send new comma-separated words to set the list:\n"
@@ -9987,7 +10101,7 @@ async def button_handler(
             return
         rows = MangaTracker.get_all_tracked()
         text = (
-            b("📊 Manga Tracking Stats") + "\n\n"
+            b(" Manga Tracking Stats") + "\n\n"
             f"<b>Total tracked:</b> {code(str(len(rows)))}"
         )
         await safe_edit_text(
@@ -10025,7 +10139,7 @@ async def button_handler(
         user_states[uid] = UPLOAD_SET_CAPTION
         await safe_edit_text(
             query,
-            b("📝 Set Caption Template") + "\n\n"
+            b(" Set Caption Template") + "\n\n"
             + bq(
                 b("Send the new caption template.\n\n")
                 + b("Placeholders:\n")
@@ -10054,7 +10168,7 @@ async def button_handler(
         user_states[uid] = UPLOAD_SET_SEASON
         await safe_edit_text(
             query,
-            b("📅 Set Season") + "\n\n"
+            b(" Set Season") + "\n\n"
             + bq(b(f"Current: {upload_progress['season']}\n\nSend new season number:")),
             reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="upload_back")]]),
         )
@@ -10066,7 +10180,7 @@ async def button_handler(
         user_states[uid] = UPLOAD_SET_EPISODE
         await safe_edit_text(
             query,
-            b("🔢 Set Episode") + "\n\n"
+            b(" Set Episode") + "\n\n"
             + bq(b(f"Current: {upload_progress['episode']}\n\nSend new episode number:")),
             reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="upload_back")]]),
         )
@@ -10078,7 +10192,7 @@ async def button_handler(
         user_states[uid] = UPLOAD_SET_TOTAL
         await safe_edit_text(
             query,
-            b("🔢 Set Total Episodes") + "\n\n"
+            b(" Set Total Episodes") + "\n\n"
             + bq(b(f"Current: {upload_progress['total_episode']}\n\nSend total episode count:")),
             reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="upload_back")]]),
         )
@@ -10155,7 +10269,7 @@ async def button_handler(
             return
         await safe_edit_text(
             query,
-            b("⚠️ Clear Upload Database?") + "\n\n"
+            b(" Clear Upload Database?") + "\n\n"
             + bq(b("This will reset all progress counters. Caption and quality settings are kept.")),
             reply_markup=InlineKeyboardMarkup([
                 [bold_button("Yes, Clear", callback_data="upload_confirm_clear"),
@@ -10247,7 +10361,7 @@ async def button_handler(
         await safe_send_message(
             context.bot, chat_id,
             (
-                "<b>📥 Import Users</b>\n\n"
+                "<b> Import Users</b>\n\n"
                 "Send a <b>CSV</b> or <b>Excel (.xlsx)</b> file with user IDs.\n\n"
                 "<b>CSV format (columns):</b>\n"
                 "<code>user_id, username, first_name</code>\n\n"
@@ -10271,7 +10385,7 @@ async def button_handler(
         await safe_send_message(
             context.bot, chat_id,
             (
-                "<b>📥 Import Links</b>\n\n"
+                "<b> Import Links</b>\n\n"
                 "Send a <b>CSV</b> or <b>Excel (.xlsx)</b> file with link data.\n\n"
                 "<b>CSV columns:</b> <code>link_id, file_name, channel_id</code>\n\n"
                 "Send the file now, or /cancel to abort."
@@ -10309,11 +10423,11 @@ async def button_handler(
             )
         )
         rows = [
-            [bold_button("📋 Set Source Chat ID", callback_data="fwd_set_chat"),
-             bold_button("🔢 Set Message ID", callback_data="fwd_set_msgid")],
-            [bold_button(f"📨 Forward Tag: {tag_status}", callback_data="fwd_toggle_tag"),
-             bold_button(f"🔒 Private Chan: {priv_status}", callback_data="fwd_toggle_private")],
-            [bold_button("✅ Test Forward Now", callback_data="fwd_test")],
+            [bold_button(" Set Source Chat ID", callback_data="fwd_set_chat"),
+             bold_button(" Set Message ID", callback_data="fwd_set_msgid")],
+            [bold_button(f" Forward Tag: {tag_status}", callback_data="fwd_toggle_tag"),
+             bold_button(f" Private Chan: {priv_status}", callback_data="fwd_toggle_private")],
+            [bold_button(" Test Forward Now", callback_data="fwd_test")],
             [_back_btn("manage_force_sub"), _close_btn()],
         ]
         img_url = await get_panel_pic_async("channels")
@@ -10333,7 +10447,7 @@ async def button_handler(
         try: await query.delete_message()
         except Exception: pass
         await safe_send_message(context.bot, chat_id,
-            b("📋 Set Forward Source Chat") + "\n\n"
+            b(" Set Forward Source Chat") + "\n\n"
             + bq(
                 "Send the channel/group ID or @username.\n\n"
                 "<b>For private channels:</b> forward any message from the channel to bot, "
@@ -10350,7 +10464,7 @@ async def button_handler(
         try: await query.delete_message()
         except Exception: pass
         await safe_send_message(context.bot, chat_id,
-            b("🔢 Set Forward Message ID") + "\n\n"
+            b(" Set Forward Message ID") + "\n\n"
             + bq(
                 "Send the message ID to forward.\n\n"
                 "<b>Tip:</b> Forward a message from your channel to a group, "
@@ -11267,6 +11381,31 @@ async def handle_admin_message(
             reply_markup=InlineKeyboardMarkup([
                 [_btn("\U0001f465 VIEW USERS", "user_management"), _back_btn("admin_back")],
             ]),
+        )
+        return
+
+    if state == "AWAITING_PANEL_IMG_URLS":
+        user_states.pop(uid, None)
+        urls = [u.strip() for u in text.splitlines() if u.strip().startswith("http")]
+        if not urls:
+            await safe_send_message(context.bot, chat_id,
+                b("❌ No valid URLs found.") + " Send direct image links starting with http.")
+            return
+        try:
+            import json as _j
+            existing = _j.loads(get_setting("panel_image_urls", "[]") or "[]")
+        except Exception:
+            existing = []
+        existing.extend(urls)
+        # Keep max 20 URLs
+        existing = existing[-20:]
+        set_setting("panel_image_urls", _j.dumps(existing))
+        clear_image_cache()
+        await safe_send_message(
+            context.bot, chat_id,
+            b(f"✅ Added {len(urls)} URL(s). Total: {len(existing)}.") + "\n\n"
+            + bq("Panel cache cleared. Next panel load will use your URLs."),
+            reply_markup=InlineKeyboardMarkup([[_back_btn("admin_settings"), _close_btn()]])
         )
         return
 
