@@ -80,7 +80,7 @@ def init_db(database_url: str = "", mongo_uri: str = "") -> None:
     elif mongo_uri:
         logger.error("pymongo not installed – skipping MongoDB init")
 
-    if not _PG.pool and not _MG.db:
+    if _PG.pool is None and _MG.db is None:
         raise RuntimeError(
             "FATAL: No database could be initialised. "
             "Check DATABASE_URL / MONGO_DB_URI and installed packages."
@@ -431,7 +431,7 @@ def _migrate_pg() -> None:
 
 def _migrate_mongo() -> None:
     db = _MG.db
-    if not db:
+    if db is None:
         return
     try:
         db.poster_premium.create_index("user_id", unique=True)
@@ -1619,6 +1619,81 @@ def save_filter_poster_cache(cache_key: str, anime_title: str, template: str,
                 created_at = NOW()
     """, (cache_key, anime_title.lower(), template, file_id,
              channel_id, channel_msg_id, caption))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  CHANNEL WELCOME SYSTEM
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _ensure_channel_welcome_table() -> None:
+    _pg_run("""
+        CREATE TABLE IF NOT EXISTS channel_welcome_settings (
+            channel_id BIGINT PRIMARY KEY,
+            enabled BOOLEAN DEFAULT TRUE,
+            welcome_text TEXT DEFAULT '',
+            image_file_id TEXT DEFAULT '',
+            image_url TEXT DEFAULT '',
+            buttons_json TEXT DEFAULT '[]',
+            added_by BIGINT DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
+
+def get_channel_welcome(channel_id: int) -> Optional[dict]:
+    """Return channel welcome settings dict, or None if not configured."""
+    row = _pg_exec("""
+        SELECT enabled, welcome_text, image_file_id, image_url, buttons_json
+        FROM channel_welcome_settings WHERE channel_id = %s
+    """, (channel_id,))
+    if row:
+        import json as _j
+        return {
+            "enabled":      bool(row[0]),
+            "welcome_text": row[1] or "",
+            "image_file_id": row[2] or "",
+            "image_url":    row[3] or "",
+            "buttons":      _j.loads(row[4]) if row[4] else [],
+        }
+    return None
+
+
+def set_channel_welcome(channel_id: int, **kwargs) -> None:
+    """Create or update channel welcome settings."""
+    import json as _j
+    _ensure_channel_welcome_table()
+    existing = get_channel_welcome(channel_id) or {}
+    _pg_run("""
+        INSERT INTO channel_welcome_settings
+            (channel_id, enabled, welcome_text, image_file_id, image_url, buttons_json, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, NOW())
+        ON CONFLICT (channel_id) DO UPDATE
+            SET enabled       = EXCLUDED.enabled,
+                welcome_text  = EXCLUDED.welcome_text,
+                image_file_id = EXCLUDED.image_file_id,
+                image_url     = EXCLUDED.image_url,
+                buttons_json  = EXCLUDED.buttons_json,
+                updated_at    = NOW()
+    """, (
+        channel_id,
+        kwargs.get("enabled",       existing.get("enabled", True)),
+        kwargs.get("welcome_text",  existing.get("welcome_text", "")),
+        kwargs.get("image_file_id", existing.get("image_file_id", "")),
+        kwargs.get("image_url",     existing.get("image_url", "")),
+        _j.dumps(kwargs.get("buttons", existing.get("buttons", []))),
+    ))
+
+
+def delete_channel_welcome(channel_id: int) -> None:
+    _pg_run("DELETE FROM channel_welcome_settings WHERE channel_id = %s", (channel_id,))
+
+
+def get_all_channel_welcomes() -> list:
+    """Return list of (channel_id, enabled, welcome_text) tuples."""
+    rows = _pg_exec_many(
+        "SELECT channel_id, enabled, welcome_text FROM channel_welcome_settings ORDER BY channel_id"
+    )
+    return rows or []
 
 
 # ──────────────────────────────────────────────────────────────────────────────
