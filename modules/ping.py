@@ -3,9 +3,11 @@
 # ACTION: Replace existing file
 # ====================================================================
 import time
+import asyncio
 
-from telegram import ParseMode, Update
-from telegram.ext import CallbackContext
+from telegram import Update
+from telegram.constants import ParseMode
+from telegram.ext import ContextTypes
 
 from beataniversebot_compat import StartTime, dispatcher
 from modules.disable import DisableAbleCommandHandler
@@ -39,16 +41,22 @@ def get_readable_time(seconds: int) -> str:
     return ping_time
 
 
-def ping(update: Update, context: CallbackContext):
+async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Async ping — measures real Telegram round-trip time without blocking the event loop.
+    The original sync version froze the event loop while waiting for reply_text(),
+    causing all other handlers (panels, callbacks) to queue up behind it.
+    """
     msg = update.effective_message
 
     start_time = time.time()
-    message = msg.reply_text("🏓 ᴘɪɴɢɪɴɢ ʙᴀʙʏ....​")
+    message = await msg.reply_text("🏓 ᴘɪɴɢɪɴɢ ʙᴀʙʏ....​")
     end_time = time.time()
-    telegram_ping = str(round((end_time - start_time) * 1000, 3)) + " ms"
-    uptime = get_readable_time((time.time() - StartTime))
 
-    message.edit_text(
+    telegram_ping = str(round((end_time - start_time) * 1000, 3)) + " ms"
+    uptime = get_readable_time(int(time.time() - StartTime))
+
+    await message.edit_text(
         "ɪ ᴀᴍ ᴀʟɪᴠᴇ ʙᴀʙʏ! 🖤\n"
         "<b>ᴛɪᴍᴇ ᴛᴀᴋᴇɴ:</b> <code>{}</code>\n"
         "<b>ᴜᴘᴛɪᴍᴇ:</b> <code>{}</code>".format(telegram_ping, uptime),
