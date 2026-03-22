@@ -17,7 +17,13 @@ except ImportError:
     downloader = None
 from bs4 import BeautifulSoup
 from PIL import Image
-from search_engine_parser import GoogleSearch
+try:
+    from search_engine_parser import GoogleSearch
+except (ImportError, AttributeError):
+    class GoogleSearch:
+        """Stub — search_engine_parser not properly installed."""
+        def __init__(self, *a, **k): pass
+        def search(self, *a, **k): return []
 
 from beataniversebot_compat import telethn as tbot
 from BeatVerseProbot.events import register
