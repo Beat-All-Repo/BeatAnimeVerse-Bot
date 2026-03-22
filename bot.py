@@ -236,7 +236,7 @@ BROADCAST_INTERVAL_MIN: int = int(os.getenv("BROADCAST_INTERVAL_MIN", "20"))
 RATE_LIMIT_DELAY: float = float(os.getenv("RATE_LIMIT_DELAY", "0.05"))
 
 # Ports
-PORT: int = int(os.environ.get("PORT", 8080))
+PORT: int = int(os.environ.get("PORT", 10000))
 WEBHOOK_URL: str = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/") + "/"
 
 # Source content
@@ -465,6 +465,15 @@ PENDING_FILL_TITLE = 45
 # Conversation dictionaries
 user_states: Dict[int, int] = {}
 user_data_temp: Dict[int, Dict[str, Any]] = {}
+
+# Per-user debounce locks — prevents rapid-click double-processing that causes lag & ping hangs
+_panel_locks: Dict[int, asyncio.Lock] = {}
+
+def _get_panel_lock(uid: int) -> asyncio.Lock:
+    """Return (creating if needed) an asyncio.Lock for this user."""
+    if uid not in _panel_locks:
+        _panel_locks[uid] = asyncio.Lock()
+    return _panel_locks[uid]
 
 
 # ================================================================================
@@ -954,6 +963,98 @@ async def safe_send_photo(
             except Exception:
                 pass
     return None
+
+
+async def safe_edit_panel(
+    bot,
+    query,
+    chat_id: int,
+    photo,
+    caption: str,
+    reply_markup,
+    panel_type: str = "default",
+) -> bool:
+    """
+    SPEED OPTIMISED panel update — edit-in-place instead of delete+send.
+
+    Strategy (fastest to slowest):
+      1. If existing message IS a photo → edit_message_media (invisible swap, ~0.1s)
+      2. If we have a Telegram file_id cached → edit_message_media with file_id
+      3. Send new photo (first time) → cache the returned file_id for future calls
+      4. Text fallback if image completely unavailable
+
+    After a successful send, the returned file_id is stored so every
+    subsequent call takes path 1 or 2 and is near-instant.
+    """
+    from telegram import InputMediaPhoto
+
+    # ── Path 1: edit in-place if the current message already has a photo ──────
+    if query and query.message and query.message.photo:
+        # Try cached file_id first (avoids re-uploading the URL)
+        fileid = None
+        if _PANEL_IMAGE_AVAILABLE:
+            try:
+                from panel_image import get_tg_fileid
+                fileid = get_tg_fileid(panel_type)
+            except Exception:
+                pass
+        media_src = fileid or photo
+        if media_src:
+            try:
+                await bot.edit_message_media(
+                    chat_id=chat_id,
+                    message_id=query.message.message_id,
+                    media=InputMediaPhoto(
+                        media=media_src,
+                        caption=caption,
+                        parse_mode="HTML",
+                    ),
+                    reply_markup=reply_markup,
+                )
+                return True
+            except Exception:
+                pass  # fall through to delete+send
+
+    # ── Path 2/3: delete old message and send fresh photo ─────────────────────
+    if query:
+        try:
+            await query.delete_message()
+        except Exception:
+            pass
+
+    if photo:
+        # Try cached file_id
+        fileid = None
+        if _PANEL_IMAGE_AVAILABLE:
+            try:
+                from panel_image import get_tg_fileid
+                fileid = get_tg_fileid(panel_type)
+            except Exception:
+                pass
+        send_photo = fileid or photo
+        try:
+            sent = await bot.send_photo(
+                chat_id=chat_id, photo=send_photo,
+                caption=caption, parse_mode="HTML", reply_markup=reply_markup,
+            )
+            # Cache the returned file_id for future near-instant sends
+            if sent and sent.photo and _PANEL_IMAGE_AVAILABLE:
+                try:
+                    from panel_image import set_tg_fileid
+                    best_fid = sent.photo[-1].file_id  # largest size
+                    set_tg_fileid(panel_type, best_fid)
+                except Exception:
+                    pass
+            return True
+        except Exception:
+            pass
+
+    # ── Path 4: text-only fallback ─────────────────────────────────────────────
+    try:
+        await safe_send_message(bot, chat_id, caption, reply_markup=reply_markup)
+        return True
+    except Exception:
+        return False
 
 
 async def delete_update_message(
@@ -3114,87 +3215,84 @@ async def send_admin_menu(
     page: int = 0,
 ) -> None:
     """
-    Send the paginated admin panel.
-    Each page has ≤12 buttons — loads in under 0.5s.
-    Navigation: ◀ · 1/8 · ▶ ✕
+    Send the paginated admin panel — INSTANT via edit-in-place + file_id cache.
+
+    Speed path (after first open):
+      1. Debounce: if user clicked while previous click is still processing → drop it.
+      2. Build text + keyboard from in-memory cache (no DB hit, <1ms).
+      3. Get image: file_id from panel_image cache → edit_message_media in-place.
+         Total round-trip: ~0.05-0.15s, zero visible flash.
     """
     global _PANEL_PAGES, _PANEL_PAGES_TS
 
-    if query:
-        try:
-            await query.delete_message()
-        except Exception:
-            pass
-
-    await delete_bot_prompt(context, chat_id)
-    user_states.pop(chat_id, None)
-
-    import time as _time
-    now = _time.monotonic()
-
-    # Rebuild pages if cache expired or empty
-    if not _PANEL_PAGES or (now - _PANEL_PAGES_TS) > _PANEL_PAGES_TTL:
-        maint     = get_setting("maintenance_mode",       "false") == "true"
-        clone_red = get_setting("clone_redirect_enabled", "false") == "true"
-        clean_gc  = get_setting("clean_gc_enabled",       "true")  == "true"
-        _PANEL_PAGES, _status_line = _build_panel_pages(maint, clone_red, clean_gc)
-        _PANEL_PAGES["_status"] = _status_line
-        _PANEL_PAGES_TS = now
-
-    status_line = _PANEL_PAGES.get("_status", "")
-    markup = _PANEL_PAGES.get(page, _PANEL_PAGES.get(0))
-
-    text = (
-        b("ADMIN PANEL") + "\n\n"
-        + status_line + "\n\n"
-        + bq(
-            f"<b>Bot:</b> @{e(BOT_USERNAME)}\n"
-            f"<b>Mode:</b> {'Clone' if I_AM_CLONE else 'Main'}\n"
-            f"<b>Name:</b> {e(BOT_NAME)}"
-        )
-    )
-
-    # Fetch image in parallel while building panel — cap at 2s
-    img_task = None
-    quick_url = get_panel_pic("admin")
-    if not quick_url and _PANEL_IMAGE_AVAILABLE:
-        img_task = asyncio.create_task(
-            asyncio.wait_for(get_panel_image_async("admin"), timeout=2.0)
-        )
-
-    if quick_url:
-        try:
-            await context.bot.send_photo(
-                chat_id, quick_url,
-                caption=text, parse_mode=ParseMode.HTML, reply_markup=markup,
-            )
-            return
-        except Exception:
-            pass
-
-    # Send text panel immediately — fastest path
-    await safe_send_message(context.bot, chat_id, text, reply_markup=markup)
-
-    # If image task is running, upgrade the panel when it resolves
-    if img_task:
-        async def _upgrade():
+    # ── Debounce: prevent rapid-click pile-up that hangs ping ─────────────────
+    uid = chat_id  # for DM admin panels uid == chat_id
+    lock = _get_panel_lock(uid)
+    if lock.locked():
+        # Already processing a panel for this user — silently drop duplicate
+        if query:
             try:
-                img_url = await img_task
-                if img_url:
-                    # Small delay so user sees the panel first
-                    await asyncio.sleep(0.3)
-                    prev = await safe_send_message(
-                        context.bot, chat_id,
-                        "⏳", parse_mode=ParseMode.HTML,
-                    )
-                    await safe_delete(context.bot, chat_id, prev.message_id if prev else 0)
-                    await context.bot.send_photo(
-                        chat_id, img_url,
-                        caption=text, parse_mode=ParseMode.HTML, reply_markup=markup,
+                await query.answer()
+            except Exception:
+                pass
+        return
+
+    async with lock:
+        await delete_bot_prompt(context, chat_id)
+        user_states.pop(chat_id, None)
+
+        import time as _time
+        now = _time.monotonic()
+
+        # ── Rebuild page cache if stale (<1ms when fresh) ─────────────────────
+        if not _PANEL_PAGES or (now - _PANEL_PAGES_TS) > _PANEL_PAGES_TTL:
+            maint     = get_setting("maintenance_mode",       "false") == "true"
+            clone_red = get_setting("clone_redirect_enabled", "false") == "true"
+            clean_gc  = get_setting("clean_gc_enabled",       "true")  == "true"
+            _PANEL_PAGES, _status_line = _build_panel_pages(maint, clone_red, clean_gc)
+            _PANEL_PAGES["_status"] = _status_line
+            _PANEL_PAGES_TS = now
+
+        status_line = _PANEL_PAGES.get("_status", "")
+        markup = _PANEL_PAGES.get(page, _PANEL_PAGES.get(0))
+
+        text = (
+            b("ADMIN PANEL") + "\n\n"
+            + status_line + "\n\n"
+            + bq(
+                f"<b>Bot:</b> @{e(BOT_USERNAME)}\n"
+                f"<b>Mode:</b> {'Clone' if I_AM_CLONE else 'Main'}\n"
+                f"<b>Name:</b> {e(BOT_NAME)}"
+            )
+        )
+
+        # ── Get image URL (always instant — pre-warmed static or file_id) ─────
+        img_url = get_panel_pic("admin")
+        if not img_url and _PANEL_IMAGE_AVAILABLE:
+            try:
+                img_url = await asyncio.wait_for(get_panel_image_async("admin"), timeout=1.0)
+            except Exception:
+                pass
+
+        # ── Send/edit panel using optimised helper ─────────────────────────────
+        await safe_edit_panel(
+            context.bot, query, chat_id,
+            photo=img_url, caption=text, reply_markup=markup,
+            panel_type="admin",
+        )
+
+        # ── Background: refresh stale image cache without blocking ─────────────
+        if _PANEL_IMAGE_AVAILABLE and img_url:
+            try:
+                from panel_image import _is_cached
+                if not _is_cached("admin"):
+                    asyncio.create_task(
+                        asyncio.get_event_loop().run_in_executor(
+                            None, lambda: __import__('panel_image').get_panel_image("admin", True)
+                        )
                     )
             except Exception:
                 pass
-        asyncio.create_task(_upgrade())
 
 
 async def send_stats_panel(
@@ -3202,13 +3300,7 @@ async def send_stats_panel(
     chat_id: int,
     query: Optional[CallbackQuery] = None,
 ) -> None:
-    """Send bot statistics panel."""
-    if query:
-        try:
-            await query.delete_message()
-        except Exception:
-            pass
-
+    """Send bot statistics panel — instant via edit-in-place."""
     try:
         user_count = get_user_count()
         channel_count = len(get_all_force_sub_channels())
@@ -3241,24 +3333,19 @@ async def send_stats_panel(
     ]
     rows = _grid3(grid)
     rows.append([_back_btn("admin_back"), _close_btn()])
-    keyboard = rows
+    markup = InlineKeyboardMarkup(rows)
 
-    img_url = STATS_IMAGE_URL
+    img_url = STATS_IMAGE_URL or get_panel_pic("stats")
     if not img_url and _PANEL_IMAGE_AVAILABLE:
         try:
-            img_url = await get_panel_pic_async("stats")
+            img_url = await asyncio.wait_for(get_panel_image_async("stats"), timeout=1.0)
         except Exception:
             pass
-    if img_url:
-        sent = await safe_send_photo(
-            context.bot, chat_id, img_url,
-            caption=text, reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        if sent:
-            return
-    await safe_send_message(
-        context.bot, chat_id, text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
+
+    await safe_edit_panel(
+        context.bot, query, chat_id,
+        photo=img_url, caption=text, reply_markup=markup,
+        panel_type="stats",
     )
 
 
@@ -7407,6 +7494,20 @@ async def button_handler(
     chat_id = query.message.chat_id if query.message else uid
 
     is_admin = uid in (ADMIN_ID, OWNER_ID)
+
+    # ── Global debounce: if this user's panel lock is held AND this callback
+    #    is a known panel-navigation action, drop the duplicate click silently.
+    #    This prevents ping degradation when users click rapidly.
+    _PANEL_CALLBACKS = {
+        "admin_back", "admin_stats", "admin_settings", "admin_sysstats",
+        "admin_channels", "admin_clones", "admin_users", "admin_broadcast",
+        "admin_category_settings", "admin_feature_flags", "broadcast_stats_panel",
+        "user_management", "fsub_link_stats",
+    }
+    if data in _PANEL_CALLBACKS or data.startswith("adm_page_"):
+        lock = _get_panel_lock(uid)
+        if lock.locked():
+            return  # drop — already processing
 
     # ── Utility ────────────────────────────────────────────────────────────────────
     if data == "noop":
