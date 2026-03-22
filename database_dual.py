@@ -385,6 +385,31 @@ def _migrate_pg() -> None:
                 created_at TIMESTAMP DEFAULT NOW()
             )""")
 
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS anime_channel_links (
+                id SERIAL PRIMARY KEY,
+                anime_title TEXT NOT NULL,
+                channel_id BIGINT NOT NULL,
+                channel_title TEXT,
+                link_id TEXT,
+                added_by BIGINT,
+                created_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(anime_title, channel_id)
+            )""")
+
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS filter_poster_cache (
+                id SERIAL PRIMARY KEY,
+                cache_key TEXT UNIQUE NOT NULL,
+                anime_title TEXT NOT NULL,
+                template TEXT DEFAULT 'ani',
+                file_id TEXT NOT NULL,
+                channel_id BIGINT DEFAULT 0,
+                channel_msg_id BIGINT DEFAULT 0,
+                caption TEXT DEFAULT '',
+                created_at TIMESTAMP DEFAULT NOW()
+            )""")
+
         # Idempotent column adds
         for ddl in [
             "DO $$ BEGIN ALTER TABLE generated_links ADD COLUMN channel_title TEXT; EXCEPTION WHEN duplicate_column THEN NULL; END $$;",
@@ -1524,6 +1549,76 @@ def set_chatbot_enabled(chat_id: int, enabled: bool) -> None:
             )
         except Exception:
             pass
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  ANIME CHANNEL LINKS — maps anime title ↔ channel for filter+poster system
+# ──────────────────────────────────────────────────────────────────────────────
+
+def add_anime_channel_link(anime_title: str, channel_id: int,
+                            channel_title: str = "", link_id: str = "",
+                            added_by: int = 0) -> bool:
+    """Store anime-title → channel mapping used for filter poster delivery."""
+    ok = _pg_run("""
+        INSERT INTO anime_channel_links
+            (anime_title, channel_id, channel_title, link_id, added_by)
+        VALUES (%s, %s, %s, %s, %s)
+        ON CONFLICT (anime_title, channel_id) DO UPDATE
+            SET channel_title = EXCLUDED.channel_title,
+                link_id = EXCLUDED.link_id
+    """, (anime_title.strip().lower(), channel_id, channel_title, link_id, added_by))
+    return bool(ok)
+
+
+def get_anime_channel_links(anime_title: str) -> list:
+    """Return list of (channel_id, channel_title, link_id) for given anime title."""
+    rows = _pg_exec_many("""
+        SELECT channel_id, channel_title, link_id
+        FROM anime_channel_links WHERE anime_title = %s
+        ORDER BY created_at DESC
+    """, (anime_title.strip().lower(),))
+    return rows or []
+
+
+def get_all_anime_channel_links() -> list:
+    """Return all rows: (id, anime_title, channel_id, channel_title, link_id, created_at)."""
+    rows = _pg_exec_many("""
+        SELECT id, anime_title, channel_id, channel_title, link_id, created_at
+        FROM anime_channel_links ORDER BY anime_title
+    """)
+    return rows or []
+
+
+def remove_anime_channel_link(anime_title: str, channel_id: int) -> None:
+    _pg_run("DELETE FROM anime_channel_links WHERE anime_title = %s AND channel_id = %s",
+            (anime_title.strip().lower(), channel_id))
+
+
+def get_filter_poster_cache(cache_key: str) -> Optional[dict]:
+    row = _pg_exec("""
+        SELECT file_id, channel_id, channel_msg_id, caption, template, anime_title
+        FROM filter_poster_cache WHERE cache_key = %s
+    """, (cache_key,))
+    if row:
+        return {"file_id": row[0], "channel_id": row[1],
+                "channel_msg_id": row[2], "caption": row[3],
+                "template": row[4], "anime_title": row[5]}
+    return None
+
+
+def save_filter_poster_cache(cache_key: str, anime_title: str, template: str,
+                               file_id: str, channel_id: int = 0,
+                               channel_msg_id: int = 0, caption: str = "") -> None:
+    _pg_run("""
+        INSERT INTO filter_poster_cache
+            (cache_key, anime_title, template, file_id, channel_id, channel_msg_id, caption)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (cache_key) DO UPDATE
+            SET file_id = EXCLUDED.file_id,
+                channel_msg_id = EXCLUDED.channel_msg_id,
+                created_at = NOW()
+    """, (cache_key, anime_title.lower(), template, file_id,
+             channel_id, channel_msg_id, caption))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
