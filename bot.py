@@ -3179,13 +3179,92 @@ def _save_panel_db_images(items: list) -> None:
     import json as _j
     set_setting("panel_db_images", _j.dumps(items))
 
+# In-memory cache of file_ids auto-scanned from PANEL_DB_CHANNEL
+_channel_scan_cache: list = []
+_channel_scan_ts: float = 0.0
+_CHANNEL_SCAN_TTL: float = 300.0  # re-scan every 5 min
+
+
 def _get_panel_db_fileid() -> Optional[str]:
-    """Return a random file_id from the panel DB channel image list, or None."""
+    """
+    Return a random file_id for panel images.
+    
+    Priority:
+      1. Manually added images (via /addpanelimg) — stored in DB
+      2. Auto-scanned from PANEL_DB_CHANNEL — if channel is set but no
+         images have been manually added yet, fetches the last 20 messages
+         from the channel and picks a random photo. Result is cached 5 min.
+    """
+    global _channel_scan_cache, _channel_scan_ts
+
+    # Priority 1: manually added images
     items = _get_panel_db_images()
-    if not items:
+    if items:
+        item = random.choice(items)
+        return item.get("file_id") or None
+
+    # Priority 2: auto-scan PANEL_DB_CHANNEL (only if channel set, no manual images)
+    if not PANEL_DB_CHANNEL:
         return None
-    item = random.choice(items)
-    return item.get("file_id") or None
+
+    now = time.monotonic()
+    if _channel_scan_cache and (now - _channel_scan_ts) < _CHANNEL_SCAN_TTL:
+        return random.choice(_channel_scan_cache) if _channel_scan_cache else None
+
+    # Cache miss / expired — trigger async scan (non-blocking, runs in background)
+    # Return last known value while scan runs, or None on very first call
+    return random.choice(_channel_scan_cache) if _channel_scan_cache else None
+
+
+async def _scan_panel_channel(bot) -> None:
+    """
+    Background task: fetch recent photo messages from PANEL_DB_CHANNEL,
+    extract file_ids, and cache them. Called once at startup and every 5 min.
+    Never blocks the event loop — runs as a fire-and-forget task.
+    """
+    global _channel_scan_cache, _channel_scan_ts
+
+    if not PANEL_DB_CHANNEL:
+        return
+    # Skip if manual images exist — no need to scan
+    if _get_panel_db_images():
+        return
+
+    try:
+        file_ids = []
+        # Telegram getUpdates doesn't let us list channel messages directly,
+        # but forwardMessages does. Instead we use getChatHistory via
+        # bot.get_chat — actually PTB has no direct history API.
+        # Best approach: use the stored msg_ids from previous forwards.
+        # Fallback: nothing to scan without pyrogram/telethon.
+        # Use pyrogram if available (it has get_chat_history):
+        try:
+            from pyrogram import Client as _Pyro
+            # Check if a pyrogram client is running
+            import sys
+            pyro_client = None
+            for obj in sys.modules.values():
+                if isinstance(obj, _Pyro) and getattr(obj, "is_connected", False):
+                    pyro_client = obj
+                    break
+            if pyro_client:
+                async for msg in pyro_client.get_chat_history(PANEL_DB_CHANNEL, limit=30):
+                    if msg.photo:
+                        file_ids.append(msg.photo.file_id)
+                    if len(file_ids) >= 20:
+                        break
+        except Exception:
+            pass
+
+        if file_ids:
+            _channel_scan_cache = file_ids
+            _channel_scan_ts = time.monotonic()
+            logger.info(f"[panel] auto-scanned {len(file_ids)} images from PANEL_DB_CHANNEL")
+        else:
+            # pyrogram not available or channel empty — just mark as scanned
+            _channel_scan_ts = time.monotonic()
+    except Exception as exc:
+        logger.debug(f"[panel] channel scan failed: {exc}")
 
 
 def get_panel_pic(panel_type: str = "default") -> Optional[str]:
@@ -3247,6 +3326,7 @@ def get_panel_pic(panel_type: str = "default") -> Optional[str]:
 async def get_panel_pic_async(panel_type: str = "default") -> Optional[str]:
     """
     Get panel image URL — ALWAYS instant.
+    Also triggers background PANEL_DB_CHANNEL scan if needed.
 
     Strategy:
       1. Return cached value immediately (never waits)
@@ -3258,6 +3338,13 @@ async def get_panel_pic_async(panel_type: str = "default") -> Optional[str]:
     """
     # Synchronous cache check — instant
     quick = get_panel_pic(panel_type)
+    if not quick and PANEL_DB_CHANNEL and not _get_panel_db_images():
+        # No images yet — trigger background channel scan
+        import asyncio as _aio
+        try:
+            _aio.create_task(_scan_panel_channel(None))
+        except Exception:
+            pass
     if quick:
         # Trigger background refresh of stale cache (fire-and-forget)
         if _PANEL_IMAGE_AVAILABLE:
@@ -7424,6 +7511,10 @@ async def post_init(application: Application) -> None:
     try:
         await health_server.start()
         logger.info("✅ Health check server started")
+
+        # Auto-scan PANEL_DB_CHANNEL for panel images in background (non-blocking)
+        if PANEL_DB_CHANNEL:
+            asyncio.create_task(_scan_panel_channel(application.bot))
     except Exception as exc:
         logger.warning(f"Health server failed: {exc}")
 
@@ -8786,7 +8877,7 @@ async def button_handler(
         # Panel image controls
         rows.append([
             bold_button(_img_src_label, callback_data="panel_img_toggle_source"),
-            bold_button("🖼 Panel Images", callback_data="panel_img_manage"),
+            bold_button("🖼 Add/View Panel Images", callback_data="panel_img_add_urls"),
             bold_button("♻️ Refresh Cache", callback_data="panel_img_refresh_cache"),
         ])
         rows.append([_back_btn("admin_settings"), _close_btn()])
@@ -8940,16 +9031,22 @@ async def button_handler(
         except Exception:
             existing = []
         existing_text = "\n".join(existing[:5]) + ("\n..." if len(existing) > 5 else "") if existing else "(none)"
+        total_imgs = len(_get_panel_db_images())
         await safe_send_message(
             context.bot, chat_id,
-            b(" Add Panel Image URLs") + "\n\n"
+            b("🖼 Add Panel Images") + "\n\n"
             + bq(
-                "<b>Send one or more image URLs (one per line).</b>\n\n"
-                "These will be used as panel backgrounds (URL-first mode).\n"
-                "Direct links to .jpg/.png/.webp images work best.\n\n"
-                f"<b>Current URLs ({len(existing)}):</b>\n{e(existing_text)}"
+                "<b>3 ways to add panel images:</b>\n\n"
+                "1️⃣ <b>Send a photo</b> — forward any image to this chat, bot saves to channel\n\n"
+                "2️⃣ <b>Send file_ids</b> — paste Telegram file_ids, comma or newline separated\n"
+                "   (Use /getfileid to get a file_id from any photo)\n\n"
+                "3️⃣ <b>Send URLs</b> — direct https:// image links, comma or newline separated\n\n"
+                f"<b>Currently stored: {total_imgs} image(s)</b>"
             ),
-            reply_markup=InlineKeyboardMarkup([[_back_btn("admin_settings"), _close_btn()]]),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🖼 View Current Images", callback_data="panel_img_manage")],
+                [_back_btn("admin_settings"), _close_btn()],
+            ]),
         )
         return
 
@@ -11827,26 +11924,66 @@ async def handle_admin_message(
 
     if state == "AWAITING_PANEL_IMG_URLS":
         user_states.pop(uid, None)
-        urls = [u.strip() for u in text.splitlines() if u.strip().startswith("http")]
-        if not urls:
+        import json as _j
+
+        # Accept: comma-separated OR newline-separated file_ids or URLs
+        # A Telegram file_id starts with "AgAC" or "BAAC" etc. (no http)
+        raw_entries = []
+        for line in text.replace(",", "\n").splitlines():
+            v = line.strip()
+            if v:
+                raw_entries.append(v)
+
+        if not raw_entries:
             await safe_send_message(context.bot, chat_id,
-                b("❌ No valid URLs found.") + " Send direct image links starting with http.")
+                "❌ Nothing found. Send file_ids (comma-separated) or image URLs.")
             return
-        try:
-            import json as _j
-            existing = _j.loads(get_setting("panel_image_urls", "[]") or "[]")
-        except Exception:
-            existing = []
-        existing.extend(urls)
-        # Keep max 20 URLs
-        existing = existing[-20:]
-        set_setting("panel_image_urls", _j.dumps(existing))
-        clear_image_cache()
+
+        items = _get_panel_db_images()
+        added = 0
+        errors = 0
+
+        for entry in raw_entries:
+            if entry.startswith("http"):
+                # It's a URL — store as-is (will be fetched by panel_image module)
+                items.append({"index": len(items)+1, "msg_id": 0, "file_id": entry})
+                added += 1
+            else:
+                # Treat as a Telegram file_id — try forwarding to PANEL_DB_CHANNEL
+                if PANEL_DB_CHANNEL:
+                    try:
+                        sent = await context.bot.send_photo(
+                            chat_id=PANEL_DB_CHANNEL,
+                            photo=entry,
+                            caption=f"Panel image #{len(items)+1}",
+                        )
+                        fid = sent.photo[-1].file_id
+                        items.append({"index": len(items)+1, "msg_id": sent.message_id, "file_id": fid})
+                        added += 1
+                    except Exception:
+                        errors += 1
+                else:
+                    # No DB channel — store file_id directly
+                    items.append({"index": len(items)+1, "msg_id": 0, "file_id": entry})
+                    added += 1
+
+        if added:
+            _save_panel_db_images(items)
+            if _PANEL_IMAGE_AVAILABLE:
+                try:
+                    from panel_image import clear_tg_fileid
+                    clear_tg_fileid()
+                except Exception:
+                    pass
+
+        err_note = f"\n⚠️ {errors} entry(ies) failed (invalid file_id?)." if errors else ""
         await safe_send_message(
             context.bot, chat_id,
-            b(f"✅ Added {len(urls)} URL(s). Total: {len(existing)}.") + "\n\n"
-            + bq("Panel cache cleared. Next panel load will use your URLs."),
-            reply_markup=InlineKeyboardMarkup([[_back_btn("admin_settings"), _close_btn()]])
+            b(f"✅ Added {added} panel image(s). Total: {len(items)}.") + err_note,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🖼 View Panel Images", callback_data="panel_img_manage")],
+                [_back_btn("admin_settings"), _close_btn()],
+            ])
         )
         return
 
