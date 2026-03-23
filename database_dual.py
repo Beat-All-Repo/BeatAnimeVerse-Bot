@@ -283,7 +283,12 @@ def _migrate_pg() -> None:
                 connection_id INT REFERENCES auto_forward_connections(id) ON DELETE CASCADE,
                 allowed_media TEXT[] DEFAULT '{}',
                 blacklist TEXT[] DEFAULT '{}',
-                whitelist TEXT[] DEFAULT '{}'
+                whitelist TEXT[] DEFAULT '{}',
+                blacklist_words TEXT DEFAULT '',
+                whitelist_words TEXT DEFAULT '',
+                caption_override TEXT DEFAULT '',
+                enable_in_dm BOOLEAN DEFAULT TRUE,
+                enable_in_group BOOLEAN DEFAULT TRUE
             )""")
 
         cur.execute("""
@@ -417,6 +422,12 @@ def _migrate_pg() -> None:
             "DO $$ BEGIN ALTER TABLE force_sub_channels ADD COLUMN join_by_request BOOLEAN DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;",
             "DO $$ BEGIN ALTER TABLE users ADD COLUMN is_banned BOOLEAN DEFAULT FALSE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;",
             "DO $$ BEGIN ALTER TABLE bot_progress ADD COLUMN anime_name TEXT DEFAULT 'Anime Name'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;",
+            "DO $$ BEGIN ALTER TABLE auto_forward_filters ADD COLUMN blacklist_words TEXT DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;",
+            "DO $$ BEGIN ALTER TABLE auto_forward_filters ADD COLUMN whitelist_words TEXT DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;",
+            "DO $$ BEGIN ALTER TABLE auto_forward_filters ADD COLUMN caption_override TEXT DEFAULT ''; EXCEPTION WHEN duplicate_column THEN NULL; END $$;",
+            "DO $$ BEGIN ALTER TABLE auto_forward_filters ADD COLUMN enable_in_dm BOOLEAN DEFAULT TRUE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;",
+            "DO $$ BEGIN ALTER TABLE auto_forward_filters ADD COLUMN enable_in_group BOOLEAN DEFAULT TRUE; EXCEPTION WHEN duplicate_column THEN NULL; END $$;",
+            "DO $$ BEGIN ALTER TABLE auto_forward_filters ADD COLUMN allowed_media TEXT[] DEFAULT '{}'; EXCEPTION WHEN duplicate_column THEN NULL; END $$;",
         ]:
             try:
                 cur.execute(ddl)
