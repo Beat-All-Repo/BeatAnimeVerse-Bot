@@ -6600,110 +6600,306 @@ async def show_upload_menu(
 async def inline_query_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle @bot queries inline."""
+    """
+    @bot inline query handler.
+
+    Menu options (shown when query is empty or starts with a keyword):
+      poster          → make anime poster
+      watch / atw     → anime to watch from generated_links
+      character / char → anime character info
+      manage          → group management quick commands
+
+    Force-sub gate: non-admin users must be subscribed to force-sub channels.
+    """
     query = update.inline_query
-    if not query or not query.query.strip():
-        return
-    if get_setting("inline_search_enabled", "true") != "true":
+    if not query:
         return
 
-    search = query.query.strip()
+    uid    = query.from_user.id
+    search = (query.query or "").strip()
+
+    # ── Force-sub gate for inline ──────────────────────────────────────────────
+    if uid not in (ADMIN_ID, OWNER_ID):
+        if is_user_banned(uid):
+            return
+        try:
+            unsubbed = await get_unsubscribed_channels(uid, context.bot)
+            if unsubbed:
+                from telegram import InlineQueryResultArticle, InputTextMessageContent
+                warning = InlineQueryResultArticle(
+                    id="fsub_gate",
+                    title=small_caps("⚠️ please subscribe first"),
+                    description=small_caps("subscribe to all required channels to use inline"),
+                    input_message_content=InputTextMessageContent(
+                        b(small_caps("⚠️ subscribe to all required channels first.")) + "\n"
+                        + bq(small_caps("use /start in the bot to see the channels.")),
+                        parse_mode=ParseMode.HTML,
+                    ),
+                )
+                await query.answer([warning], cache_time=10, is_personal=True)
+                return
+        except Exception:
+            pass
+
+    from telegram import (
+        InlineQueryResultArticle, InlineQueryResultPhoto,
+        InputTextMessageContent,
+    )
+
     results = []
+    search_lower = search.lower()
 
-    try:
-        anime = AniListClient.search_anime(search)
-        if anime:
-            title_obj = anime.get("title", {}) or {}
-            title = title_obj.get("romaji") or title_obj.get("english") or search
-            cover = (anime.get("coverImage") or {})
-            thumb = cover.get("medium") or ""
-            score = anime.get("averageScore", "N/A")
-            status = (anime.get("status") or "Unknown").title()
-            genres = ", ".join((anime.get("genres") or [])[:3])
+    # ── EMPTY QUERY: show main menu options ────────────────────────────────────
+    if not search:
+        menu_items = [
+            ("🎌 ᴘᴏsᴛᴇʀ",          "poster",    "Make anime/movie poster", "Type the anime name after 'poster '"),
+            ("📺 ᴀɴɪᴍᴇ ᴛᴏ ᴡᴀᴛᴄʜ",   "watch",     "Browse available anime channels", "Type anime name or browse"),
+            ("👤 ᴄʜᴀʀᴀᴄᴛᴇʀ ɪɴꜰᴏ",   "character", "Anime character details", "Type character name after 'character '"),
+            ("⚙️ ɢʀᴏᴜᴘ ᴍɢᴍᴛ",       "manage",    "Group management commands", "Quick group admin commands"),
+        ]
+        for title_lbl, keyword, desc, hint in menu_items:
             results.append(
                 InlineQueryResultArticle(
-                    id=f"al_anime_{anime['id']}",
-                    title=f"🎌 {title}",
-                    description=f"Score: {score}/100 • {status} • {genres}",
-                    thumb_url=thumb,
+                    id=f"menu_{keyword}",
+                    title=title_lbl,
+                    description=small_caps(desc),
                     input_message_content=InputTextMessageContent(
-                        b(f"🎌 {e(title)}") + "\n"
-                        + bq(
-                            f"<b>Score:</b> {score}/100\n"
-                            f"<b>Status:</b> {e(status)}\n"
-                            f"<b>Genres:</b> {e(genres)}"
-                        ) + f"\n\n<a href='https://anilist.co/anime/{anime['id']}'>🔗 AniList</a>",
+                        b(small_caps(f"typing @{BOT_USERNAME} {keyword} <query>")) + "\n"
+                        + bq(small_caps(hint)),
                         parse_mode=ParseMode.HTML,
                     ),
                 )
             )
-    except Exception:
-        pass
+        try:
+            await query.answer(results, cache_time=30, is_personal=False)
+        except Exception:
+            pass
+        return
 
-    try:
-        manga = AniListClient.search_manga(search)
-        if manga:
-            title_obj = manga.get("title", {}) or {}
-            title = title_obj.get("romaji") or title_obj.get("english") or search
-            cover = (manga.get("coverImage") or {})
-            thumb = cover.get("medium") or ""
-            score = manga.get("averageScore", "N/A")
-            status = (manga.get("status") or "Unknown").title()
-            chapters = manga.get("chapters", "?")
-            results.append(
-                InlineQueryResultArticle(
-                    id=f"al_manga_{manga['id']}",
-                    title=f"📚 {title}",
-                    description=f"Score: {score}/100 • {status} • {chapters} chapters",
-                    thumb_url=thumb,
-                    input_message_content=InputTextMessageContent(
-                        b(f"📚 {e(title)}") + "\n"
-                        + bq(
-                            f"<b>Score:</b> {score}/100\n"
-                            f"<b>Status:</b> {e(status)}\n"
-                            f"<b>Chapters:</b> {chapters}"
-                        ) + f"\n\n<a href='https://anilist.co/manga/{manga['id']}'>🔗 AniList</a>",
-                        parse_mode=ParseMode.HTML,
-                    ),
+    # ── POSTER: /poster <query> or just <query> (default mode) ────────────────
+    if search_lower.startswith("poster ") or (
+        not any(search_lower.startswith(k) for k in ("watch ", "character ", "char ", "manage"))
+    ):
+        anime_q = search[7:].strip() if search_lower.startswith("poster ") else search
+        if anime_q:
+            try:
+                from modules.anime import _al_sync, _ANIME_GQL, _resolve_query
+                loop = asyncio.get_event_loop()
+                data = await loop.run_in_executor(
+                    None, _al_sync, _ANIME_GQL, _resolve_query(anime_q)
                 )
-            )
-    except Exception:
-        pass
+                if data:
+                    t_d    = data.get("title", {}) or {}
+                    title  = t_d.get("english") or t_d.get("romaji") or anime_q
+                    native = t_d.get("native", "")
+                    score  = data.get("averageScore", "?")
+                    status = (data.get("status") or "").replace("_", " ").title()
+                    genres = ", ".join((data.get("genres") or [])[:3])
+                    cover  = (data.get("coverImage") or {}).get("large") or ""
+                    site   = data.get("siteUrl", "")
+                    cap = f"<b>{e(title)}</b>"
+                    if native:
+                        cap += f"\n<i>{e(native)}</i>"
+                    cap += f"\n\n» <b>{small_caps('Rating')}:</b> <code>{score}/100</code>"
+                    if genres:
+                        cap += f"\n» <b>{small_caps('Genre')}:</b> {e(genres)}"
+                    cap += f"\n» <b>{small_caps('Status')}:</b> {e(status)}"
+                    if len(cap) > 1020:
+                        cap = cap[:1016] + "…"
 
-    try:
-        if TMDB_API_KEY:
-            movie = TMDBClient.search_movie(search)
-            if movie:
-                title = movie.get("title") or search
-                year = movie.get("release_date", "")[:4]
-                rating = movie.get("vote_average", "N/A")
-                poster_path = movie.get("poster_path")
-                thumb = TMDBClient.get_poster_url(poster_path, "w92") if poster_path else ""
-                results.append(
-                    InlineQueryResultArticle(
-                        id=f"tmdb_movie_{movie.get('id', 0)}",
-                        title=f"🎬 {title} ({year})",
-                        description=f"Rating: {rating}/10",
-                        thumb_url=thumb,
-                        input_message_content=InputTextMessageContent(
-                            b(f"🎬 {e(title)}") + " " + code(f"({year})") + "\n"
-                            + bq(f"<b>Rating:</b> {rating}/10"),
+                    kb_markup = None
+                    if site:
+                        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+                        kb_markup = InlineKeyboardMarkup([[
+                            InlineKeyboardButton(small_caps("📋 Info"), url=site)
+                        ]])
+
+                    if cover:
+                        results.append(
+                            InlineQueryResultPhoto(
+                                id=f"anime_poster_{data.get('id', 0)}",
+                                photo_url=cover,
+                                thumbnail_url=cover,
+                                title=title,
+                                description=f"{score}/100 • {status} • {genres}",
+                                caption=cap,
+                                parse_mode=ParseMode.HTML,
+                                reply_markup=kb_markup,
+                            )
+                        )
+                    else:
+                        results.append(
+                            InlineQueryResultArticle(
+                                id=f"anime_art_{data.get('id', 0)}",
+                                title=f"🎌 {title}",
+                                description=f"{score}/100 • {status} • {genres}",
+                                input_message_content=InputTextMessageContent(
+                                    cap, parse_mode=ParseMode.HTML,
+                                ),
+                                reply_markup=kb_markup,
+                            )
+                        )
+            except Exception as exc:
+                logger.debug(f"[inline] poster: {exc}")
+
+    # ── ANIME TO WATCH: browse generated_links ─────────────────────────────────
+    if search_lower.startswith("watch ") or search_lower.startswith("atw "):
+        watch_q = re.sub(r'^(watch|atw)\s+', '', search, flags=re.IGNORECASE)
+        try:
+            from database_dual import get_all_links
+            all_links = get_all_links(limit=200, offset=0) or []
+
+            seen_t: set = set()
+            for row in all_links:
+                link_id_r   = row[0]
+                ch_id_r     = row[1]
+                ch_title    = (row[2] or "").strip()
+                if not ch_title or ch_title.lower() in seen_t:
+                    continue
+                if watch_q and watch_q.lower() not in ch_title.lower():
+                    continue
+                seen_t.add(ch_title.lower())
+
+                deep_link = f"https://t.me/{BOT_USERNAME}?start={link_id_r}"
+
+                # Try to get AniList cover
+                cover_url = ""
+                try:
+                    from modules.anime import _al_sync, _ANIME_GQL
+                    loop = asyncio.get_event_loop()
+                    al_d = await loop.run_in_executor(None, _al_sync, _ANIME_GQL, ch_title)
+                    if al_d:
+                        cover_url = (al_d.get("coverImage") or {}).get("medium") or ""
+                except Exception:
+                    pass
+
+                from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+                join_text = (
+                    get_setting("env_JOIN_BTN_TEXT", "") or
+                    small_caps("ᴊᴏɪɴ ɴᴏᴡ")
+                )
+                kb_watch = InlineKeyboardMarkup([[
+                    InlineKeyboardButton(join_text, url=deep_link)
+                ]])
+
+                if cover_url:
+                    results.append(
+                        InlineQueryResultPhoto(
+                            id=f"watch_{link_id_r}",
+                            photo_url=cover_url,
+                            thumbnail_url=cover_url,
+                            title=small_caps(ch_title[:40]),
+                            description=small_caps("tap to get join link"),
+                            caption=b(small_caps(ch_title)),
                             parse_mode=ParseMode.HTML,
-                        ),
+                            reply_markup=kb_watch,
+                        )
                     )
+                else:
+                    results.append(
+                        InlineQueryResultArticle(
+                            id=f"watch_{link_id_r}",
+                            title=small_caps(ch_title[:40]),
+                            description=small_caps("tap to get join link"),
+                            input_message_content=InputTextMessageContent(
+                                b(small_caps(ch_title)),
+                                parse_mode=ParseMode.HTML,
+                            ),
+                            reply_markup=kb_watch,
+                        )
+                    )
+                if len(results) >= 10:
+                    break
+        except Exception as exc:
+            logger.debug(f"[inline] watch: {exc}")
+
+    # ── CHARACTER INFO ─────────────────────────────────────────────────────────
+    if search_lower.startswith("character ") or search_lower.startswith("char "):
+        char_q = re.sub(r'^(character|char)\s+', '', search, flags=re.IGNORECASE)
+        if char_q:
+            try:
+                from modules.anime import _al_sync, _CHAR_GQL
+                loop = asyncio.get_event_loop()
+                data = await loop.run_in_executor(None, _al_sync, _CHAR_GQL, char_q)
+                if data:
+                    nm     = data.get("name", {}) or {}
+                    full   = nm.get("full", char_q)
+                    native = nm.get("native", "")
+                    desc   = re.sub(r"<[^>]+>", "", data.get("description", "") or "")
+                    desc   = (desc[:150].rsplit(" ", 1)[0] + "…") if len(desc) > 150 else desc
+                    img    = (data.get("image") or {}).get("large") or ""
+                    site   = data.get("siteUrl", "")
+                    cap    = f"<b>{e(full)}</b>"
+                    if native:
+                        cap += f" (<i>{e(native)}</i>)"
+                    if desc:
+                        cap += f"\n\n{e(desc)}"
+
+                    kb_c = None
+                    if site:
+                        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+                        kb_c = InlineKeyboardMarkup([[
+                            InlineKeyboardButton("📋 AniList", url=site)
+                        ]])
+
+                    if img:
+                        results.append(
+                            InlineQueryResultPhoto(
+                                id=f"char_{hash(full) % 100000}",
+                                photo_url=img,
+                                thumbnail_url=img,
+                                title=full,
+                                description=desc[:80] if desc else "",
+                                caption=cap,
+                                parse_mode=ParseMode.HTML,
+                                reply_markup=kb_c,
+                            )
+                        )
+                    else:
+                        results.append(
+                            InlineQueryResultArticle(
+                                id=f"char_art_{hash(full) % 100000}",
+                                title=full,
+                                description=desc[:80] if desc else "",
+                                input_message_content=InputTextMessageContent(
+                                    cap, parse_mode=ParseMode.HTML,
+                                ),
+                                reply_markup=kb_c,
+                            )
+                        )
+            except Exception as exc:
+                logger.debug(f"[inline] character: {exc}")
+
+    # ── GROUP MANAGEMENT quick reference ──────────────────────────────────────
+    if search_lower.startswith("manage"):
+        manage_items = [
+            ("🚫 /ban @user",    "Ban a user from the group"),
+            ("🔇 /mute @user",   "Mute a user"),
+            ("👢 /kick @user",   "Kick (not ban) a user"),
+            ("⚠️ /warn @user",   "Warn a user (3 warns = ban)"),
+            ("📌 /pin",          "Pin replied message"),
+            ("📋 /rules",        "Show group rules"),
+            ("🗑 /purge",        "Delete messages in bulk"),
+            ("👑 /promote @user","Promote user to admin"),
+        ]
+        for lbl, desc in manage_items:
+            results.append(
+                InlineQueryResultArticle(
+                    id=f"mgmt_{hash(lbl) % 100000}",
+                    title=small_caps(lbl),
+                    description=small_caps(desc),
+                    input_message_content=InputTextMessageContent(
+                        b(small_caps(lbl)) + "\n" + bq(small_caps(desc)),
+                        parse_mode=ParseMode.HTML,
+                    ),
                 )
-    except Exception:
-        pass
+            )
 
     try:
-        await query.answer(results[:10], cache_time=30, is_personal=False)
+        await query.answer(results[:10], cache_time=15, is_personal=True)
     except Exception as exc:
-        logger.debug(f"Inline query answer error: {exc}")
+        logger.debug(f"[inline] answer: {exc}")
 
-
-# ================================================================================
-#                        GROUP MESSAGE HANDLER
-# ================================================================================
 
 async def group_message_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
