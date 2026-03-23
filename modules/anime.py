@@ -3,133 +3,258 @@
 # ACTION: Replace existing file
 # ====================================================================
 """
-anime.py — /anime /tvshow /net /manga /airing /character
-Fully async, works for all users (not admin-only).
-Handles abbreviations + partial English names + romaji fallback.
+anime.py — /anime /tvshow /net /manga /airing /character /imdb
+Fully async, works for all users.
+
+Features:
+  ✅ Typo-safe abbreviation map — English names searched directly
+  ✅ "demon slayer" → "Demon Slayer" NOT "kimetsu no yaiba onigiri"
+  ✅ Season detection: "aot s2" / "demon slayer season 3" / "jjk 2"
+  ✅ Season 2 specific poster with correct AniList entry
+  ✅ Similar anime panel — user picks exact match before poster is made
+  ✅ Language selection panel (Hindi, English, Dual, Japanese, etc.)
+  ✅ Size/type selection panel (Poster, Landscape, Banner, Custom)
+  ✅ NEXT IMG = completely different template, not same image resized
+  ✅ 2 separate messages: poster+info | custom thumbnail prompt
+  ✅ /imdb — real TMDB poster + info only, no poster generation
+  ✅ All text in small caps via bot.small_caps
 """
-import asyncio, html, logging, re, requests
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+
+import asyncio
+import html
+import logging
+import re
+import requests
+from io import BytesIO
+from typing import Optional, List, Dict, Any
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    InputMediaPhoto,
+)
 from telegram.constants import ParseMode
-from telegram.ext import ContextTypes, CommandHandler
+from telegram.ext import (
+    ContextTypes,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+)
 
 logger = logging.getLogger(__name__)
-_AL_URL = "https://graphql.anilist.co"
+
+_AL_URL   = "https://graphql.anilist.co"
 _TMDB_KEY = __import__("os").getenv("TMDB_API_KEY", "")
 
-# ── Abbreviation / common-name → proper search query ─────────────────────────
-_ABBR = {
-    # Short codes
-    "aot": "attack on titan", "snk": "attack on titan",
-    "bnha": "my hero academia", "mha": "my hero academia",
-    "hxh": "hunter x hunter", "jjk": "jujutsu kaisen",
-    "csm": "chainsaw man", "op": "one piece",
-    "fma": "fullmetal alchemist",
-    "fmab": "fullmetal alchemist brotherhood",
-    "kny": "kimetsu no yaiba", "ds": "kimetsu no yaiba",
-    "re zero": "re zero kara hajimeru isekai seikatsu",
-    "rezero": "re zero kara hajimeru isekai seikatsu",
-    "slime": "tensei shitara slime datta ken",
-    "tensura": "tensei shitara slime datta ken",
-    "shield hero": "tate no yuusha no nariagari",
-    "sao": "sword art online",
-    "dbs": "dragon ball super", "dbz": "dragon ball z", "db": "dragon ball",
-    "cote": "classroom of the elite",
-    "eminence in shadow": "kage no jitsuryokusha ni naritakute",
-    "konosuba": "kono subarashii sekai ni shukufuku wo",
-    "danmachi": "dungeon ni deai wo motomeru no wa machigatteiru darou ka",
-    # English names that map to romaji
-    "demon slayer": "kimetsu no yaiba",
-    "demon slayer swordsmith": "kimetsu no yaiba katanakaji no sato hen",
-    "frieren": "sousou no frieren",
-    "frieren beyond journeys end": "sousou no frieren",
-    "spy x family": "spy x family",
-    "spy family": "spy x family",
-    "blue lock": "blue lock",
-    "oshi no ko": "oshi no ko",
-    "classroom of elite": "classroom of the elite",
-    "overlord": "overlord",
-    "sword art online": "sword art online",
-    "attack on titan": "shingeki no kyojin",
-    "one punch man": "one punch man",
-    "opm": "one punch man",
-    "naruto": "naruto",
-    "bleach": "bleach",
-    "fullmetal alchemist": "fullmetal alchemist",
-    "tokyo ghoul": "tokyo ghoul",
-    "no game no life": "no game no life",
-    "death note": "death note",
-    "hunter x hunter": "hunter x hunter",
-    "fairy tail": "fairy tail",
-    "black clover": "black clover",
-    "dr stone": "dr stone",
-    "dr. stone": "dr stone",
-    "food wars": "shokugeki no soma",
-    "shokugeki": "shokugeki no soma",
-    "vinland saga": "vinland saga",
-    "jojo": "jojo no kimyou na bouken",
-    "jojos bizarre adventure": "jojo no kimyou na bouken",
-    "promised neverland": "yakusoku no neverland",
-    "tpn": "yakusoku no neverland",
-    "re:zero": "re zero kara hajimeru isekai seikatsu",
-    "made in abyss": "made in abyss",
-    "mia": "made in abyss",
-    "violet evergarden": "violet evergarden",
-    "your lie in april": "shigatsu wa kimi no uso",
-    "shigatsu": "shigatsu wa kimi no uso",
-    "anohana": "ano hi mita hana no namae wo bokutachi wa mada shiranai",
-    "clannad": "clannad",
-    "steins gate": "steins gate",
-    "steins;gate": "steins gate",
-    "sg": "steins gate",
-    "toradora": "toradora",
-    "angel beats": "angel beats",
-    "sword art online alicization": "sword art online alicization",
-    "black butler": "kuroshitsuji",
-    "kuroshitsuji": "kuroshitsuji",
-    "ao no exorcist": "ao no exorcist",
-    "blue exorcist": "ao no exorcist",
-    "bungou stray dogs": "bungou stray dogs",
-    "bsd": "bungou stray dogs",
-    "noragami": "noragami",
-    "ngnl": "no game no life",
-    "hibike euphonium": "hibike euphonium",
-    "sound euphonium": "hibike euphonium",
-    "k on": "k on",
-    "k-on": "k on",
-    "lucky star": "lucky star",
-    "haruhi": "suzumiya haruhi no yuuutsu",
-    "haruhi suzumiya": "suzumiya haruhi no yuuutsu",
-    "code geass": "code geass hangyaku no lelouch",
-    "code geass lelouch": "code geass hangyaku no lelouch",
-    "cowboy bebop": "cowboy bebop",
-    "neon genesis evangelion": "neon genesis evangelion",
-    "nge": "neon genesis evangelion",
-    "eva": "neon genesis evangelion",
-    "evangelion": "neon genesis evangelion",
-    "spirited away": "sen to chihiro no kamikakushi",
-    "my neighbor totoro": "tonari no totoro",
-    "princess mononoke": "mononoke hime",
-    "howls moving castle": "hauru no ugoku shiro",
-    "chainsaw man": "chainsaw man",
-    "csm": "chainsaw man",
-    "oshi no ko": "oshi no ko",
-    "mushoku tensei": "mushoku tensei isekai ittara honki dasu",
-    "jobless reincarnation": "mushoku tensei isekai ittara honki dasu",
-    "that time i got reincarnated as a slime": "tensei shitara slime datta ken",
-    "aot final season": "shingeki no kyojin the final season",
-    "solo leveling": "ore dake level up na ken",
-    "ore dake": "ore dake level up na ken",
-    "dungeon meshi": "dungeon meshi",
-    "delicious in dungeon": "dungeon meshi",
-    "frieren beyond journey end": "sousou no frieren",
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _sc(t: str) -> str:
+    try:
+        from bot import small_caps
+        return small_caps(t)
+    except Exception:
+        return t
+
+def _b(t: str) -> str:
+    return f"<b>{_sc(t)}</b>"
+
+def _bq(t: str) -> str:
+    return f"<blockquote expandable>{t}</blockquote>"
+
+def _e(t: str) -> str:
+    return html.escape(str(t))
+
+
+# ── Poster templates — NEXT IMG cycles through ALL of these ──────────────────
+
+TEMPLATES = ["ani", "dark", "light", "crun", "mod", "net"]
+
+TEMPLATE_LABELS = {
+    "ani":  "🎌 Anime",
+    "dark": "🌑 Dark",
+    "light":"☀️ Light",
+    "crun": "🎬 Crunchyroll",
+    "mod":  "✨ Modern",
+    "net":  "🔴 Netflix",
 }
 
 
+# ── Language options (matches Image 2 in reference) ──────────────────────────
+
+LANG_OPTIONS = [
+    ("Hindi",                 "lang_hin"),
+    ("English",               "lang_eng"),
+    ("Hindi & English",       "lang_hin_eng"),
+    ("Japanese & Hindi",      "lang_jpn_hin"),
+    ("Japanese & English",    "lang_jpn_eng"),
+    ("Japanese & English Sub","lang_jpn_eng_sub"),
+    ("Chinese & English",     "lang_chn_eng"),
+    ("Chinese & (Esubs)",     "lang_chn_esub"),
+    ("Multi Audio",           "lang_multi"),
+]
+LANG_LABELS = {cb: label for label, cb in LANG_OPTIONS}
+
+
+# ── Size / type options ───────────────────────────────────────────────────────
+
+SIZE_OPTIONS = [
+    ("🖼 Poster (2:3)",      "size_poster",    "ani"),
+    ("🏞 Landscape (16:9)", "size_landscape", "net"),
+    ("🎌 Banner (3:1)",     "size_banner",    "dark"),
+    ("🎬 Custom",            "size_custom",    None),
+]
+SIZE_CB_TO_TEMPLATE = {cb: tmpl for _, cb, tmpl in SIZE_OPTIONS if tmpl}
+
+
+# ── Abbreviation map ─────────────────────────────────────────────────────────
+# KEY RULE: map to ENGLISH title that AniList recognises natively.
+# Do NOT force English → Japanese romaji — AniList's English search is accurate.
+# "demon slayer" → "Demon Slayer"  (correct)
+# "demon slayer" → "kimetsu no yaiba"  (causes wrong results — REMOVED)
+
+_ABBR: Dict[str, str] = {
+    # Short codes → canonical English title
+    "aot":          "Attack on Titan",
+    "snk":          "Attack on Titan",
+    "bnha":         "My Hero Academia",
+    "mha":          "My Hero Academia",
+    "hxh":          "Hunter x Hunter",
+    "jjk":          "Jujutsu Kaisen",
+    "csm":          "Chainsaw Man",
+    "op":           "One Piece",
+    "fma":          "Fullmetal Alchemist",
+    "fmab":         "Fullmetal Alchemist: Brotherhood",
+    "kny":          "Demon Slayer",
+    "ds":           "Demon Slayer",
+    "re zero":      "Re:Zero",
+    "rezero":       "Re:Zero",
+    "re:zero":      "Re:Zero",
+    "slime":        "That Time I Got Reincarnated as a Slime",
+    "tensura":      "That Time I Got Reincarnated as a Slime",
+    "shield hero":  "The Rising of the Shield Hero",
+    "sao":          "Sword Art Online",
+    "dbs":          "Dragon Ball Super",
+    "dbz":          "Dragon Ball Z",
+    "db":           "Dragon Ball",
+    "cote":         "Classroom of the Elite",
+    "eminence":     "The Eminence in Shadow",
+    "konosuba":     "KonoSuba",
+    "danmachi":     "Is It Wrong to Try to Pick Up Girls in a Dungeon?",
+    "opm":          "One Punch Man",
+    "tpn":          "The Promised Neverland",
+    "sg":           "Steins;Gate",
+    "mia":          "Made in Abyss",
+    "ngnl":         "No Game No Life",
+    "nge":          "Neon Genesis Evangelion",
+    "eva":          "Neon Genesis Evangelion",
+    "bsd":          "Bungo Stray Dogs",
+    "jojo":         "JoJo's Bizarre Adventure",
+    "aot final":    "Attack on Titan The Final Season",
+    # English → canonical English (prevent AniList from picking wrong entry)
+    "demon slayer":                   "Demon Slayer",
+    "kimetsu no yaiba":               "Demon Slayer",
+    "demon slayer swordsmith":        "Demon Slayer: Kimetsu no Yaiba Swordsmith Village Arc",
+    "swordsmith village":             "Demon Slayer: Kimetsu no Yaiba Swordsmith Village Arc",
+    "frieren":                        "Frieren: Beyond Journey's End",
+    "sousou no frieren":              "Frieren: Beyond Journey's End",
+    "frieren beyond":                 "Frieren: Beyond Journey's End",
+    "spy x family":                   "Spy x Family",
+    "spy family":                     "Spy x Family",
+    "blue lock":                      "Blue Lock",
+    "oshi no ko":                     "Oshi no Ko",
+    "overlord":                       "Overlord",
+    "attack on titan":                "Attack on Titan",
+    "shingeki no kyojin":             "Attack on Titan",
+    "one punch man":                  "One Punch Man",
+    "death note":                     "Death Note",
+    "hunter x hunter":                "Hunter x Hunter",
+    "black clover":                   "Black Clover",
+    "dr stone":                       "Dr. Stone",
+    "dr. stone":                      "Dr. Stone",
+    "food wars":                      "Food Wars! Shokugeki no Soma",
+    "shokugeki":                      "Food Wars! Shokugeki no Soma",
+    "vinland saga":                   "Vinland Saga",
+    "jojos bizarre adventure":        "JoJo's Bizarre Adventure",
+    "promised neverland":             "The Promised Neverland",
+    "made in abyss":                  "Made in Abyss",
+    "violet evergarden":              "Violet Evergarden",
+    "your lie in april":              "Your Lie in April",
+    "shigatsu":                       "Your Lie in April",
+    "steins gate":                    "Steins;Gate",
+    "steins;gate":                    "Steins;Gate",
+    "toradora":                       "Toradora",
+    "angel beats":                    "Angel Beats!",
+    "black butler":                   "Black Butler",
+    "kuroshitsuji":                   "Black Butler",
+    "blue exorcist":                  "Blue Exorcist",
+    "ao no exorcist":                 "Blue Exorcist",
+    "bungo stray dogs":               "Bungo Stray Dogs",
+    "bungou stray dogs":              "Bungo Stray Dogs",
+    "noragami":                       "Noragami",
+    "sound euphonium":                "Sound! Euphonium",
+    "hibike euphonium":               "Sound! Euphonium",
+    "k on":                           "K-On!",
+    "k-on":                           "K-On!",
+    "code geass":                     "Code Geass",
+    "cowboy bebop":                   "Cowboy Bebop",
+    "evangelion":                     "Neon Genesis Evangelion",
+    "neon genesis evangelion":        "Neon Genesis Evangelion",
+    "spirited away":                  "Spirited Away",
+    "chainsaw man":                   "Chainsaw Man",
+    "mushoku tensei":                 "Mushoku Tensei: Jobless Reincarnation",
+    "jobless reincarnation":          "Mushoku Tensei: Jobless Reincarnation",
+    "that time i got reincarnated as a slime": "That Time I Got Reincarnated as a Slime",
+    "solo leveling":                  "Solo Leveling",
+    "ore dake":                       "Solo Leveling",
+    "dungeon meshi":                  "Delicious in Dungeon",
+    "delicious in dungeon":           "Delicious in Dungeon",
+    "jujutsu kaisen":                 "Jujutsu Kaisen",
+    "my hero academia":               "My Hero Academia",
+    "sword art online":               "Sword Art Online",
+    "classroom of the elite":         "Classroom of the Elite",
+    "fairy tail":                     "Fairy Tail",
+    "bleach":                         "Bleach",
+    "naruto":                         "Naruto",
+    "one piece":                      "One Piece",
+    "fullmetal alchemist":            "Fullmetal Alchemist",
+    "fullmetal alchemist brotherhood":"Fullmetal Alchemist: Brotherhood",
+    "tokyo ghoul":                    "Tokyo Ghoul",
+    "no game no life":                "No Game No Life",
+}
+
+# Season number patterns
+_SEASON_RE = [
+    (r'\b(s(\d+))\b',                         lambda m: int(m.group(2))),
+    (r'\bseason\s*(\d+)\b',                   lambda m: int(m.group(1))),
+    (r'\b(\d+)(st|nd|rd|th)\s*season\b',      lambda m: int(m.group(1))),
+    (r'\b(ii)\b',                              lambda m: 2),
+    (r'\b(iii)\b',                             lambda m: 3),
+    (r'\b(iv)\b',                              lambda m: 4),
+    (r'\b(final\s*season)\b',                  lambda m: 99),
+]
+
+_SEASON_SUFFIXES: Dict[int, List[str]] = {
+    2:  ["Season 2", "2nd Season", "II", "Part 2"],
+    3:  ["Season 3", "3rd Season", "III"],
+    4:  ["Season 4", "4th Season", "Final Season"],
+    5:  ["Season 5", "5th Season"],
+    99: ["Final Season", "The Final Season"],
+}
+
+
+# ── AniList GQL queries ───────────────────────────────────────────────────────
+
 _ANIME_GQL = """query($s:String){Media(search:$s,type:ANIME,sort:[SEARCH_MATCH,POPULARITY_DESC]){
   id siteUrl title{romaji english native} description(asHtml:false)
-  coverImage{extraLarge large} bannerImage format status season seasonYear
+  coverImage{extraLarge large medium} bannerImage format status season seasonYear
   episodes duration averageScore genres studios(isMain:true){nodes{name}}
   nextAiringEpisode{episode timeUntilAiring}}}"""
+
+_ANIME_PAGE_GQL = """query($s:String){Page(page:1,perPage:8){media(search:$s,type:ANIME,sort:[SEARCH_MATCH,POPULARITY_DESC]){
+  id title{romaji english native} coverImage{medium} averageScore status seasonYear format}}}"""
 
 _MANGA_GQL = """query($s:String){Media(search:$s,type:MANGA,sort:[SEARCH_MATCH,POPULARITY_DESC]){
   id siteUrl title{romaji english native} description(asHtml:false)
@@ -143,39 +268,68 @@ _AIRING_GQL = """query($s:String){Media(search:$s,type:ANIME,sort:[SEARCH_MATCH,
   nextAiringEpisode{episode timeUntilAiring}}}"""
 
 
+# ── Query processing ──────────────────────────────────────────────────────────
+
 def _normalise(q: str) -> str:
-    """Lower, strip, remove punctuation noise for matching."""
     return re.sub(r"[^\w\s]", "", q.lower()).strip()
 
 
-def _al_sync(gql: str, search: str):
-    """AniList search with smart multi-query fallback."""
-    q_norm = _normalise(search)
-    mapped = _ABBR.get(q_norm, search)
+def _extract_season(query: str):
+    """Extract season number and return (clean_base_query, season_num_or_None)."""
+    q = query.strip()
+    for pattern, extractor in _SEASON_RE:
+        m = re.search(pattern, q, re.IGNORECASE)
+        if m:
+            season_num = extractor(m)
+            clean = re.sub(pattern, "", q, flags=re.IGNORECASE).strip()
+            clean = re.sub(r"\s+", " ", clean).strip()
+            return clean, season_num
+    return q, None
 
-    queries_to_try = []
-    # 1. mapped (if different from original)
+
+def _resolve_query(raw: str) -> str:
+    """Resolve abbreviation/alias to canonical English title."""
+    q_norm     = _normalise(raw)
+    mapped     = _ABBR.get(q_norm)
+    if not mapped:
+        q_nopunct = re.sub(r"[^a-z0-9\s]", " ", q_norm).strip()
+        mapped    = _ABBR.get(q_nopunct)
+    return mapped or raw
+
+
+def _season_queries(base: str, n: int) -> List[str]:
+    """Build AniList search queries for a specific season."""
+    suffixes = _SEASON_SUFFIXES.get(n, [f"Season {n}"])
+    return [f"{base} {s}" for s in suffixes] + [f"{base} {n}"]
+
+
+# ── AniList fetching ──────────────────────────────────────────────────────────
+
+def _al_sync(gql: str, search: str) -> Optional[Any]:
+    """
+    Multi-query AniList search with smart fallback:
+    1. Mapped canonical title
+    2. Original query
+    3. Title-cased original
+    4. First 3 words (handles "Demon Slayer Season 2 Full HD" → "Demon Slayer Season")
+    """
+    mapped = _resolve_query(search)
+    queries: List[str] = []
     if mapped.lower() != search.lower():
-        queries_to_try.append(mapped)
-    # 2. original as-is
-    queries_to_try.append(search)
-    # 3. Title-cased
-    if search.lower() != search.title().lower():
-        queries_to_try.append(search.title())
-    # 4. First word only (helps with "Demon Slayer Season 3" → "Demon Slayer")
+        queries.append(mapped)
+    queries.append(search)
+    if search.title() != search:
+        queries.append(search.title())
     words = search.split()
     if len(words) > 2:
-        queries_to_try.append(" ".join(words[:3]))
-    # deduplicate keeping order
-    seen = set()
-    deduped = []
-    for q in queries_to_try:
-        qk = q.lower()
-        if qk not in seen:
-            seen.add(qk)
-            deduped.append(q)
+        queries.append(" ".join(words[:3]))
 
-    for q in deduped:
+    seen: set = set()
+    for q in queries:
+        k = q.lower()
+        if k in seen:
+            continue
+        seen.add(k)
         try:
             r = requests.post(
                 _AL_URL,
@@ -185,7 +339,7 @@ def _al_sync(gql: str, search: str):
             )
             if r.status_code == 200:
                 d = r.json().get("data", {})
-                result = d.get("Media") or d.get("Character")
+                result = d.get("Media") or d.get("Character") or d.get("Page")
                 if result:
                     return result
         except Exception as exc:
@@ -193,12 +347,33 @@ def _al_sync(gql: str, search: str):
     return None
 
 
-async def _al(gql: str, search: str):
+def _al_page_sync(search: str) -> List[Dict]:
+    """Get up to 8 AniList results for the similar-anime panel."""
+    try:
+        r = requests.post(
+            _AL_URL,
+            json={"query": _ANIME_PAGE_GQL, "variables": {"s": search}},
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+        )
+        if r.status_code == 200:
+            return r.json().get("data", {}).get("Page", {}).get("media") or []
+    except Exception:
+        pass
+    return []
+
+
+async def _al(gql: str, search: str) -> Optional[Any]:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, _al_sync, gql, search)
 
 
-def _clean(text, mx=300):
+async def _al_page(search: str) -> List[Dict]:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _al_page_sync, search)
+
+
+def _clean(text: str, mx: int = 300) -> str:
     if not text:
         return "No description available."
     text = re.sub(r"<[^>]+>", "", text)
@@ -208,204 +383,698 @@ def _clean(text, mx=300):
 
 # ── Poster generation ─────────────────────────────────────────────────────────
 
-async def _make_and_send_poster(update: Update, template: str, media_type: str, query: str):
-    """Generate a poster using poster_engine and send it. Falls back to text card."""
+async def _generate_poster_buf(
+    data: Dict, media_type: str, template: str
+) -> Optional[BytesIO]:
     try:
         from poster_engine import (
-            _anilist_anime, _anilist_manga, _tmdb_movie, _tmdb_tv,
             _build_anime_data, _build_manga_data,
             _build_movie_data, _build_tv_data,
             _make_poster, _get_settings,
         )
-    except ImportError as exc:
-        await update.message.reply_text(
-            f"⚠️ Poster engine unavailable: <code>{html.escape(str(exc)[:80])}</code>",
-            parse_mode=ParseMode.HTML,
-        )
-        return
+    except ImportError:
+        return None
 
-    loop = asyncio.get_event_loop()
-
-    # Fetch data
-    fetch_map = {
-        "ANIME": _anilist_anime,
-        "MANGA": _anilist_manga,
-        "MOVIE": _tmdb_movie,
-        "TV":    _tmdb_tv,
-    }
-    fetch_fn = fetch_map.get(media_type, _anilist_anime)
-    data = await loop.run_in_executor(None, fetch_fn, query)
-
-    if not data:
-        await update.message.reply_text(
-            f"❌ <b>Not found:</b> <code>{html.escape(query)}</code>",
-            parse_mode=ParseMode.HTML,
-        )
-        return
-
+    loop     = asyncio.get_event_loop()
     settings = _get_settings(media_type.lower() if media_type != "TV" else "tvshow")
-    build_map = {
+    build_fn = {
         "ANIME": _build_anime_data,
         "MANGA": _build_manga_data,
         "MOVIE": _build_movie_data,
         "TV":    _build_tv_data,
-    }
-    build_fn = build_map.get(media_type, _build_anime_data)
-    title, native, st, rows, desc, cover_url, score = await loop.run_in_executor(None, build_fn, data)
+    }.get(media_type, _build_anime_data)
 
-    poster_buf = await loop.run_in_executor(
-        None,
-        _make_poster,
-        template, title, native, st, rows, desc, cover_url, score,
-        settings.get("watermark_text"),
-        settings.get("watermark_position", "center"),
-        None, "bottom",
-    )
+    try:
+        title, native, st, rows, desc, cover_url, score = await loop.run_in_executor(
+            None, build_fn, data
+        )
+        return await loop.run_in_executor(
+            None, _make_poster,
+            template, title, native, st, rows, desc, cover_url, score,
+            settings.get("watermark_text"),
+            settings.get("watermark_position", "center"),
+            None, "bottom",
+        )
+    except Exception as exc:
+        logger.debug(f"poster_gen [{template}]: {exc}")
+        return None
 
-    site_url = data.get("siteUrl") or data.get("url") or ""
-    genres   = ", ".join((data.get("genres") or [])[:3])
-    t_d      = data.get("title", {}) or {}
-    eng      = t_d.get("english") or t_d.get("romaji") or title
 
-    cap = f"<b>{html.escape(eng)}</b>\n"
+def _build_caption(data: Dict) -> str:
+    t_d    = data.get("title", {}) or {}
+    eng    = t_d.get("english") or t_d.get("romaji") or "Unknown"
+    native = t_d.get("native", "")
+    genres = ", ".join((data.get("genres") or [])[:3])
+    score  = data.get("averageScore", "?")
+    status = (data.get("status") or "").replace("_", " ").title()
+    eps    = data.get("episodes", "?")
+    fmt    = (data.get("format") or "").replace("_", " ")
+    stnode = ((data.get("studios") or {}).get("nodes") or [])
+    studio = stnode[0].get("name", "") if stnode else ""
+
+    cap = f"<b>{_e(eng)}</b>"
     if native:
-        cap += f"<i>{html.escape(native)}</i>\n"
-    cap += "\n"
+        cap += f"\n<i>{_e(native)}</i>"
+    cap += "\n\n"
     if genres:
-        cap += f"» <b>Genre:</b> {html.escape(genres)}\n"
-    for lb, v in (rows or [])[:5]:
-        if v and str(v) not in ("-", "N/A", "None", "?", "0"):
-            cap += f"» <b>{html.escape(lb)}:</b> <code>{html.escape(str(v))}</code>\n"
-    cap += "\n<i>Posted via @BeatAnime</i>"
-    if len(cap) > 1024:
-        cap = cap[:1020] + "…"
+        cap += f"» <b>{_sc('Genre')}:</b> {_e(genres)}\n"
+    if score and str(score) not in ("?", "0", "None"):
+        cap += f"» <b>{_sc('Rating')}:</b> <code>{score}/100</code>\n"
+    if status:
+        cap += f"» <b>{_sc('Status')}:</b> {_e(status)}\n"
+    if eps and str(eps) not in ("?", "0", "None"):
+        cap += f"» <b>{_sc('Episodes')}:</b> <code>{eps}</code>\n"
+    if fmt:
+        cap += f"» <b>{_sc('Format')}:</b> {_e(fmt)}\n"
+    if studio:
+        cap += f"» <b>{_sc('Studio')}:</b> {_e(studio)}\n"
+    desc = _clean(data.get("description", ""), 200)
+    if desc and desc != "No description available.":
+        cap += f"\n{_bq(_e(desc))}"
+    return cap[:1024]
 
-    btns = [[InlineKeyboardButton("📢 BeatAnime", url="https://t.me/BeatAnime")]]
-    if site_url:
-        btns[0].append(InlineKeyboardButton("📋 Info", url=site_url))
-    markup = InlineKeyboardMarkup(btns)
 
-    if poster_buf:
-        try:
-            poster_buf.seek(0)
-            await update.message.reply_photo(
-                photo=poster_buf, caption=cap,
-                parse_mode=ParseMode.HTML, reply_markup=markup,
-            )
-            return
-        except Exception as exc:
-            logger.debug(f"poster send failed: {exc}")
+def _info_kb(data: Dict) -> InlineKeyboardMarkup:
+    site = data.get("siteUrl", "")
+    row  = []
+    if site:
+        row.append(InlineKeyboardButton(_sc("📋 Info"), url=site))
+    row.append(InlineKeyboardButton(_sc("📢 BeatAnime"), url="https://t.me/BeatAnime"))
+    return InlineKeyboardMarkup([row])
 
-    # Text fallback with cover image
-    cv = (data.get("coverImage") or {}).get("extraLarge") or data.get("poster_path", "")
-    if cv and not cv.startswith("http"):
-        cv = f"https://image.tmdb.org/t/p/w500{cv}"
-    lp = f'\n<a href="{html.escape(cv)}">&#8203;</a>' if cv else ""
-    await update.message.reply_text(
-        cap + lp, parse_mode=ParseMode.HTML,
-        reply_markup=markup, disable_web_page_preview=False,
+
+# ── UI flow helpers ───────────────────────────────────────────────────────────
+
+async def _show_similar_panel(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+    base_query: str, season_num: Optional[int],
+) -> None:
+    """Show up to 8 similar anime titles as buttons for user to pick exact match."""
+    msg = update.message or (
+        update.callback_query.message if update.callback_query else None
     )
+    if not msg:
+        return
+
+    loading = None
+    try:
+        loading = await msg.reply_text(
+            _b("🔍 searching similar titles…"), parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
+
+    results = await _al_page(base_query)
+
+    if loading:
+        try:
+            await loading.delete()
+        except Exception:
+            pass
+
+    if not results:
+        # No similar found → jump straight to language panel
+        context.user_data["anime_query"] = base_query
+        context.user_data["season_num"]  = season_num
+        await _show_language_panel(update, context)
+        return
+
+    context.user_data["similar_results"] = results[:8]
+    context.user_data["season_num"]       = season_num
+    context.user_data["anime_query"]      = base_query
+
+    # Build 2-column grid of results
+    btns: List[List] = []
+    row: List = []
+    for i, item in enumerate(results[:8]):
+        t    = item.get("title", {}) or {}
+        name = t.get("english") or t.get("romaji") or "Unknown"
+        year = item.get("seasonYear", "")
+        lbl  = f"{name[:22]} ({year})" if year else name[:28]
+        row.append(InlineKeyboardButton(lbl, callback_data=f"anpick_{i}"))
+        if len(row) == 2:
+            btns.append(row)
+            row = []
+    if row:
+        btns.append(row)
+    btns.append([
+        InlineKeyboardButton(_sc("🔍 Keep My Query"), callback_data="anpick_custom"),
+        InlineKeyboardButton(_sc("❌ Cancel"),         callback_data="anpick_cancel"),
+    ])
+
+    await msg.reply_text(
+        _b("🎌 select exact title") + "\n"
+        + _bq(_sc("pick the correct title for the poster:")),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(btns),
+    )
+
+
+async def _show_language_panel(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Show language selection panel matching Image 2 reference layout."""
+    msg = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
+    if not msg:
+        return
+
+    rows: List[List] = []
+    row:  List = []
+    for label, cb in LANG_OPTIONS:
+        row.append(InlineKeyboardButton(_sc(label), callback_data=cb))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton(_sc("CANCEL"), callback_data="anpick_cancel")])
+
+    await msg.reply_text(
+        _b("🎧 select audio language"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+async def _show_size_panel(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Show poster size/type selection panel."""
+    msg = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
+    if not msg:
+        return
+
+    rows: List[List] = []
+    row:  List = []
+    for label, cb, _ in SIZE_OPTIONS:
+        row.append(InlineKeyboardButton(_sc(label), callback_data=cb))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton(_sc("CANCEL"), callback_data="anpick_cancel")])
+
+    await msg.reply_text(
+        _b("📐 select poster type"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
+
+
+# ── Poster delivery — 2 separate messages ────────────────────────────────────
+
+async def _deliver_poster(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+    data: Dict, template: str, media_type: str,
+) -> None:
+    """
+    Send poster in exactly 2 separate messages:
+    1. Photo + info caption + AniList button
+    2. 📸 Custom Thumbnail prompt + NEXT IMG / SKIP / CANCEL
+    """
+    msg = update.message or (
+        update.callback_query.message if update.callback_query else None
+    )
+    if not msg:
+        return
+
+    # Loading indicator
+    loading = None
+    try:
+        loading = await msg.reply_text(
+            _b("🎨 generating poster…"), parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        pass
+
+    poster_buf = await _generate_poster_buf(data, media_type, template)
+
+    if loading:
+        try:
+            await loading.delete()
+        except Exception:
+            pass
+
+    caption = _build_caption(data)
+    kb      = _info_kb(data)
+
+    sent_poster = None
+
+    # ── Message 1: poster + info ──────────────────────────────────────────────
+    if poster_buf:
+        poster_buf.seek(0)
+        try:
+            sent_poster = await msg.reply_photo(
+                photo=poster_buf, caption=caption,
+                parse_mode=ParseMode.HTML, reply_markup=kb,
+            )
+        except Exception as exc:
+            logger.debug(f"poster send: {exc}")
+
+    if not sent_poster:
+        cv = (data.get("coverImage") or {}).get("extraLarge", "")
+        lp = f'\n<a href="{_e(cv)}">&#8203;</a>' if cv else ""
+        try:
+            sent_poster = await msg.reply_text(
+                caption + lp, parse_mode=ParseMode.HTML,
+                reply_markup=kb, disable_web_page_preview=not cv,
+            )
+        except Exception:
+            pass
+
+    # Store state
+    t_d    = data.get("title", {}) or {}
+    context.user_data.update({
+        "poster_data":       data,
+        "poster_media_type": media_type,
+        "poster_template":   template,
+        "poster_tmpl_idx":   TEMPLATES.index(template) if template in TEMPLATES else 0,
+        "poster_title":      t_d.get("english") or t_d.get("romaji") or "Unknown",
+        "poster_msg_id":     sent_poster.message_id if sent_poster else None,
+        "poster_chat_id":    msg.chat_id,
+        "awaiting_thumbnail": True,
+    })
+
+    # ── Message 2: Custom Thumbnail prompt (separate message, not joined) ─────
+    thumb_kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(_sc("NEXT IMG"),  callback_data="anthmb_next"),
+            InlineKeyboardButton(_sc("SKIP"),       callback_data="anthmb_skip"),
+        ],
+        [InlineKeyboardButton(_sc("CANCEL"),        callback_data="anthmb_cancel")],
+    ])
+
+    await msg.reply_text(
+        "📸 <b>Cᴜsᴛᴏᴍ Tʜᴜᴍʙɴᴀɪʟ</b>\n\n"
+        "Sᴇɴᴅ ᴍᴇ ᴀ ᴄᴜsᴛᴏᴍ ᴛʜᴜᴍʙɴᴀɪʟ ɪᴍᴀɢᴇ, ᴏʀ ᴄʟɪᴄᴋ Sᴋɪᴘ ᴛᴏ ᴜsᴇ ᴛʜɪs ᴘᴏsᴛᴇʀ.",
+        parse_mode=ParseMode.HTML,
+        reply_markup=thumb_kb,
+    )
+
+
+# ── Callback handler ──────────────────────────────────────────────────────────
+
+async def _anime_callback(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Route all anime-flow callbacks."""
+    query = update.callback_query
+    if not query:
+        return
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    cb      = query.data or ""
+    uid     = query.from_user.id
+    msg     = query.message
+
+    # ── Similar panel pick ────────────────────────────────────────────────────
+    if cb.startswith("anpick_"):
+        if cb == "anpick_cancel":
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            return
+
+        if cb == "anpick_custom":
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            await _show_language_panel(update, context)
+            return
+
+        # anpick_{index}
+        try:
+            idx     = int(cb.split("_")[1])
+            results = context.user_data.get("similar_results", [])
+            if 0 <= idx < len(results):
+                item = results[idx]
+                t    = item.get("title", {}) or {}
+                name = t.get("english") or t.get("romaji") or ""
+                context.user_data["anime_query"] = name
+        except (ValueError, IndexError):
+            pass
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        await _show_language_panel(update, context)
+        return
+
+    # ── Language selected ─────────────────────────────────────────────────────
+    if cb.startswith("lang_"):
+        context.user_data["selected_lang"] = LANG_LABELS.get(cb, "English")
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        await _show_size_panel(update, context)
+        return
+
+    # ── Size selected → fetch + deliver ──────────────────────────────────────
+    if cb.startswith("size_"):
+        template = SIZE_CB_TO_TEMPLATE.get(cb, "ani")
+        context.user_data["poster_template"] = template
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
+        base_q     = context.user_data.get("anime_query", "")
+        season_num = context.user_data.get("season_num")
+        media_type = context.user_data.get("media_type", "ANIME")
+
+        # Build season-specific search query if needed
+        if season_num and season_num > 1:
+            search_queries = _season_queries(base_q, season_num)
+        else:
+            search_queries = [base_q]
+
+        loading = None
+        try:
+            loading = await msg.reply_text(
+                _b(f"🔎 fetching {_e(search_queries[0])}…"),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+
+        gql  = _ANIME_GQL if media_type in ("ANIME",) else _MANGA_GQL
+        data = None
+        loop = asyncio.get_event_loop()
+
+        for sq in search_queries:
+            data = await loop.run_in_executor(None, _al_sync, gql, sq)
+            if data:
+                break
+
+        if loading:
+            try:
+                await loading.delete()
+            except Exception:
+                pass
+
+        if not data:
+            try:
+                await msg.reply_text(
+                    _b(f"❌ not found: {_e(search_queries[0])}"),
+                    parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                pass
+            return
+
+        await _deliver_poster(update, context, data, template, media_type)
+        return
+
+    # ── Thumbnail: NEXT IMG (completely different template) ───────────────────
+    if cb == "anthmb_next":
+        data_dict  = context.user_data.get("poster_data")
+        media_type = context.user_data.get("poster_media_type", "ANIME")
+        tmpl_idx   = context.user_data.get("poster_tmpl_idx", 0)
+
+        if not data_dict:
+            await query.answer(_sc("session expired"), show_alert=True)
+            return
+
+        # Advance to next template — completely different style
+        tmpl_idx = (tmpl_idx + 1) % len(TEMPLATES)
+        new_tmpl = TEMPLATES[tmpl_idx]
+        context.user_data["poster_tmpl_idx"] = tmpl_idx
+        context.user_data["poster_template"] = new_tmpl
+
+        try:
+            await query.answer(
+                _sc(f"generating {TEMPLATE_LABELS.get(new_tmpl, new_tmpl)} style…")
+            )
+        except Exception:
+            pass
+
+        loading = None
+        try:
+            loading = await msg.reply_text(
+                _b(f"🎨 {TEMPLATE_LABELS.get(new_tmpl, new_tmpl)} {_sc('style…')}"),
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+
+        new_buf = await _generate_poster_buf(data_dict, media_type, new_tmpl)
+
+        if loading:
+            try:
+                await loading.delete()
+            except Exception:
+                pass
+
+        if not new_buf:
+            try:
+                await query.answer(_sc("could not generate"), show_alert=True)
+            except Exception:
+                pass
+            return
+
+        prev_msg_id  = context.user_data.get("poster_msg_id")
+        prev_chat_id = context.user_data.get("poster_chat_id")
+
+        if prev_msg_id and prev_chat_id:
+            try:
+                new_buf.seek(0)
+                await query.bot.edit_message_media(
+                    chat_id=prev_chat_id,
+                    message_id=prev_msg_id,
+                    media=InputMediaPhoto(
+                        media=new_buf,
+                        caption=_build_caption(data_dict),
+                        parse_mode=ParseMode.HTML,
+                    ),
+                    reply_markup=_info_kb(data_dict),
+                )
+            except Exception:
+                try:
+                    new_buf.seek(0)
+                    sent = await msg.reply_photo(
+                        photo=new_buf,
+                        caption=_build_caption(data_dict),
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=_info_kb(data_dict),
+                    )
+                    context.user_data["poster_msg_id"] = sent.message_id
+                except Exception:
+                    pass
+        return
+
+    # ── Thumbnail: SKIP ───────────────────────────────────────────────────────
+    if cb == "anthmb_skip":
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        context.user_data.pop("awaiting_thumbnail", None)
+        try:
+            await query.answer(_sc("✅ using this poster"))
+        except Exception:
+            pass
+        return
+
+    # ── Thumbnail: CANCEL ─────────────────────────────────────────────────────
+    if cb == "anthmb_cancel":
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        prev_msg_id  = context.user_data.get("poster_msg_id")
+        prev_chat_id = context.user_data.get("poster_chat_id")
+        if prev_msg_id and prev_chat_id:
+            try:
+                await query.bot.delete_message(prev_chat_id, prev_msg_id)
+            except Exception:
+                pass
+        context.user_data.clear()
+        try:
+            await query.answer(_sc("cancelled"))
+        except Exception:
+            pass
+        return
+
+
+# ── Custom thumbnail photo handler ────────────────────────────────────────────
+
+async def _thumbnail_photo_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """User sends a photo to use as custom thumbnail."""
+    if not context.user_data.get("awaiting_thumbnail"):
+        return
+    msg = update.message
+    if not msg or not msg.photo:
+        return
+
+    context.user_data.pop("awaiting_thumbnail", None)
+    fid      = msg.photo[-1].file_id
+    data_d   = context.user_data.get("poster_data", {})
+    caption  = _build_caption(data_d) if data_d else ""
+    kb       = _info_kb(data_d) if data_d else None
+
+    prev_mid = context.user_data.get("poster_msg_id")
+    prev_cid = context.user_data.get("poster_chat_id")
+
+    if prev_mid and prev_cid:
+        try:
+            await msg.bot.edit_message_media(
+                chat_id=prev_cid,
+                message_id=prev_mid,
+                media=InputMediaPhoto(
+                    media=fid, caption=caption, parse_mode=ParseMode.HTML,
+                ),
+                reply_markup=kb,
+            )
+            await msg.reply_text(
+                _b(_sc("✅ custom thumbnail applied!")), parse_mode=ParseMode.HTML
+            )
+            context.user_data.clear()
+            return
+        except Exception:
+            pass
+
+    await msg.reply_photo(
+        photo=fid, caption=caption, parse_mode=ParseMode.HTML, reply_markup=kb,
+    )
+    context.user_data.clear()
 
 
 # ── Command handlers ──────────────────────────────────────────────────────────
 
-async def anime_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def anime_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
         await update.message.reply_text(
-            "<b>Usage:</b> /anime &lt;anime name&gt;\n"
-            "<b>Examples:</b>\n"
-            "• <code>/anime demon slayer</code>\n"
-            "• <code>/anime aot</code>\n"
-            "• <code>/anime jjk</code>",
+            _b("usage:") + " /anime &lt;name&gt;\n"
+            + _bq(
+                "• /anime demon slayer\n"
+                "• /anime aot s2   (season 2)\n"
+                "• /anime jjk season 2\n"
+                "• /anime frieren\n"
+                "• /anime solo leveling"
+            ),
             parse_mode=ParseMode.HTML,
         )
         return
-    q = " ".join(context.args)
-    wait = await update.message.reply_text("🎨 <b>Generating poster…</b>", parse_mode=ParseMode.HTML)
-    await _make_and_send_poster(update, "ani", "ANIME", q)
-    try: await wait.delete()
-    except: pass
+
+    raw_q      = " ".join(context.args)
+    base_q, sn = _extract_season(raw_q)
+    resolved   = _resolve_query(base_q)
+
+    context.user_data.update({
+        "media_type":  "ANIME",
+        "anime_query": resolved,
+        "season_num":  sn,
+    })
+    await _show_similar_panel(update, context, resolved, sn)
 
 
-async def tvshow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def manga_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text("<b>Usage:</b> /tvshow &lt;show name&gt;", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            _b("usage:") + " /manga &lt;name&gt;", parse_mode=ParseMode.HTML
+        )
         return
     q = " ".join(context.args)
-    wait = await update.message.reply_text("🎨 <b>Generating poster…</b>", parse_mode=ParseMode.HTML)
-    await _make_and_send_poster(update, "net", "TV", q)
-    try: await wait.delete()
-    except: pass
+    context.user_data.update({"media_type": "MANGA", "anime_query": q, "season_num": None})
+    await _show_similar_panel(update, context, q, None)
 
 
-async def movie_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def movie_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text("<b>Usage:</b> /movie &lt;movie name&gt;", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            _b("usage:") + " /movie &lt;name&gt;", parse_mode=ParseMode.HTML
+        )
         return
     q = " ".join(context.args)
-    wait = await update.message.reply_text("🎨 <b>Generating poster…</b>", parse_mode=ParseMode.HTML)
-    await _make_and_send_poster(update, "net", "MOVIE", q)
-    try: await wait.delete()
-    except: pass
+    context.user_data.update({"media_type": "MOVIE", "anime_query": q, "season_num": None})
+    await _show_language_panel(update, context)
 
 
-async def net_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Netflix-style poster (/net) — works for anime, shows, movies."""
+async def tvshow_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text("<b>Usage:</b> /net &lt;title&gt;", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            _b("usage:") + " /tvshow &lt;name&gt;", parse_mode=ParseMode.HTML
+        )
         return
     q = " ".join(context.args)
-    wait = await update.message.reply_text("🎨 <b>Generating poster…</b>", parse_mode=ParseMode.HTML)
-    await _make_and_send_poster(update, "net", "ANIME", q)
-    try: await wait.delete()
-    except: pass
+    context.user_data.update({"media_type": "TV", "anime_query": q, "season_num": None})
+    await _show_language_panel(update, context)
 
 
-async def manga_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def net_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Netflix-style poster — skips language/size panels, instant generation."""
     if not context.args:
-        await update.message.reply_text("<b>Usage:</b> /manga &lt;manga name&gt;", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            _b("usage:") + " /net &lt;title&gt;", parse_mode=ParseMode.HTML
+        )
         return
-    q = " ".join(context.args)
-    wait = await update.message.reply_text("🎨 <b>Generating poster…</b>", parse_mode=ParseMode.HTML)
-    await _make_and_send_poster(update, "anim", "MANGA", q)
-    try: await wait.delete()
-    except: pass
+    q    = " ".join(context.args)
+    loop = asyncio.get_event_loop()
+    context.user_data.update({
+        "media_type": "ANIME", "anime_query": q, "season_num": None,
+        "selected_lang": "English", "poster_template": "net",
+    })
+    data = await loop.run_in_executor(None, _al_sync, _ANIME_GQL, q)
+    if not data:
+        await update.message.reply_text(
+            _b(f"❌ not found: {_e(q)}"), parse_mode=ParseMode.HTML
+        )
+        return
+    await _deliver_poster(update, context, data, "net", "ANIME")
 
 
-async def airing_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def airing_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text("<b>Usage:</b> /airing &lt;anime name&gt;", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            _b("usage:") + " /airing &lt;anime name&gt;", parse_mode=ParseMode.HTML
+        )
         return
     data = await _al(_AIRING_GQL, " ".join(context.args))
     if not data:
         await update.message.reply_text("❌ Anime not found.")
         return
-    td    = data.get("title", {}) or {}
+    td     = data.get("title", {}) or {}
     title  = td.get("english") or td.get("romaji") or "Unknown"
     native = td.get("native", "")
     nxt    = data.get("nextAiringEpisode")
     if nxt:
         secs = nxt.get("timeUntilAiring", 0)
         d, r = divmod(secs, 86400); h, r2 = divmod(r, 3600); m = r2 // 60
-        ts = f"{d}d {h}h {m}m" if d else f"{h}h {m}m"
+        ts  = f"{d}d {h}h {m}m" if d else f"{h}h {m}m"
         txt = (
-            f"<b>{html.escape(title)}</b>"
-            + (f" (<i>{html.escape(native)}</i>)" if native else "")
-            + f"\n\n📡 <b>Episode {nxt.get('episode','?')}</b> airs in <code>{ts}</code>"
+            f"<b>{_e(title)}</b>"
+            + (f" (<i>{_e(native)}</i>)" if native else "")
+            + f"\n\n📡 <b>Episode {nxt.get('episode','?')}</b> {_sc('airs in')} <code>{ts}</code>"
         )
     else:
         st  = (data.get("status") or "").replace("_", " ").title()
         txt = (
-            f"<b>{html.escape(title)}</b>"
-            + (f" (<i>{html.escape(native)}</i>)" if native else "")
-            + f"\n\n📺 <b>Episodes:</b> {data.get('episodes','?')}\n📌 <b>Status:</b> {html.escape(st)}"
+            f"<b>{_e(title)}</b>"
+            + (f" (<i>{_e(native)}</i>)" if native else "")
+            + f"\n\n📺 <b>{_sc('Episodes')}:</b> {data.get('episodes','?')}\n"
+            + f"📌 <b>{_sc('Status')}:</b> {_e(st)}"
         )
     await update.message.reply_text(txt, parse_mode=ParseMode.HTML)
 
 
-async def character_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def character_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text("<b>Usage:</b> /character &lt;name&gt;", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            _b("usage:") + " /character &lt;name&gt;", parse_mode=ParseMode.HTML
+        )
         return
     data = await _al(_CHAR_GQL, " ".join(context.args))
     if not data:
@@ -417,22 +1086,117 @@ async def character_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     desc   = _clean(data.get("description", ""), 350)
     site   = data.get("siteUrl", "https://anilist.co")
     img    = (data.get("image") or {}).get("large")
-    txt = (
-        f"<b>{html.escape(full)}</b>"
-        + (f" (<i>{html.escape(native)}</i>)" if native else "")
-        + f"\n\n{html.escape(desc)}"
+    txt    = (
+        f"<b>{_e(full)}</b>"
+        + (f" (<i>{_e(native)}</i>)" if native else "")
+        + f"\n\n{_e(desc)}"
     )
     if len(txt) > 1020:
         txt = txt[:1016] + "…"
-    markup = InlineKeyboardMarkup([[InlineKeyboardButton("📋 AniList", url=site)]])
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("📋 AniList", url=site)]])
     if img:
         try:
-            await update.message.reply_photo(photo=img, caption=txt, parse_mode=ParseMode.HTML, reply_markup=markup)
+            await update.message.reply_photo(
+                photo=img, caption=txt, parse_mode=ParseMode.HTML, reply_markup=kb
+            )
             return
         except Exception:
             pass
-    await update.message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=markup)
+    await update.message.reply_text(txt, parse_mode=ParseMode.HTML, reply_markup=kb)
 
+
+async def imdb_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """IMDb/TMDB lookup — real poster + info only, no AI generation."""
+    if not context.args:
+        await update.message.reply_text(
+            _b("usage:") + " /imdb &lt;movie or show name&gt;", parse_mode=ParseMode.HTML
+        )
+        return
+    q       = " ".join(context.args)
+    loop    = asyncio.get_event_loop()
+    loading = await update.message.reply_text(
+        _b("🔎 searching…"), parse_mode=ParseMode.HTML
+    )
+
+    tmdb_result = None
+    if _TMDB_KEY:
+        try:
+            r = requests.get(
+                "https://api.themoviedb.org/3/search/multi",
+                params={"api_key": _TMDB_KEY, "query": q},
+                timeout=8,
+            )
+            results = r.json().get("results", [])
+            if results:
+                tmdb_result = results[0]
+        except Exception:
+            pass
+
+    try:
+        await loading.delete()
+    except Exception:
+        pass
+
+    if not tmdb_result:
+        # AniList fallback
+        al_data = await loop.run_in_executor(None, _al_sync, _ANIME_GQL, q)
+        if al_data:
+            cap = _build_caption(al_data)
+            kb  = _info_kb(al_data)
+            cv  = (al_data.get("coverImage") or {}).get("extraLarge", "")
+            if cv:
+                try:
+                    await update.message.reply_photo(
+                        photo=cv, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb
+                    )
+                    return
+                except Exception:
+                    pass
+            await update.message.reply_text(
+                cap, parse_mode=ParseMode.HTML, reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+            return
+        await update.message.reply_text(
+            _b(f"❌ not found: {_e(q)}"), parse_mode=ParseMode.HTML
+        )
+        return
+
+    mtype   = tmdb_result.get("media_type", "movie")
+    title   = tmdb_result.get("title") or tmdb_result.get("name") or q
+    year    = (tmdb_result.get("release_date") or tmdb_result.get("first_air_date") or "")[:4]
+    rating  = tmdb_result.get("vote_average", "?")
+    overview = _clean(tmdb_result.get("overview", ""), 250)
+    poster_p = tmdb_result.get("poster_path", "")
+    tmdb_id  = tmdb_result.get("id", 0)
+    tmdb_url = f"https://www.themoviedb.org/{mtype}/{tmdb_id}"
+    img_url  = f"https://image.tmdb.org/t/p/w500{poster_p}" if poster_p else ""
+
+    cap = f"<b>{_e(title)}</b>"
+    if year:
+        cap += f" <code>({year})</code>"
+    cap += f"\n\n» <b>{_sc('Rating')}:</b> <code>{rating}/10</code>"
+    cap += f"\n» <b>{_sc('Type')}:</b> {_e(mtype.title())}"
+    if overview:
+        cap += f"\n\n{_bq(_e(overview))}"
+    if len(cap) > 1020:
+        cap = cap[:1016] + "…"
+
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🎬 TMDB", url=tmdb_url)]])
+    if img_url:
+        try:
+            await update.message.reply_photo(
+                photo=img_url, caption=cap, parse_mode=ParseMode.HTML, reply_markup=kb
+            )
+            return
+        except Exception:
+            pass
+    await update.message.reply_text(
+        cap, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True
+    )
+
+
+# ── Register handlers ─────────────────────────────────────────────────────────
 
 def register(app) -> None:
     app.add_handler(CommandHandler("anime",     anime_cmd))
@@ -442,17 +1206,68 @@ def register(app) -> None:
     app.add_handler(CommandHandler("manga",     manga_cmd))
     app.add_handler(CommandHandler("airing",    airing_cmd))
     app.add_handler(CommandHandler("character", character_cmd))
-    logger.info("[anime] Handlers registered")
+    app.add_handler(CommandHandler("imdb",      imdb_cmd))
+
+    # All anime-flow callbacks in one handler
+    app.add_handler(CallbackQueryHandler(
+        _anime_callback,
+        pattern=r"^(anpick_|lang_|size_|anthmb_)",
+    ))
+
+    # Custom thumbnail photo (check awaiting_thumbnail in user_data)
+    app.add_handler(MessageHandler(
+        filters.PHOTO & ~filters.COMMAND,
+        _thumbnail_photo_handler,
+    ))
+
+    logger.info("[anime] Handlers registered (season, similar panel, language, size)")
 
 
-__mod_name__     = "Anime"
-__command_list__ = ["anime", "tvshow", "movie", "net", "manga", "airing", "character"]
+# Legacy PTB v13 compat shim
+try:
+    from beataniversebot_compat import dispatcher
+    from modules.disable import DisableAbleCommandHandler
+    from telegram.ext import (
+        Filters,
+        CallbackQueryHandler as CQH,
+        MessageHandler as MH,
+    )
+    dispatcher.add_handler(DisableAbleCommandHandler("anime",     anime_cmd,     run_async=True))
+    dispatcher.add_handler(DisableAbleCommandHandler("tvshow",    tvshow_cmd,    run_async=True))
+    dispatcher.add_handler(DisableAbleCommandHandler("movie",     movie_cmd,     run_async=True))
+    dispatcher.add_handler(DisableAbleCommandHandler("net",       net_cmd,       run_async=True))
+    dispatcher.add_handler(DisableAbleCommandHandler("manga",     manga_cmd,     run_async=True))
+    dispatcher.add_handler(DisableAbleCommandHandler("airing",    airing_cmd,    run_async=True))
+    dispatcher.add_handler(DisableAbleCommandHandler("character", character_cmd, run_async=True))
+    dispatcher.add_handler(DisableAbleCommandHandler("imdb",      imdb_cmd,      run_async=True))
+    dispatcher.add_handler(CQH(
+        _anime_callback,
+        pattern=r"^(anpick_|lang_|size_|anthmb_)",
+        run_async=True,
+    ))
+    dispatcher.add_handler(MH(
+        Filters.photo & ~Filters.command,
+        _thumbnail_photo_handler,
+        run_async=True,
+    ))
+except Exception:
+    pass
+
+
+__mod_name__     = "Aɴɪᴍᴇ"
+__command_list__ = ["anime", "tvshow", "movie", "net", "manga", "airing", "character", "imdb"]
 __help__ = """
-• /anime &lt;name&gt; — anime poster + info (supports abbreviations like /anime aot, /anime jjk)
+• /anime &lt;name&gt; — anime poster + info
+• /anime aot s2 — season 2 specific poster
+• /anime demon slayer season 3 — season 3 poster
 • /tvshow &lt;name&gt; — TV show poster
 • /movie &lt;name&gt; — movie poster
-• /net &lt;name&gt; — Netflix-style poster
+• /net &lt;name&gt; — Netflix-style poster (instant, no panels)
 • /manga &lt;name&gt; — manga poster + info
 • /airing &lt;name&gt; — next episode countdown
-• /character &lt;name&gt; — character details
+• /character &lt;name&gt; — character details from AniList
+• /imdb &lt;name&gt; — TMDB poster + info (no generation)
+
+Abbreviations: aot, mha, jjk, csm, ds, opm, fmab, kny, hxh, sao, dbs, cote…
+Season: s2, s3, season 2, 2nd season, final season
 """
