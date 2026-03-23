@@ -124,6 +124,38 @@ telethn = _StubClient()
 CASH_API_KEY: str = os.getenv("CASH_API_KEY", "")
 TIME_API_KEY: str = os.getenv("TIME_API_KEY", "")
 
+# ── Patch ALL telegram handlers to strip run_async (PTB v21 removed it) ───────
+# This makes ALL modules with run_async=True load successfully in PTB v21.
+try:
+    from telegram.ext import (
+        CommandHandler as _CH,
+        MessageHandler as _MH,
+        CallbackQueryHandler as _CQH,
+        InlineQueryHandler as _IQH,
+        ConversationHandler as _CVH,
+        ChatJoinRequestHandler as _CJRH,
+    )
+    for _handler_cls in [_CH, _MH, _CQH, _IQH, _CJRH]:
+        _orig_init = _handler_cls.__init__
+        def _make_patched_init(orig):
+            def _patched(self, *args, **kwargs):
+                kwargs.pop('run_async', None)
+                orig(self, *args, **kwargs)
+            return _patched
+        _handler_cls.__init__ = _make_patched_init(_orig_init)
+
+    # ConversationHandler has extra params too
+    _orig_cvh_init = _CVH.__init__
+    def _patched_cvh_init(self, *args, **kwargs):
+        kwargs.pop('run_async', None)
+        kwargs.pop('per_chat', None) if 'per_chat' not in _CVH.__init__.__code__.co_varnames else None
+        _orig_cvh_init(self, *args, **kwargs)
+    _CVH.__init__ = _patched_cvh_init
+
+except Exception as _patch_err:
+    import logging as _pl
+    _pl.getLogger(__name__).warning(f"Handler patch failed: {_patch_err}")
+
 # ── CustomCommandHandler (used by cleaner module) ─────────────────────────────
 try:
     from telegram.ext import CommandHandler as _BaseCommandHandler
