@@ -6776,17 +6776,16 @@ async def _handle_anime_filter(
 ) -> None:
     """
     Background task: detect anime title in message, deliver poster + join button.
-    Only fires for anime titles registered via the link generator.
+    Reads filter keywords directly from generated_links.channel_title — no separate table.
+    One table for everything: link generation AND filter matching.
     """
     try:
         from database_dual import (
-            get_all_anime_channel_links, get_filter_poster_cache,
-            save_filter_poster_cache,
+            get_all_links, get_filter_poster_cache, save_filter_poster_cache,
         )
         from filter_poster import (
-            _make_expirable_link, _auto_delete, _get_default_poster_template,
+            _auto_delete, _get_default_poster_template,
             get_auto_delete_seconds, get_link_expiry_minutes, _join_btn_text,
-            _styled,
         )
         from poster_engine import (
             _anilist_anime, _build_anime_data, _make_poster, _get_settings,
@@ -6797,7 +6796,8 @@ async def _handle_anime_filter(
         chat_id = update.effective_chat.id
         bot = context.bot
 
-        all_links = get_all_anime_channel_links()
+        # Read all generated links — channel_title IS the filter keyword
+        all_links = get_all_links(limit=500, offset=0)
         if not all_links:
             return
 
@@ -6806,57 +6806,89 @@ async def _handle_anime_filter(
         matched_channel_title = None
         matched_link_id = None
 
+        # Deduplicate by channel_title to avoid double-triggering
+        seen_titles = set()
         for row in all_links:
-            # row: (id, anime_title, channel_id, channel_title, link_id, created_at)
-            a_title = (row[1] or "").strip().lower()
-            if not a_title:
+            # row: (link_id, channel_username, channel_title, source_bot_username, created_time, never_expires)
+            link_id_r      = row[0]
+            channel_id_r   = row[1]   # numeric ID stored as channel_username
+            channel_title_r = (row[2] or "").strip()
+            if not channel_title_r or channel_title_r.lower() in seen_titles:
                 continue
-            # Full match or whole-word match
+            seen_titles.add(channel_title_r.lower())
+
+            a_title = channel_title_r.lower()
+            # Skip very short titles (avoid false matches on common words)
+            if len(a_title) < 3:
+                continue
+            # Whole-word or full match
             if a_title in lower_text or re.search(
                 r'\b' + re.escape(a_title) + r'\b', lower_text
             ):
-                matched_anime = row[1]          # original casing
-                matched_channel_id = row[2]
-                matched_channel_title = row[3] or matched_anime
-                matched_link_id = row[4]
+                matched_anime        = channel_title_r   # use as anime search term
+                matched_channel_id   = channel_id_r      # channel_username/ID
+                matched_channel_title = channel_title_r
+                matched_link_id      = link_id_r
                 break
 
         if not matched_anime:
             return
 
-        template = _get_default_poster_template(chat_id)
+        template  = _get_default_poster_template(chat_id)
         cache_key = _hl.md5(f"{matched_anime.lower()}:{template}".encode()).hexdigest()
         auto_del  = get_auto_delete_seconds(chat_id)
         exp_min   = get_link_expiry_minutes(chat_id)
 
-        # Build join button (expirable invite link for the matched channel)
+        # ── Build direct expirable invite link ──────────────────────────────────
+        # • URL = real Telegram invite (https://t.me/+XXXXX) — direct, no bot redirect
+        # • member_limit=1  → auto-revokes after ONE use
+        # • expire_date     → also auto-revokes after exp_min minutes if unused
+        # • creates_join_request=False → user joins immediately on click (no approval needed)
+        # The poster message is auto-deleted at expire_date so a dead button never shows.
         join_url = None
+        invite_link_obj = None
+        expire_ts = int(time.time()) + (exp_min * 60)
+        _cid = matched_channel_id
         try:
-            expire_ts = int(__import__("time").time()) + (exp_min * 60)
-            inv = await bot.create_chat_invite_link(
-                chat_id=matched_channel_id,
+            _cid = int(matched_channel_id)
+        except (ValueError, TypeError):
+            pass
+        try:
+            invite_link_obj = await bot.create_chat_invite_link(
+                chat_id=_cid,
                 expire_date=expire_ts,
                 member_limit=1,
                 creates_join_request=False,
+                name=f"FP-{int(time.time())}",
             )
-            join_url = inv.invite_link
+            join_url = invite_link_obj.invite_link
         except Exception as _ie:
-            logger.debug(f"[filter] invite link for {matched_channel_id}: {_ie}")
+            logger.debug(f"[filter] expirable invite link failed for {_cid}: {_ie}")
 
+        # Fallback: public channel URL (no expiry, always valid)
         if not join_url:
-            # Fallback: try stored link_id deep link
-            if matched_link_id:
-                from beataniversebot_compat import BOT_USERNAME as _BUN
-                join_url = f"https://t.me/{_BUN}?start={matched_link_id}"
-            else:
-                import os
-                join_url = os.getenv("PUBLIC_ANIME_CHANNEL_URL", "https://t.me/BeatAnime")
+            join_url = os.getenv("PUBLIC_ANIME_CHANNEL_URL", "https://t.me/BeatAnime")
 
-        join_text = _join_btn_text()
+        # ── auto_del: sync with link expiry so poster deletes exactly when link dies ──
+        # If we got a real expirable link → delete poster at expire_ts
+        # If fallback URL → use the configured auto_del setting
+        if invite_link_obj and join_url:
+            delete_delay = exp_min * 60   # poster lives exactly as long as the link
+        else:
+            delete_delay = auto_del       # fallback: use configured value (default 300s)
+
+        # ── Button text — admin-configurable (Filter Poster → ✏️ JOIN BTN TEXT) ─
+        _raw_btn_text = (
+            get_setting("env_JOIN_BTN_TEXT", "") or
+            get_setting("env_join_btn_text", "") or
+            JOIN_BTN_TEXT
+        )
+        join_text = small_caps(_raw_btn_text) if _raw_btn_text else small_caps("ᴊᴏɪɴ ɴᴏᴡ")
+
         from telegram import InlineKeyboardMarkup, InlineKeyboardButton
         kb = InlineKeyboardMarkup([[InlineKeyboardButton(join_text, url=join_url)]])
 
-        # Check poster cache (DB)
+        # Check poster cache (DB) — serve instantly if available
         cached = get_filter_poster_cache(cache_key)
         if cached and cached.get("file_id"):
             try:
@@ -6869,23 +6901,24 @@ async def _handle_anime_filter(
                     reply_markup=kb,
                     reply_to_message_id=update.message.message_id,
                 )
-                if sent and auto_del > 0:
+                if sent and delete_delay > 0:
                     asyncio.create_task(
-                        _auto_delete(bot, chat_id, sent.message_id, delay=auto_del)
+                        _auto_delete(bot, chat_id, sent.message_id, delay=delete_delay)
                     )
                 return
             except Exception:
                 pass  # Cached file_id stale → regenerate
 
-        # Generate poster
+        # Generate poster via AniList
         loop = asyncio.get_event_loop()
+        data = None
         try:
             data = await loop.run_in_executor(None, _anilist_anime, matched_anime)
         except Exception:
-            data = None
+            pass
 
         poster_buf = None
-        caption = f"<b>{matched_anime}</b>"
+        caption = f"<b>{html.escape(matched_anime)}</b>"
         site_url = ""
 
         if data:
@@ -6905,14 +6938,15 @@ async def _handle_anime_filter(
                 genres = ", ".join((data.get("genres") or [])[:3])
                 t_d    = data.get("title", {}) or {}
                 eng    = t_d.get("english") or t_d.get("romaji") or matched_anime
-                caption = f"<b>{__import__('html').escape(eng)}</b>"
+                caption = f"<b>{html.escape(eng)}</b>"
                 if native:
-                    caption += f"\n<i>{__import__('html').escape(native)}</i>"
+                    caption += f"\n<i>{html.escape(native)}</i>"
                 if genres:
-                    caption += f"\n\n» <b>Genre:</b> {__import__('html').escape(genres)}"
-                for lb, v in (rows or [])[:4]:
-                    if v and str(v) not in ("-", "N/A", "None", "?", "0"):
-                        caption += f"\n» <b>{__import__('html').escape(lb)}:</b> <code>{__import__('html').escape(str(v))}</code>"
+                    caption += f"\n\n» <b>Genre:</b> {html.escape(genres)}"
+                if rows:
+                    for lb, v in rows[:3]:
+                        if v and str(v) not in ("-", "N/A", "None", "?", "0"):
+                            caption += f"\n» <b>{html.escape(lb)}:</b> <code>{html.escape(str(v))}</code>"
                 if len(caption) > 900:
                     caption = caption[:896] + "…"
             except Exception as _be:
@@ -6928,13 +6962,12 @@ async def _handle_anime_filter(
 
         if poster_buf:
             poster_buf.seek(0)
-            # Save to POSTER_DB_CHANNEL first for future fast fetching
-            db_channel = int(__import__("os").getenv("POSTER_DB_CHANNEL", "0") or "0")
-            if db_channel:
+            # Save to POSTER_DB_CHANNEL for future instant fetching
+            if POSTER_DB_CHANNEL:
                 try:
                     poster_buf.seek(0)
                     db_msg = await bot.send_photo(
-                        chat_id=db_channel,
+                        chat_id=POSTER_DB_CHANNEL,
                         photo=poster_buf,
                         caption=f"FilterPoster | {matched_anime} | {template}",
                         parse_mode="HTML",
@@ -6942,9 +6975,8 @@ async def _handle_anime_filter(
                     if db_msg.photo:
                         file_id_to_cache = db_msg.photo[-1].file_id
                 except Exception as _dbe:
-                    logger.debug(f"[filter] poster DB channel save: {_dbe}")
+                    logger.debug(f"[filter] DB channel save: {_dbe}")
 
-            # Send to user
             try:
                 poster_buf.seek(0)
                 sent_msg = await bot.send_photo(
@@ -6961,7 +6993,6 @@ async def _handle_anime_filter(
                 logger.debug(f"[filter] poster send: {_se}")
 
         if not sent_msg:
-            # Text fallback
             try:
                 sent_msg = await bot.send_message(
                     chat_id=chat_id,
@@ -6974,7 +7005,7 @@ async def _handle_anime_filter(
             except Exception:
                 pass
 
-        # Cache the poster file_id for next time
+        # Cache the poster file_id
         if file_id_to_cache:
             try:
                 save_filter_poster_cache(
@@ -6982,24 +7013,20 @@ async def _handle_anime_filter(
                     anime_title=matched_anime,
                     template=template,
                     file_id=file_id_to_cache,
-                    channel_id=matched_channel_id or 0,
+                    channel_id=0,
                     caption=caption,
                 )
             except Exception as _ce:
                 logger.debug(f"[filter] cache save: {_ce}")
 
-        if sent_msg and auto_del > 0:
+        if sent_msg and delete_delay > 0:
             asyncio.create_task(
-                _auto_delete(bot, chat_id, sent_msg.message_id, delay=auto_del)
+                _auto_delete(bot, chat_id, sent_msg.message_id, delay=delete_delay)
             )
 
     except Exception as _top:
         logger.debug(f"[filter] _handle_anime_filter: {_top}")
 
-
-# ================================================================================
-#                       AUTO-FORWARD SYSTEM (COMPLETE)
-# ================================================================================
 
 async def auto_forward_message_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
@@ -7718,22 +7745,55 @@ async def auto_approve_join_request(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """
-    Auto-approve chat join requests for channels using join_by_request mode.
-    Only approves if the channel has join_by_request enabled in the DB.
+    Auto-approve chat join requests.
+
+    Approves if ANY of:
+      1. Channel has join_by_request enabled in force_sub_channels table
+      2. Global auto_approve_join_requests setting is true
+      3. Channel is referenced in generated_links (filter channels)
+
+    This means: if you use the filter system with creates_join_request=True,
+    every user who clicks a filter poster join button is approved immediately.
     """
     req = update.chat_join_request
     if not req:
         return
     try:
+        should_approve = False
+
+        # Check 1: force-sub channel JBR setting
         ch_info = get_force_sub_channel_info(str(req.chat.id))
-        jbr_enabled = bool(ch_info and ch_info[2]) if ch_info else False
-        # Also check global JBR setting
-        if not jbr_enabled:
+        if ch_info and ch_info[2]:
+            should_approve = True
+
+        # Check 2: global JBR toggle
+        if not should_approve:
             jbr_global = (get_setting("auto_approve_join_requests", "false") or "false").lower() == "true"
-            if not jbr_global:
-                return
+            if jbr_global:
+                should_approve = True
+
+        # Check 3: channel is referenced in generated_links (filter channels)
+        if not should_approve:
+            try:
+                from database_dual import get_all_links
+                raw = get_all_links(limit=500, offset=0)
+                linked_ids = set()
+                for row in (raw or []):
+                    try:
+                        linked_ids.add(int(row[1]))
+                    except (ValueError, TypeError):
+                        pass
+                if req.chat.id in linked_ids:
+                    should_approve = True
+            except Exception:
+                pass
+
+        if not should_approve:
+            return
+
         await context.bot.approve_chat_join_request(req.chat.id, req.from_user.id)
         logger.debug(f"[jbr] approved {req.from_user.id} in {req.chat.id}")
+
         # Send confirmation DM
         try:
             ch_title = req.chat.title or str(req.chat.id)
@@ -8150,7 +8210,16 @@ async def _pregen_all_filter_posters(bot, admin_id: int, chat_id: int) -> None:
     import hashlib as _hl
 
     try:
-        links = get_all_anime_channel_links()
+        from database_dual import get_all_links
+        raw_links = get_all_links(limit=500, offset=0)
+        # Deduplicate by channel_title (filter keyword)
+        seen = set()
+        links = []
+        for row in (raw_links or []):
+            title = (row[2] or "").strip()
+            if title and title.lower() not in seen:
+                seen.add(title.lower())
+                links.append(row)
     except Exception:
         links = []
 
@@ -8158,7 +8227,7 @@ async def _pregen_all_filter_posters(bot, admin_id: int, chat_id: int) -> None:
         try:
             await bot.send_message(
                 admin_id,
-                b(small_caps("❌ no anime channel links found. generate links first.")),
+                b(small_caps("❌ no generated links found. use gen link to create some first.")),
                 parse_mode="HTML",
             )
         except Exception:
@@ -8187,9 +8256,11 @@ async def _pregen_all_filter_posters(bot, admin_id: int, chat_id: int) -> None:
     loop = _aio.get_event_loop()
 
     for i, row in enumerate(links):
-        # row: (id, anime_title, channel_id, channel_title, link_id, created_at)
-        anime_title   = row[1]
-        channel_id    = row[2]
+        # row from generated_links: (link_id, channel_username, channel_title, source_bot_username, created_time, never_expires)
+        anime_title   = (row[2] or "").strip()   # channel_title = filter keyword
+        channel_id    = row[1]                    # channel_username/id
+        if not anime_title:
+            continue
         template      = "ani"   # default template
         cache_key     = _hl.md5(f"{anime_title.lower()}:{template}".encode()).hexdigest()
 
@@ -9732,15 +9803,17 @@ async def button_handler(
     if data == "generate_links":
         if not is_admin:
             return
-        user_states[uid] = GENERATE_LINK_ANIME_NAME
+        user_states[uid] = GENERATE_LINK_IDENTIFIER
         await safe_edit_text(
             query,
-            b("🔗 Generate Anime Channel Link") + "\n\n"
+            b(small_caps("🔗 generate channel link")) + "\n\n"
             + bq(
-                b("Step 1/2: Send the ANIME NAME for this channel link.\n\n")
-                + "This name becomes the filter keyword — when users type it in a group, "
-                + "they automatically receive the poster + join button.\n\n"
-                + "Example: <code>Demon Slayer</code> or <code>Jujutsu Kaisen</code>"
+                b(small_caps("step 1/2: send the channel\n\n"))
+                + small_caps("• @channelname\n")
+                + small_caps("• -1001234567890 (numeric id)\n")
+                + small_caps("• forward any post from the channel\n\n")
+                + b(small_caps("the channel title will auto-become the filter keyword."))
+                + small_caps("\nwhen users type that title in any group, they get the poster + join button.")
             ),
             reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="admin_back")]]),
         )
@@ -9960,61 +10033,50 @@ async def button_handler(
         if not is_admin:
             return
         try:
-            from database_dual import get_all_anime_channel_links
-            rows = get_all_anime_channel_links()
+            from database_dual import get_all_links
+            raw = get_all_links(limit=100, offset=0)
+            # Deduplicate by channel_title
+            seen = set()
+            rows = []
+            for row in (raw or []):
+                t = (row[2] or "").strip()
+                if t and t.lower() not in seen:
+                    seen.add(t.lower())
+                    rows.append(row)
         except Exception:
             rows = []
-        text = b(f"🎌 ANIME CHANNEL LINKS ({len(rows)})") + "\n\n"
+        text = b(small_caps(f"🎌 filter keywords from generated links ({len(rows)})")) + "\n\n"
         if rows:
             for row in rows[:20]:
-                _, a_title, ch_id, ch_title, link_id, _ = row
-                text += (
-                    f"• <b>{e(a_title)}</b> → <code>{ch_id}</code>"
-                    + (f" ({e(ch_title)})" if ch_title else "")
-                    + "\n"
-                )
+                # (link_id, channel_username, channel_title, source_bot_username, ...)
+                link_id_r    = row[0]
+                ch_id_r      = row[1]
+                ch_title_r   = row[2] or ch_id_r
+                text += f"• <b>{e(ch_title_r)}</b> → <code>{e(str(ch_id_r))}</code>\n"
         else:
-            text += bq(
-                "No anime channel links yet.\n\n"
-                "Use <b>GEN LINK</b> in the Channels panel to create one.\n"
-                "Each link auto-creates a filter keyword."
-            )
+            text += bq(small_caps(
+                "no links yet.\n\n"
+                "use gen link in the channels panel to create one.\n"
+                "the link title automatically becomes a filter keyword."
+            ))
         text += (
             "\n\n" + bq(
-                "<b>How it works:</b>\n"
-                "When you generate a channel link for an anime, the anime title "
-                "becomes a filter keyword. When any user types that title in a group, "
-                "they get a poster + join button for that channel."
+                b(small_caps("how it works:")) + "\n"
+                + small_caps("generate a channel link → the title you enter becomes a filter keyword. ")
+                + small_caps("when any user types that title in a group, they get a poster + join button. ")
+                + small_caps("no separate table needed — it all comes from generated links.")
             )
         )
-        del_btns = []
-        for row in rows[:10]:
-            _, a_title, ch_id, _, _, _ = row
-            del_btns.append(
-                bold_button(f"🗑 {a_title[:20]}", callback_data=f"del_acl_{ch_id}_{a_title[:30]}")
-            )
-        rows_grid = [del_btns[i:i+2] for i in range(0, len(del_btns), 2)]
-        rows_grid.append([_back_btn("manage_force_sub"), _close_btn()])
+        rows_grid = [[_back_btn("manage_force_sub"), _close_btn()]]
         await safe_send_message(
             context.bot, chat_id, text,
             reply_markup=InlineKeyboardMarkup(rows_grid),
         )
         return
 
+    # del_acl_ is no longer used (anime_channel_links table removed, using generated_links)
     if data.startswith("del_acl_"):
-        if not is_admin:
-            return
-        parts = data[len("del_acl_"):].split("_", 1)
-        if len(parts) == 2:
-            try:
-                from database_dual import remove_anime_channel_link
-                ch_id_int = int(parts[0])
-                a_title = parts[1]
-                remove_anime_channel_link(a_title, ch_id_int)
-                await safe_answer(query, f"Removed: {a_title}")
-                await button_handler(update, context, "admin_anime_links")
-            except Exception as _exc:
-                await safe_answer(query, f"Error: {str(_exc)[:80]}")
+        await safe_answer(query, small_caps("use /removechannel or manage links from the channels panel."), show_alert=True)
         return
 
     # ── Clone bot management ────────────────────────────────────────────────────────
@@ -10242,7 +10304,7 @@ async def button_handler(
                 "Changes take effect immediately (stored in DB).\n"
                 "Original .env is not modified.\n\n"
                 f"<b>BOT_NAME:</b> {e(_ev('BOT_NAME', BOT_NAME))}\n"
-                f"<b>JOIN_BTN_TEXT:</b> {e(_ev('JOIN_BTN_TEXT', JOIN_BTN_TEXT))}\n"
+                f"<b>JOIN_BTN_TEXT:</b> {e(_ev('JOIN_BTN_TEXT', JOIN_BTN_TEXT))} {small_caps('← text on filter poster button')}\n"
                 f"<b>HERE_IS_LINK_TEXT:</b> {e(_ev('HERE_IS_LINK_TEXT', HERE_IS_LINK_TEXT)[:40])}...\n"
                 f"<b>ANIME_BTN_TEXT:</b> {e(_ev('ANIME_BTN_TEXT', ANIME_BTN_TEXT))}\n"
                 f"<b>REQUEST_BTN_TEXT:</b> {e(_ev('REQUEST_BTN_TEXT', REQUEST_BTN_TEXT))}\n"
@@ -10731,6 +10793,30 @@ async def button_handler(
                 small_caps("generating posters for all registered anime channels in background.\n\n")
                 + small_caps("each poster is generated, sent to poster db channel, and cached for instant future delivery.\n\n")
                 + small_caps("you will receive a summary when done.")
+            ),
+            reply_markup=InlineKeyboardMarkup([[_back_btn("admin_filter_poster"), _close_btn()]]),
+        )
+        return
+
+    if data.startswith("fp_set_join_btn_"):
+        if not is_admin:
+            return
+        current = (get_setting("env_JOIN_BTN_TEXT", "") or JOIN_BTN_TEXT)
+        user_states[uid] = "AWAITING_JOIN_BTN_TEXT"
+        await safe_edit_text(
+            query,
+            b(small_caps("✏️ set join button text")) + "\n\n"
+            + bq(
+                b(small_caps("current: ")) + f"<code>{e(current)}</code>\n\n"
+                + small_caps("send the new button text.\n")
+                + small_caps("examples: ") + "\n"
+                + "• <code>Join Now</code>\n"
+                + "• <code>Watch Now</code>\n"
+                + "• <code>Get Access</code>\n"
+                + "• <code>Subscribe Free</code>\n"
+                + "• <code>🎌 ᴊᴏɪɴ ᴄʜᴀɴɴᴇʟ</code>\n\n"
+                + small_caps("this text appears on the button below every filter poster.\n")
+                + small_caps("the button opens a direct 5-min invite link — no bot redirect.")
             ),
             reply_markup=InlineKeyboardMarkup([[_back_btn("admin_filter_poster"), _close_btn()]]),
         )
@@ -11872,12 +11958,61 @@ async def button_handler(
                 "af_set_caption", "af_bulk", "af_delete_connection"):
         if not is_admin:
             return
+
+        if data == "af_set_delay":
+            user_states[uid] = "AWAITING_AF_DELAY"
+            await safe_edit_text(
+                query,
+                b(small_caps("⏱ set auto-forward delay")) + "\n\n"
+                + bq(small_caps("send delay in seconds (e.g. 30). send 0 for no delay.")),
+                reply_markup=InlineKeyboardMarkup([[_back_btn("admin_autoforward")]]),
+            )
+            return
+
+        if data == "af_set_caption":
+            user_states[uid] = "AWAITING_AF_CAPTION"
+            await safe_edit_text(
+                query,
+                b(small_caps("✏️ set caption override")) + "\n\n"
+                + bq(small_caps("send the caption text to append to all forwarded messages.\nsend /clear to remove caption override.")),
+                reply_markup=InlineKeyboardMarkup([[_back_btn("admin_autoforward")]]),
+            )
+            return
+
+        if data == "af_replacements_menu":
+            # Show current replacements
+            rows = []
+            try:
+                with db_manager.get_cursor() as cur:
+                    cur.execute("SELECT id, old_pattern, new_pattern FROM auto_forward_replacements ORDER BY id LIMIT 10")
+                    rows = cur.fetchall() or []
+            except Exception:
+                pass
+            text = b(small_caps("🔄 text replacements")) + "\n\n"
+            if rows:
+                for r_id, old_p, new_p in rows:
+                    text += f"• <code>{e(old_p)}</code> → <code>{e(new_p)}</code>\n"
+            else:
+                text += bq(small_caps("no replacements set."))
+            text += "\n\n" + bq(small_caps("to add: /autoforward replacements add old_text new_text"))
+            await safe_edit_text(query, text, reply_markup=InlineKeyboardMarkup([[_back_btn("admin_autoforward")]]))
+            return
+
+        if data == "af_bulk":
+            user_states[uid] = "AWAITING_AF_BULK_COUNT"
+            await safe_edit_text(
+                query,
+                b(small_caps("📦 bulk forward")) + "\n\n"
+                + bq(small_caps("send the number of recent messages to forward from source channel (max 50).")),
+                reply_markup=InlineKeyboardMarkup([[_back_btn("admin_autoforward")]]),
+            )
+            return
+
         label = data.replace("af_", "").replace("_", " ").title()
         await safe_edit_text(
             query,
             b(f"♻️ {label}") + "\n\n"
-            + bq(b("This feature allows fine-grained control over auto-forwarding.\n")
-                 + b("Use /autoforward to access the full manager from the admin panel.")),
+            + bq(b(small_caps("use /autoforward to access the full manager from the admin panel."))),
             reply_markup=InlineKeyboardMarkup([[_back_btn("admin_autoforward")]]),
         )
         return
@@ -11892,7 +12027,7 @@ async def button_handler(
         try:
             with db_manager.get_cursor() as cur:
                 cur.execute(
-                    "SELECT enable_in_dm, enable_in_group FROM auto_forward_filters LIMIT 1"
+                    "SELECT enable_in_dm, enable_in_group FROM auto_forward_filters WHERE connection_id IS NULL LIMIT 1"
                 )
                 row = cur.fetchone()
                 if row:
@@ -11970,16 +12105,22 @@ async def button_handler(
         col = "enable_in_dm" if data == "af_toggle_dm" else "enable_in_group"
         try:
             with db_manager.get_cursor() as cur:
+                # Ensure a global row exists (connection_id = NULL = global)
+                cur.execute("""
+                    INSERT INTO auto_forward_filters (connection_id, enable_in_dm, enable_in_group)
+                    VALUES (NULL, TRUE, TRUE)
+                    ON CONFLICT DO NOTHING
+                """)
                 cur.execute(
-                    f"UPDATE auto_forward_filters SET {col} = NOT {col}"
+                    f"UPDATE auto_forward_filters SET {col} = NOT {col} WHERE connection_id IS NULL"
                 )
                 if cur.rowcount == 0:
                     cur.execute(
-                        "INSERT INTO auto_forward_filters (enable_in_dm, enable_in_group) VALUES (TRUE, TRUE)"
+                        f"INSERT INTO auto_forward_filters (connection_id, {col}) VALUES (NULL, FALSE)"
                     )
         except Exception as exc:
             logger.debug(f"af toggle error: {exc}")
-        await safe_answer(query, "Filter toggled!")
+        await safe_answer(query, small_caps("filter toggled!"))
         await button_handler(update, context, "af_filters_menu")
         return
 
@@ -11991,12 +12132,14 @@ async def button_handler(
         words = ""
         try:
             with db_manager.get_cursor() as cur:
-                cur.execute(f"SELECT {col} FROM auto_forward_filters LIMIT 1")
+                cur.execute(
+                    f"SELECT {col} FROM auto_forward_filters WHERE connection_id IS NULL LIMIT 1"
+                )
                 row = cur.fetchone()
                 if row and row[0]:
                     words = row[0]
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug(f"af_{kind} select error: {exc}")
         await safe_edit_text(
             query,
             b(f" {kind} Words") + "\n\n"
@@ -12309,6 +12452,20 @@ async def button_handler(
             "feat_anime_info":   ("/anime Naruto", "Get landscape poster + full anime info."),
             "feat_afk":          ("/afk reason", "Set AFK status. Bot auto-replies when tagged."),
         }
+        # Special: chatbot toggle is a real toggle, not just info
+        if data == "feat_chatbot":
+            from database_dual import get_setting, set_setting
+            chat_key = f"chatbot_{chat_id}"
+            current = (get_setting(chat_key, "true") or "true").lower()
+            new_val = "false" if current == "true" else "true"
+            set_setting(chat_key, new_val)
+            status = small_caps("enabled ✅") if new_val == "true" else small_caps("disabled 🔕")
+            try:
+                await query.answer(small_caps(f"chatbot {status}"), show_alert=True)
+            except Exception:
+                pass
+            return
+
         info = feat_map.get(data, (data.replace("feat_", "/"), "Feature command."))
         cmd, desc = info
         try:
@@ -12717,35 +12874,8 @@ async def handle_admin_message(
         return
 
     # ── Link generation states ─────────────────────────────────────────────────────
-    # ── Anime name for link generation (Step 1) ─────────────────────────────────
-    if state == GENERATE_LINK_ANIME_NAME:
-        anime_name = text.strip()
-        if not anime_name:
-            msg = await safe_send_message(
-                context.bot, chat_id,
-                b("❌ Please send an anime name. Try again:"),
-                reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="admin_back")]]),
-            )
-            await store_bot_prompt(context, msg)
-            return
-        context.user_data["gen_anime_name"] = anime_name
-        user_states[uid] = GENERATE_LINK_IDENTIFIER
-        msg = await safe_send_message(
-            context.bot, chat_id,
-            b(f"📺 Anime: {e(anime_name)}") + "\n\n"
-            + bq(
-                b("Step 2/2: Send the CHANNEL @username, numeric ID, or forward a post:\n\n")
-                + "• <code>@BeatAnime</code>\n"
-                + "• <code>-1001234567890</code>\n"
-                + "• Forward any message from the channel\n\n"
-                + "<i>Bot must be admin in the channel to create invite links.</i>"
-            ),
-            reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="admin_back")]]),
-        )
-        await store_bot_prompt(context, msg)
-        return
-
-    # ── Channel identifier for link generation (Step 2) ──────────────────────
+    # ── Channel identifier for link generation ───────────────────────────────────
+    # (channel title = filter keyword — no separate anime name step)
     if state == GENERATE_LINK_IDENTIFIER:
         identifier = text.strip()
         # Normalise
@@ -12760,8 +12890,13 @@ async def handle_admin_message(
             user_states[uid] = GENERATE_LINK_TITLE
             msg = await safe_send_message(
                 context.bot, chat_id,
-                b(f"📢 Channel: {e(tg_chat.title or str(tg_chat.id))}") + "\n\n"
-                + bq(b("Send a display title for this link, or /skip to use the channel name:")),
+                b(small_caps(f"📢 channel: {tg_chat.title or str(tg_chat.id)}")) + "\n\n"
+                + bq(
+                    b(small_caps("send the filter keyword / title for this link:")) + "\n\n"
+                    + small_caps("this becomes both the link title and the filter trigger.\n")
+                    + small_caps("example: ") + "<code>Demon Slayer</code>" + small_caps(" or ") + "<code>Jujutsu Kaisen</code>\n\n"
+                    + small_caps("send /skip to use the channel name: ") + f"<code>{e(tg_chat.title or '')}</code>"
+                ),
                 reply_markup=InlineKeyboardMarkup([[bold_button("🔙 Cancel", callback_data="admin_back")]]),
             )
             await store_bot_prompt(context, msg)
@@ -12777,63 +12912,47 @@ async def handle_admin_message(
             await store_bot_prompt(context, msg)
         return
 
-    # ── Link title / final generation (Step 3) ───────────────────────────────
+    # ── Link title / final generation ────────────────────────────────────────────
+    # The title entered here becomes the filter keyword automatically.
+    # No separate table needed — generated_links.channel_title IS the keyword.
     if state == GENERATE_LINK_TITLE:
         title = text.strip()
         if title.lower() == "/skip":
             title = context.user_data.get("gen_ch_title", "")
         ch_id = context.user_data.get("gen_ch_id")
-        anime_name = context.user_data.get("gen_anime_name", title)
         if not ch_id:
             user_states.pop(uid, None)
-            await safe_send_message(context.bot, chat_id, b("Session expired. Start over."))
+            await safe_send_message(context.bot, chat_id, b(small_caps("session expired. start over.")))
             return
         try:
             link_id = generate_link_id(
                 channel_username=ch_id,
                 user_id=uid,
                 never_expires=False,
-                channel_title=title or anime_name,
+                channel_title=title,
                 source_bot_username=BOT_USERNAME,
             )
             deep_link = f"https://t.me/{BOT_USERNAME}?start={link_id}"
-
-            # ── Auto-create filter: anime_name → channel_id ───────────────────
-            try:
-                from database_dual import add_anime_channel_link
-                add_anime_channel_link(
-                    anime_title=anime_name,
-                    channel_id=ch_id,
-                    channel_title=title or anime_name,
-                    link_id=link_id,
-                    added_by=uid,
-                )
-                filter_note = (
-                    "\n\n✅ <b>Filter auto-created!</b>\n"
-                    + bq(
-                        f"Keyword: <code>{e(anime_name)}</code>\n"
-                        "When users type this in any group where the bot is active, "
-                        "they receive a poster + join button for this channel."
-                    )
-                )
-            except Exception as _fe:
-                logger.warning(f"anime_channel_link save failed: {_fe}")
-                filter_note = ""
-
             await safe_send_message(
                 context.bot, chat_id,
-                b(f"✅ Link generated for {e(anime_name)}:") + "\n\n"
-                + bq(code(deep_link))
-                + filter_note,
+                b(small_caps("✅ link generated!")) + "\n\n"
+                + bq(code(deep_link)) + "\n\n"
+                + bq(
+                    b(small_caps("🎌 filter auto-active!")) + "\n"
+                    + small_caps("keyword: ") + f"<code>{e(title)}</code>\n"
+                    + small_caps("when users type ") + f"<b>{e(title)}</b>" + small_caps(" in any group, ")
+                    + small_caps("they get the poster + join button automatically.\n\n")
+                    + small_caps("no extra setup needed — the link title is the filter keyword.")
+                ),
                 reply_markup=_back_kb(),
             )
         except Exception as exc:
             await safe_send_message(
                 context.bot, chat_id,
-                b("❌ Error generating link: ") + code(e(str(exc)[:200])),
+                b(small_caps("❌ error generating link: ")) + code(e(str(exc)[:200])),
             )
         user_states.pop(uid, None)
-        for k in ("gen_ch_id", "gen_ch_title", "gen_anime_name"):
+        for k in ("gen_ch_id", "gen_ch_title"):
             context.user_data.pop(k, None)
         return
 
@@ -13859,6 +13978,62 @@ async def handle_admin_message(
             await safe_send_message(context.bot, chat_id, b("❗ Send a valid number."))
         return
 
+    if state == "AWAITING_AF_DELAY":
+        user_states.pop(uid, None)
+        try:
+            secs = max(0, int(text.strip()))
+            with db_manager.get_cursor() as cur:
+                cur.execute("""
+                    INSERT INTO auto_forward_connections (source_chat_id, target_chat_id, delay_seconds)
+                    VALUES (0, 0, %s) ON CONFLICT DO NOTHING
+                """, (secs,))
+                cur.execute("UPDATE auto_forward_connections SET delay_seconds = %s", (secs,))
+            await safe_send_message(context.bot, chat_id,
+                b(small_caps(f"✅ auto-forward delay set to {secs}s")),
+                reply_markup=InlineKeyboardMarkup([[_back_btn("admin_autoforward"), _close_btn()]]),
+            )
+        except ValueError:
+            await safe_send_message(context.bot, chat_id, b(small_caps("❌ send a valid number of seconds.")))
+        return
+
+    if state == "AWAITING_AF_CAPTION":
+        user_states.pop(uid, None)
+        val = "" if text.strip().lower() in ("/clear", "clear", "none", "remove") else text.strip()
+        try:
+            with db_manager.get_cursor() as cur:
+                cur.execute("""
+                    INSERT INTO auto_forward_filters (connection_id, caption_override)
+                    VALUES (NULL, %s)
+                    ON CONFLICT DO NOTHING
+                """, (val,))
+                cur.execute(
+                    "UPDATE auto_forward_filters SET caption_override = %s WHERE connection_id IS NULL",
+                    (val,)
+                )
+            status = b(small_caps("cleared")) if not val else code(e(val[:80]))
+            await safe_send_message(context.bot, chat_id,
+                b(small_caps("✅ caption override: ")) + status,
+                reply_markup=InlineKeyboardMarkup([[_back_btn("admin_autoforward"), _close_btn()]]),
+            )
+        except Exception as exc:
+            await safe_send_message(context.bot, chat_id, b(small_caps(f"❌ error: {str(exc)[:100]}")))
+        return
+
+    if state == "AWAITING_AF_BULK_COUNT":
+        user_states.pop(uid, None)
+        try:
+            cnt = max(1, min(50, int(text.strip())))
+            # Store for next bulk forward run
+            set_setting("af_bulk_count", str(cnt))
+            await safe_send_message(context.bot, chat_id,
+                b(small_caps(f"✅ bulk forward count set to {cnt} messages.")) + "\n"
+                + bq(small_caps("use /autoforward to run the bulk forward.")),
+                reply_markup=InlineKeyboardMarkup([[_back_btn("admin_autoforward"), _close_btn()]]),
+            )
+        except ValueError:
+            await safe_send_message(context.bot, chat_id, b(small_caps("❌ send a valid number (1-50).")))
+        return
+
     if state == "AWAITING_MOVE_LINKS":
         user_states.pop(uid, None)
         parts = text.strip().split()
@@ -13967,6 +14142,25 @@ async def handle_admin_message(
                 reply_markup=InlineKeyboardMarkup([[_back_btn("admin_filter_poster"), _close_btn()]]))
         except ValueError:
             await safe_send_message(context.bot, chat_id, b("❗ Send a number in seconds."))
+        return
+
+    if state == "AWAITING_JOIN_BTN_TEXT":
+        user_states.pop(uid, None)
+        val = text.strip()
+        if val:
+            set_setting("env_JOIN_BTN_TEXT", val)
+            await safe_send_message(
+                context.bot, chat_id,
+                b(small_caps("✅ join button text updated!")) + "\n"
+                + bq(
+                    b(small_caps("new text: ")) + f"<code>{e(val)}</code>\n"
+                    + small_caps("this will appear on all filter poster join buttons.\n")
+                    + small_caps("the button still opens a direct 5-min expirable invite link.")
+                ),
+                reply_markup=InlineKeyboardMarkup([[_back_btn("admin_filter_poster"), _close_btn()]]),
+            )
+        else:
+            await safe_send_message(context.bot, chat_id, b(small_caps("❌ empty text — not saved.")))
         return
 
     if state == "AWAITING_LINK_EXPIRY_FP":
