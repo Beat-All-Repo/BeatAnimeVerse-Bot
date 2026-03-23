@@ -1223,6 +1223,8 @@ def build_filter_poster_settings_keyboard(chat_id: int = 0) -> Any:
          _b("♻️ CACHE", "fp_view_cache")],
         [_b("CLEAR CACHE", "fp_clear_cache"),
          _b("DB CHANNEL", "fp_channel_info")],
+        [_b("✏️ JOIN BTN TEXT", f"fp_set_join_btn_{chat_id}"),
+         _b("⏱ LINK EXPIRY", "fp_set_linkexpiry")],
         # Pre-generate posters for all registered anime channel links
         [InlineKeyboardButton(
             "🎌 PRE-GEN ALL POSTERS",
