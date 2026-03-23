@@ -296,6 +296,13 @@ BOT_HELP_TEXT: str       = os.getenv("BOT_HELP_TEXT",       "")
 # Options: "mathbold" (default) | "smallcaps"
 BUTTON_STYLE: str = os.getenv("BUTTON_STYLE", "mathbold")
 
+# ── Button style cache — avoids per-button DB call in _build_panel_pages ──────
+# _style_label() was calling get_setting() for EVERY button → 70+ DB roundtrips
+# = up to 1+ min on cold DB. This cache makes admin panel as instant as user panel.
+_CACHED_BUTTON_STYLE: str = ""
+_CACHED_BUTTON_STYLE_TS: float = 0.0
+_BTN_STYLE_TTL: float = 60.0  # re-read DB at most once per minute
+
 # External APIs
 TMDB_API_KEY: str = os.getenv("TMDB_API_KEY", "")
 
@@ -3299,15 +3306,20 @@ def _build_pagination_kb(
 
 def _style_label(label: str) -> str:
     """Apply current button style to label text.
-    Reads BUTTON_STYLE env at runtime so it can be changed without restart.
-    Preserves allowed emojis: ➕ 🔙 ✔️ 🔜 ♻️ ❗ ✨ 🟢 🔴
+    Uses a 60-second in-memory cache so DB is read at most once per minute
+    instead of once per button (which caused 1+ min delay on admin panel).
     """
-    # Get runtime style (can be overridden via admin panel)
-    try:
-        from database_dual import get_setting as _gs
-        style = _gs("button_style", BUTTON_STYLE) or BUTTON_STYLE
-    except Exception:
-        style = BUTTON_STYLE
+    global _CACHED_BUTTON_STYLE, _CACHED_BUTTON_STYLE_TS
+    import time as _t
+    now = _t.monotonic()
+    if not _CACHED_BUTTON_STYLE or (now - _CACHED_BUTTON_STYLE_TS) > _BTN_STYLE_TTL:
+        try:
+            from database_dual import get_setting as _gs
+            _CACHED_BUTTON_STYLE = _gs("button_style", BUTTON_STYLE) or BUTTON_STYLE
+        except Exception:
+            _CACHED_BUTTON_STYLE = BUTTON_STYLE
+        _CACHED_BUTTON_STYLE_TS = now
+    style = _CACHED_BUTTON_STYLE
     # Preserve allowed emojis at start/end
     _ALLOWED_PFXS = ('◀ ','▶ ','✖️ ','🔙 ','🔜 ','➕ ','✔️ ','♻️ ','❗ ','✨ ','🟢 ','🔴 ','◀','▶','✖️','🔙','🔜','➕','✔️','♻️','❗','✨','🟢','🔴')
     prefix = ""
@@ -6118,12 +6130,64 @@ async def id_command(
     )
     if msg.reply_to_message:
         rep = msg.reply_to_message
+        text += "\n\n<b>━━ Replied Message ━━</b>"
+
+        # ── sender_chat: message sent BY a channel (linked group or channel post) ──
+        if rep.sender_chat:
+            sc = rep.sender_chat
+            text += f"\n<b>Sender Chat ID:</b> {code(str(sc.id))}"
+            if sc.title:
+                text += f"\n<b>Sender Title:</b> {e(sc.title)}"
+            if sc.username:
+                text += f"\n<b>Sender Username:</b> @{e(sc.username)}"
+            text += f"\n<b>Sender Type:</b> {code(sc.type)}"
+            # Try to get more info
+            try:
+                full_chat = await context.bot.get_chat(sc.id)
+                if hasattr(full_chat, 'member_count') and full_chat.member_count:
+                    text += f"\n<b>Members:</b> {code(format_number(full_chat.member_count))}"
+                elif hasattr(full_chat, 'get_member_count'):
+                    cnt = await full_chat.get_member_count()
+                    text += f"\n<b>Members:</b> {code(format_number(cnt))}"
+                if full_chat.description:
+                    text += f"\n<b>Description:</b> {e(full_chat.description[:80])}"
+                if not sc.username and full_chat.invite_link:
+                    text += f"\n<b>Invite:</b> {e(full_chat.invite_link)}"
+            except Exception:
+                pass
+
+        # ── from_user: sent by a real user ────────────────────────────────────
         if rep.from_user:
             text += f"\n<b>Replied User ID:</b> {code(str(rep.from_user.id))}"
+            if rep.from_user.username:
+                text += f"\n<b>Username:</b> @{e(rep.from_user.username)}"
+            if rep.from_user.first_name:
+                text += f"\n<b>Name:</b> {e(rep.from_user.first_name)}"
+
+        # ── forward_from: forwarded from a private user ───────────────────────
         if rep.forward_from:
-            text += f"\n<b>Forward User ID:</b> {code(str(rep.forward_from.id))}"
+            text += f"\n<b>Original User ID:</b> {code(str(rep.forward_from.id))}"
+
+        # ── forward_from_chat: forwarded FROM a channel/group ─────────────────
         if rep.forward_from_chat:
-            text += f"\n<b>Forward Chat ID:</b> {code(str(rep.forward_from_chat.id))}"
+            fc = rep.forward_from_chat
+            text += f"\n<b>Forwarded From Chat ID:</b> {code(str(fc.id))}"
+            if fc.title:
+                text += f"\n<b>Channel Title:</b> {e(fc.title)}"
+            if fc.username:
+                text += f"\n<b>Channel Username:</b> @{e(fc.username)}"
+            text += f"\n<b>Channel Type:</b> {code(fc.type)}"
+            # Try to get subscriber/member count
+            try:
+                full_fc = await context.bot.get_chat(fc.id)
+                if hasattr(full_fc, 'member_count') and full_fc.member_count:
+                    text += f"\n<b>Subscribers:</b> {code(format_number(full_fc.member_count))}"
+                if full_fc.description:
+                    text += f"\n<b>Description:</b> {e(full_fc.description[:80])}"
+            except Exception:
+                pass
+
+        # ── Media file IDs ────────────────────────────────────────────────────
         if rep.sticker:
             text += f"\n<b>Sticker File ID:</b>\n{code(rep.sticker.file_id)}"
         if rep.photo:
@@ -6904,7 +6968,10 @@ async def inline_query_handler(
 async def group_message_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle messages in bot-connected groups with auto-delete support."""
+    """Handle messages in groups — anime/manga/movie commands + filter poster.
+    Does NOT require the group to be in connected_groups to respond.
+    Commands like /ban /mute /del are handled by their own registered handlers.
+    """
     if not update.message or not update.effective_chat:
         return
     if get_setting("group_commands_enabled", "true") != "true":
@@ -6912,7 +6979,29 @@ async def group_message_handler(
     if not _passes_filter(update):
         return
 
+    text = update.message.text or ""
+    lower = text.lower()
+
+    # ── Inline content commands (work in ANY group, no DB check needed) ────────
+    for prefix, category in [
+        ("/anime ", "anime"), ("/manga ", "manga"),
+        ("/movie ", "movie"), ("/tvshow ", "tvshow"),
+    ]:
+        if lower.startswith(prefix):
+            query_text = text[len(prefix):].strip()
+            if query_text:
+                await generate_and_send_post(context, update.effective_chat.id, category, query_text)
+            return
+
+    # ── Filter-Poster Integration (works in any group with setting enabled) ──
     chat_id = update.effective_chat.id
+    if _FILTER_POSTER_AVAILABLE and _get_filter_poster_enabled(chat_id):
+        asyncio.create_task(
+            _handle_anime_filter(update, context, lower)
+        )
+        return
+
+    # ── Auto-delete for connected groups only ─────────────────────────────────
     try:
         with db_manager.get_cursor() as cur:
             cur.execute(
@@ -6924,12 +7013,7 @@ async def group_message_handler(
     except Exception:
         return
 
-    text = update.message.text or ""
-    lower = text.lower()
     auto_del = get_setting("auto_delete_messages", "true") == "true"
-    del_delay = int(get_setting("auto_delete_delay", "60"))
-
-    # Schedule auto-delete of user command after 5 seconds
     if auto_del:
         async def _del_user_cmd(msg=update.message):
             await asyncio.sleep(5)
@@ -6938,33 +7022,6 @@ async def group_message_handler(
             except Exception:
                 pass
         asyncio.create_task(_del_user_cmd())
-
-    async def _group_post_with_autodel(category: str, query_text: str) -> None:
-        await generate_and_send_post(context, chat_id, category, query_text)
-
-    for prefix, category in [
-        ("/anime ", "anime"), ("/manga ", "manga"),
-        ("/movie ", "movie"), ("/tvshow ", "tvshow"),
-    ]:
-        if lower.startswith(prefix):
-            query_text = text[len(prefix):].strip()
-            if query_text:
-                await _group_post_with_autodel(category, query_text)
-            return
-
-    # ── Filter-Poster Integration ──────────────────────────────────────────────
-    # New logic:
-    #   1. Check if the message text matches any anime_channel_link keyword
-    #   2. If yes: check filter_poster_cache for a pre-built poster (file_id)
-    #   3. If cached: send instantly via file_id + expirable join button
-    #   4. If not cached: generate via poster_engine → save to POSTER_DB_CHANNEL
-    #      → cache file_id for future fast sends → send to user
-    #   5. Button = expirable Telegram invite link for the linked channel
-    #   6. Only fires for anime titles that have a generated channel link
-    if _FILTER_POSTER_AVAILABLE and _get_filter_poster_enabled(chat_id):
-        asyncio.create_task(
-            _handle_anime_filter(update, context, lower)
-        )
 
 
 async def _handle_anime_filter(
@@ -14428,9 +14485,10 @@ async def _clean_gc_command_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """
-    Delete ALL commands sent in groups silently after a short delay.
-    The bot still processes the command — this just keeps the chat clean.
+    Delete commands sent in groups silently AFTER a delay (so bot can still process them).
     Only runs when clean_gc_enabled = true.
+    NOTE: This runs at NORMAL priority (group=5) so it does NOT block command handlers.
+    The actual command handler fires first, then this deletes the user's command message.
     """
     if not update.message or not update.effective_chat:
         return
@@ -14439,9 +14497,9 @@ async def _clean_gc_command_handler(
     msg = update.message
     chat_id = msg.chat_id
     msg_id  = msg.message_id
-    # Wait 3 seconds so the bot response arrives before deleting the command
+    # Wait 5 seconds so bot can process and respond first
     async def _delayed_del():
-        await asyncio.sleep(3)
+        await asyncio.sleep(5)
         try:
             await context.bot.delete_message(chat_id, msg_id)
         except Exception:
@@ -14511,18 +14569,42 @@ def main() -> None:
                 continue
             try:
                 _mod = importlib.import_module(f"modules.{_mn}")
-                # Wire dispatcher if module needs it
-                if hasattr(_mod, "dispatcher") and _mod.dispatcher is None:
-                    try:
-                        _mod.dispatcher = application.dispatcher if hasattr(application, "dispatcher") else None
-                    except Exception:
-                        pass
                 _loaded.append(_mn)
             except Exception as _exc:
                 logger.warning(f"Module {_mn} failed to load: {_exc}")
         logger.info(f"✅ Loaded {len(_loaded)} BeatVerse modules: {_loaded}")
     except Exception as _exc:
         logger.warning(f"Module loading error: {_exc}")
+
+    # ── CRITICAL: Wire BeatVerse module handlers onto PTB v21 Application ───────
+    # All modules called dispatcher.add_handler() during import → queued in
+    # _LazyDispatcher. Now replay them onto the real Application so /ban /mute
+    # /purge etc. actually work in groups.
+    import beataniversebot_compat as _compat2
+    try:
+        # Create a bridge object so _LazyDispatcher._replay() can call app.add_handler
+        class _AppDispatcherBridge:
+            """Makes PTB v21 Application look like PTB v13 dispatcher for module handler replay."""
+            def __init__(self, app):
+                self._app = app
+            def add_handler(self, handler, group=0, *args, **kwargs):
+                try:
+                    self._app.add_handler(handler, group=group)
+                except Exception as _err:
+                    logger.debug(f"Module handler skip: {_err}")
+            def add_error_handler(self, handler, *args, **kwargs):
+                try:
+                    self._app.add_error_handler(handler)
+                except Exception:
+                    pass
+            @property
+            def bot(self):
+                return self._app.bot
+        _bridge = _AppDispatcherBridge(application)
+        _compat2._set_dispatcher(_bridge)
+        logger.info("✅ BeatVerse module handlers wired onto Application")
+    except Exception as _wire_err:
+        logger.warning(f"Module handler wiring failed: {_wire_err}")
 
     # ── Register all handlers ────────────────────────────────────────────────────
     admin_filter = filters.User(user_id=ADMIN_ID) | filters.User(user_id=OWNER_ID)
@@ -14545,8 +14627,8 @@ def main() -> None:
     application.add_handler(CommandHandler("stats", stats_command, filters=admin_filter))
     application.add_handler(CommandHandler("sysstats", sysstats_command, filters=admin_filter))
     application.add_handler(CommandHandler("users", users_command, filters=admin_filter))
-    application.add_handler(CommandHandler("cmd", cmd_command, filters=admin_filter))
-    application.add_handler(CommandHandler("commands", cmd_command, filters=admin_filter))
+    application.add_handler(CommandHandler("cmd", cmd_command))
+    application.add_handler(CommandHandler("commands", cmd_command))
     application.add_handler(CommandHandler("upload", upload_command, filters=admin_filter))
     application.add_handler(CommandHandler("settings", settings_command, filters=admin_filter))
     application.add_handler(CommandHandler("autoupdate", autoupdate_command, filters=admin_filter))
@@ -14637,15 +14719,17 @@ def main() -> None:
             filters.ChatType.GROUPS & filters.StatusUpdate.ALL,
             _clean_gc_service_handler,
         ),
-        group=-1,  # High priority
+        group=5,  # Normal priority — does NOT block command handlers
     )
-    # ── Clean GC: delete all commands in groups silently ──────────────────────
+    # ── Clean GC: delete commands in groups silently AFTER processing ────────────
+    # group=5 = runs AFTER command handlers (lower number = higher priority in PTB)
+    # This ensures /ban /mute /pin etc. execute first, THEN the message is cleaned
     application.add_handler(
         MessageHandler(
             filters.ChatType.GROUPS & filters.COMMAND,
             _clean_gc_command_handler,
         ),
-        group=-1,
+        group=5,
     )
 
         
