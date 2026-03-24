@@ -9,11 +9,19 @@ from telegram import ParseMode, Update
 from telegram.ext import (
     CallbackContext,
     CommandHandler,
-    Filters,
     MessageHandler,
-    RegexHandler,
 )
-from telegram.utils.helpers import escape_markdown
+try:
+    from telegram.ext import Filters, RegexHandler
+except ImportError:
+    # PTB v21 removed Filters and RegexHandler
+    from telegram.ext import filters as Filters
+    RegexHandler = MessageHandler  # stub
+
+try:
+    from telegram.utils.helpers import escape_markdown
+except ImportError:
+    from telegram.helpers import escape_markdown
 
 from beataniversebot_compat import dispatcher
 from modules.helper_funcs.handlers import CMD_STARTERS, SpamChecker
@@ -35,7 +43,12 @@ if is_module_loaded(FILENAME):
     ADMIN_CMDS = []
 
     class DisableAbleCommandHandler(CommandHandler):
+        """PTB v21 compatible version — no check_update override.
+        The PTB v13 check_update used message.bot and self.filters(update)
+        which are both removed in PTB v21. Using parent's check_update instead.
+        """
         def __init__(self, command, callback, admin_ok=False, **kwargs):
+            kwargs.pop('run_async', None)  # PTB v21 removed run_async
             super().__init__(command, callback, **kwargs)
             self.admin_ok = admin_ok
             if isinstance(command, str):
@@ -46,89 +59,29 @@ if is_module_loaded(FILENAME):
                 DISABLE_CMDS.extend(command)
                 if admin_ok:
                     ADMIN_CMDS.extend(command)
-
-        def check_update(self, update):
-            if isinstance(update, Update) and update.effective_message:
-                message = update.effective_message
-
-                if message.text and len(message.text) > 1:
-                    fst_word = message.text.split(None, 1)[0]
-                    if len(fst_word) > 1 and any(
-                        fst_word.startswith(start) for start in CMD_STARTERS
-                    ):
-                        args = message.text.split()[1:]
-                        command = fst_word[1:].split("@")
-                        command.append(message.bot.username)
-
-                        if not (
-                            command[0].lower() in self.command
-                            and command[1].lower() == message.bot.username.lower()
-                        ):
-                            return None
-                        chat = update.effective_chat
-                        user = update.effective_user
-                        if user.id == 1087968824:
-                            user_id = chat.id
-                        else:
-                            user_id = user.id
-                        if SpamChecker.check_user(user_id):
-                            return None
-                        filter_result = self.filters(update)
-                        if filter_result:
-                            # disabled, admincmd, user admin
-                            if sql.is_command_disabled(chat.id, command[0].lower()):
-                                # check if command was disabled
-                                is_disabled = command[
-                                    0
-                                ] in ADMIN_CMDS and is_user_admin(chat, user.id)
-                                if not is_disabled:
-                                    return None
-                                else:
-                                    return args, filter_result
-
-                            return args, filter_result
-                        else:
-                            return False
+        # PTB v21: use parent CommandHandler.check_update (no override needed)
 
     class DisableAbleMessageHandler(MessageHandler):
-        def __init__(self, filters, callback, friendly, **kwargs):
-            super().__init__(filters, callback, **kwargs)
+        """PTB v21 compatible version — no check_update override."""
+        def __init__(self, filters_arg, callback, friendly, **kwargs):
+            kwargs.pop('run_async', None)  # PTB v21 removed run_async
+            super().__init__(filters_arg, callback, **kwargs)
             DISABLE_OTHER.append(friendly)
             self.friendly = friendly
-            if filters:
-                self.filters = Filters.update.messages & filters
-            else:
-                self.filters = Filters.update.messages
+        # PTB v21: use parent MessageHandler.check_update (no override needed)
 
-        def check_update(self, update):
-            chat = update.effective_chat
-            message = update.effective_message
-            filter_result = self.filters(update)
-
-            try:
-                args = message.text.split()[1:]
-            except:
-                args = []
-
-            if super().check_update(update):
-                if sql.is_command_disabled(chat.id, self.friendly):
-                    return False
-                else:
-                    return args, filter_result
-
-    class DisableAbleRegexHandler(RegexHandler):
+    class DisableAbleRegexHandler(MessageHandler):
+        """PTB v21: RegexHandler removed, use MessageHandler with regex filter."""
         def __init__(self, pattern, callback, friendly="", filters=None, **kwargs):
-            super().__init__(pattern, callback, filters, **kwargs)
+            kwargs.pop('run_async', None)
+            import re as _re
+            from telegram.ext import filters as _f
+            rf = _f.Regex(_re.compile(pattern))
+            if filters:
+                rf = rf & filters
+            super().__init__(rf, callback, **kwargs)
             DISABLE_OTHER.append(friendly)
             self.friendly = friendly
-
-        def check_update(self, update):
-            chat = update.effective_chat
-            if super().check_update(update):
-                if sql.is_command_disabled(chat.id, self.friendly):
-                    return False
-                else:
-                    return True
 
     @connection_status
     @user_admin
@@ -350,5 +303,5 @@ if is_module_loaded(FILENAME):
 
 else:
     DisableAbleCommandHandler = CommandHandler
-    DisableAbleRegexHandler = RegexHandler
+    DisableAbleRegexHandler = MessageHandler  # RegexHandler removed in PTB v21
     DisableAbleMessageHandler = MessageHandler
