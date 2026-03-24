@@ -12,6 +12,7 @@ PORT is read from the PORT environment variable (Render sets this to 10000).
 Fallback is 10000 if the variable is not set.
 """
 import os
+import aiohttp
 from aiohttp import web
 import logging
 from datetime import datetime
@@ -93,6 +94,28 @@ class HealthCheckServer:
             status=200,
         )
 
+    async def _self_ping_loop(self) -> None:
+        """
+        Self-ping loop: hits /health every 10 minutes to prevent Render free-tier
+        spin-down (which happens after 15 min of no HTTP traffic).
+        Also sends a Telegram getMe() call to keep the bot connection warm.
+        """
+        import asyncio as _aio
+        await _aio.sleep(60)  # wait 1 min after startup before first ping
+        while True:
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        f"http://localhost:{self.port}/health",
+                        timeout=aiohttp.ClientTimeout(total=10),
+                    ) as resp:
+                        if resp.status == 200:
+                            self.last_activity = datetime.now()
+                            logger.debug("[keep-alive] self-ping OK")
+            except Exception as exc:
+                logger.debug(f"[keep-alive] self-ping failed (non-fatal): {exc}")
+            await _aio.sleep(600)  # ping every 10 minutes
+
     async def start(self) -> None:
         try:
             self.runner = web.AppRunner(self.app)
@@ -104,6 +127,10 @@ class HealthCheckServer:
             logger.info(f"   -> /ping    (JSON status)")
             logger.info(f"   -> /readme  (HTML README viewer)")
             logger.info(f"   -> /docs    (alias for /readme)")
+            # Start keep-alive loop to prevent Render free-tier spin-down
+            import asyncio as _aio
+            _aio.ensure_future(self._self_ping_loop())
+            logger.info("   -> keep-alive loop started (pings /health every 10 min)")
         except Exception as exc:
             logger.error(f"Failed to start health server: {exc}")
 
