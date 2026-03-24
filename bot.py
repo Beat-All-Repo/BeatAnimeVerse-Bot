@@ -3597,15 +3597,17 @@ async def get_panel_pic_async(panel_type: str = "default") -> Optional[str]:
 
 
 # ── Pre-built cached panel pages (rebuilt once on first call / after TTL) ─────
-_PANEL_PAGES: dict = {}       # page_num → (text, InlineKeyboardMarkup)
+_PANEL_PAGES: dict = {}       # page_num → InlineKeyboardMarkup (frozen at build time)
 _PANEL_PAGES_TS: float = 0.0
-_PANEL_PAGES_TTL: float = 60.0   # rebuild markup every 60 s
+_PANEL_PAGES_TTL: float = 180.0  # rebuild markup every 3 min (flags change rarely)
 
 
 def _build_panel_pages(maint: bool, clone_red: bool, clean_gc: bool) -> dict:
     """
     5-page admin panel, 4x3 grid (12 buttons per page).
     Pre-built as InlineKeyboardMarkup objects — zero build time on open.
+    SHORT callback_data codes (<= 6 chars each) keep JSON payload tiny (~400 bytes
+    vs ~5 KB with full strings). Aliases resolved in button_handler via _CB_ALIAS.
     """
     maint_icon = "🔴" if maint     else "🟢"
     gc_icon    = "✔️" if clean_gc  else "❗"
@@ -3643,79 +3645,56 @@ def _build_panel_pages(maint: bool, clone_red: bool, clean_gc: bool) -> dict:
         rows.append(_nav(num))
         return InlineKeyboardMarkup(rows)
 
+    # ── Buttons use SHORT codes — aliases resolved in button_handler ──────────
     main_btns = [
-        _btn("STATS",      "admin_stats"),
-        _btn("BROADCAST",  "admin_broadcast_start"),
-        _btn("USERS",      "user_management"),
-        _btn("CHANNELS",   "manage_force_sub"),
-        _btn("LINKS",      "generate_links"),
-        _btn("CLONES",     "manage_clones"),
-        _btn("SETTINGS",   "admin_settings"),
-        _btn("CATEGORY",   "admin_category_settings"),
-        _btn("UPLOAD",     "upload_menu"),
-        _btn("FILTERS",    "admin_filter_settings"),
-        _btn("POSTER DB",  "admin_filter_poster"),
-        _btn("🚩 FLAGS",   "admin_feature_flags"),
+        _btn("STATS",      "a_st"),   _btn("BROADCAST",  "a_bc"),
+        _btn("USERS",      "a_um"),   _btn("CHANNELS",   "a_fs"),
+        _btn("LINKS",      "a_gl"),   _btn("CLONES",     "a_cl"),
+        _btn("SETTINGS",   "a_se"),   _btn("CATEGORY",   "a_cs"),
+        _btn("UPLOAD",     "a_up"),   _btn("FILTERS",    "a_fil"),
+        _btn("POSTER DB",  "a_fp"),   _btn("🚩 FLAGS",   "a_ff"),
     ]
     tools_btns = [
-        _btn("♻️ AUTO FWD",  "admin_autoforward"),
-        _btn("MANGA",        "admin_autoupdate"),
-        _btn("STYLE",        "admin_text_style"),
-        _btn("SYSTEM",       "admin_sysstats"),
-        _btn("LOGS",         "admin_logs"),
-        _btn("RESTART",      "admin_restart_confirm"),
-        _btn("IMP USERS",    "admin_import_users"),
-        _btn("IMP LINKS",    "admin_import_links"),
-        _btn("EXP USERS",    "admin_export_users_quick"),
-        _btn("DB CLEAN",     "dbcleanup_confirm"),
-        _btn("PANELS",       "panel_img_add_urls"),
-        _btn("ENV VARS",     "admin_env_panel"),
+        _btn("♻️ AUTO FWD","a_af"),   _btn("MANGA",      "a_au"),
+        _btn("STYLE",      "a_ts"),   _btn("SYSTEM",     "a_ss"),
+        _btn("LOGS",       "a_lg"),   _btn("RESTART",    "a_rs"),
+        _btn("IMP USERS",  "a_iu"),   _btn("IMP LINKS",  "a_il"),
+        _btn("EXP USERS",  "a_eu"),   _btn("DB CLEAN",   "a_dc"),
+        _btn("PANELS",     "a_pi"),   _btn("ENV VARS",   "a_ev"),
     ]
     feat_btns = [
-        _btn("COUPLE",       "feat_couple"),
-        _btn("SLAP",         "feat_slap"),
-        _btn("HUG",          "feat_hug"),
-        _btn("KISS",         "feat_kiss"),
-        _btn("PAT",          "feat_pat"),
-        _btn("INLINE",       "feat_inline_search"),
-        _btn("REACTIONS",    "feat_reactions"),
-        _btn("CHATBOT",      "feat_chatbot"),
-        _btn("T/DARE",       "feat_truth_dare"),
-        _btn("NOTES",        "feat_notes"),
-        _btn("⚠️ WARNS",     "feat_warns"),
-        _btn("MUTE",         "feat_muting"),
+        _btn("COUPLE",     "f_cp"),   _btn("SLAP",       "f_sl"),
+        _btn("HUG",        "f_hg"),   _btn("KISS",       "f_ks"),
+        _btn("PAT",        "f_pt"),   _btn("INLINE",     "f_is"),
+        _btn("REACTIONS",  "f_rc"),   _btn("CHATBOT",    "f_cb"),
+        _btn("T/DARE",     "f_td"),   _btn("NOTES",      "f_nt"),
+        _btn("⚠️ WARNS",  "f_wn"),   _btn("MUTE",       "f_mt"),
     ]
     poster_btns = [
-        _btn("ANI",          "poster_cmd_ani"),
-        _btn("🔴 NET",       "poster_cmd_net"),
-        _btn("CRUN",         "poster_cmd_crun"),
-        _btn("DARK",         "poster_cmd_dark"),
-        _btn("LIGHT",        "poster_cmd_light"),
-        _btn("✨ MOD",       "poster_cmd_mod"),
-        _btn("BANS",         "feat_bans"),
-        _btn("RULES",        "feat_rules"),
-        _btn("AIRING",       "feat_airing"),
-        _btn("CHAR",         "feat_character"),
-        _btn("ANIME INFO",   "feat_anime_info"),
-        _btn("AFK",          "feat_afk"),
+        _btn("ANI",        "p_an"),   _btn("🔴 NET",     "p_nt"),
+        _btn("CRUN",       "p_cr"),   _btn("DARK",       "p_dk"),
+        _btn("LIGHT",      "p_lt"),   _btn("✨ MOD",     "p_md"),
+        _btn("BANS",       "f_bn"),   _btn("RULES",      "f_rl"),
+        _btn("AIRING",     "f_ar"),   _btn("CHAR",       "f_ch"),
+        _btn("ANIME INFO", "f_ai"),   _btn("AFK",        "f_ak"),
     ]
     all_mods = [
-        _btn("ADMIN",      "mod_admin"),      _btn("ANTIFLOOD",  "mod_antiflood"),
-        _btn("APPROVE",    "mod_approve"),    _btn("BLACKLIST",  "mod_blacklist"),
-        _btn("BL STICKER", "mod_blsticker"),  _btn("CHATBOT",    "mod_chatbot"),
-        _btn("CLEANER",    "mod_cleaner"),    _btn("CONNECTION", "mod_connection"),
-        _btn("CURRENCY",   "mod_currency"),   _btn("FILTERS",    "mod_custfilters"),
-        _btn("GBAN",       "mod_globalbans"), _btn("IMDB",       "mod_imdb"),
-        _btn("LOCKS",      "mod_locks"),      _btn("LOGCHAN",    "mod_logchannel"),
-        _btn("PING",       "mod_ping"),       _btn("PURGE",      "mod_purge"),
-        _btn("REPORTING",  "mod_reporting"),  _btn("SED",        "mod_sed"),
-        _btn("SHELL",      "mod_shell"),      _btn("SPEEDTEST",  "mod_speedtest"),
-        _btn("STICKERS",   "mod_stickers"),   _btn("TAGALL",     "mod_tagall"),
-        _btn("TRANSLATE",  "mod_translator"), _btn("TRUTH/DARE", "mod_truthdare"),
-        _btn("UD",         "mod_ud"),         _btn("WALLPAPER",  "mod_wallpaper"),
-        _btn("WIKI",       "mod_wiki"),       _btn("WRITE",      "mod_writetool"),
-        _btn("ANIMEQUOTE", "mod_animequotes"),_btn("GETTIME",    "mod_gettime"),
-        _btn("BAD WORDS",  "mod_badwords"),
+        _btn("ADMIN",      "m_ad"),   _btn("ANTIFLOOD",  "m_af"),
+        _btn("APPROVE",    "m_ap"),   _btn("BLACKLIST",  "m_bl"),
+        _btn("BL STICKER", "m_bs"),   _btn("CHATBOT",    "m_cb"),
+        _btn("CLEANER",    "m_cl"),   _btn("CONNECTION", "m_cn"),
+        _btn("CURRENCY",   "m_cu"),   _btn("FILTERS",    "m_cf"),
+        _btn("GBAN",       "m_gb"),   _btn("IMDB",       "m_im"),
+        _btn("LOCKS",      "m_lk"),   _btn("LOGCHAN",    "m_lc"),
+        _btn("PING",       "m_pg"),   _btn("PURGE",      "m_pu"),
+        _btn("REPORTING",  "m_rp"),   _btn("SED",        "m_sd"),
+        _btn("SHELL",      "m_sh"),   _btn("SPEEDTEST",  "m_sp"),
+        _btn("STICKERS",   "m_st"),   _btn("TAGALL",     "m_ta"),
+        _btn("TRANSLATE",  "m_tr"),   _btn("TRUTH/DARE", "m_tt"),
+        _btn("UD",         "m_ud"),   _btn("WALLPAPER",  "m_wp"),
+        _btn("WIKI",       "m_wk"),   _btn("WRITE",      "m_wr"),
+        _btn("ANIMEQUOTE", "m_aq"),   _btn("GETTIME",    "m_gt"),
+        _btn("BAD WORDS",  "m_bw"),
     ]
 
     return {
@@ -3725,6 +3704,57 @@ def _build_panel_pages(maint: bool, clone_red: bool, clean_gc: bool) -> dict:
         3: _page(3, "POSTER",   poster_btns),
         4: _page(4, "MODULES",  all_mods),
     }, status_line
+
+
+# ── Short-code alias map: short → canonical callback_data ────────────────────
+# button_handler resolves these before the main if/elif chain runs.
+_CB_ALIAS: dict = {
+    # Main page
+    "a_st":  "admin_stats",            "a_bc":  "admin_broadcast_start",
+    "a_um":  "user_management",        "a_fs":  "manage_force_sub",
+    "a_gl":  "generate_links",         "a_cl":  "manage_clones",
+    "a_se":  "admin_settings",         "a_cs":  "admin_category_settings",
+    "a_up":  "upload_menu",            "a_fil": "admin_filter_settings",
+    "a_fp":  "admin_filter_poster",    "a_ff":  "admin_feature_flags",
+    # Tools page
+    "a_af":  "admin_autoforward",      "a_au":  "admin_autoupdate",
+    "a_ts":  "admin_text_style",       "a_ss":  "admin_sysstats",
+    "a_lg":  "admin_logs",             "a_rs":  "admin_restart_confirm",
+    "a_iu":  "admin_import_users",     "a_il":  "admin_import_links",
+    "a_eu":  "admin_export_users_quick","a_dc": "dbcleanup_confirm",
+    "a_pi":  "panel_img_add_urls",     "a_ev":  "admin_env_panel",
+    # Features page
+    "f_cp":  "feat_couple",            "f_sl":  "feat_slap",
+    "f_hg":  "feat_hug",               "f_ks":  "feat_kiss",
+    "f_pt":  "feat_pat",               "f_is":  "feat_inline_search",
+    "f_rc":  "feat_reactions",         "f_cb":  "feat_chatbot",
+    "f_td":  "feat_truth_dare",        "f_nt":  "feat_notes",
+    "f_wn":  "feat_warns",             "f_mt":  "feat_muting",
+    # Poster page
+    "p_an":  "poster_cmd_ani",         "p_nt":  "poster_cmd_net",
+    "p_cr":  "poster_cmd_crun",        "p_dk":  "poster_cmd_dark",
+    "p_lt":  "poster_cmd_light",       "p_md":  "poster_cmd_mod",
+    "f_bn":  "feat_bans",              "f_rl":  "feat_rules",
+    "f_ar":  "feat_airing",            "f_ch":  "feat_character",
+    "f_ai":  "feat_anime_info",        "f_ak":  "feat_afk",
+    # Modules page
+    "m_ad":  "mod_admin",              "m_af":  "mod_antiflood",
+    "m_ap":  "mod_approve",            "m_bl":  "mod_blacklist",
+    "m_bs":  "mod_blsticker",          "m_cb":  "mod_chatbot",
+    "m_cl":  "mod_cleaner",            "m_cn":  "mod_connection",
+    "m_cu":  "mod_currency",           "m_cf":  "mod_custfilters",
+    "m_gb":  "mod_globalbans",         "m_im":  "mod_imdb",
+    "m_lk":  "mod_locks",              "m_lc":  "mod_logchannel",
+    "m_pg":  "mod_ping",               "m_pu":  "mod_purge",
+    "m_rp":  "mod_reporting",          "m_sd":  "mod_sed",
+    "m_sh":  "mod_shell",              "m_sp":  "mod_speedtest",
+    "m_st":  "mod_stickers",           "m_ta":  "mod_tagall",
+    "m_tr":  "mod_translator",         "m_tt":  "mod_truthdare",
+    "m_ud":  "mod_ud",                 "m_wp":  "mod_wallpaper",
+    "m_wk":  "mod_wiki",               "m_wr":  "mod_writetool",
+    "m_aq":  "mod_animequotes",        "m_gt":  "mod_gettime",
+    "m_bw":  "mod_badwords",
+}
 
 
 async def send_admin_menu(
@@ -3789,7 +3819,17 @@ async def send_admin_menu(
         )
     )
 
-    img_url = get_panel_pic("admin")
+    # ── ULTRA-FAST PATH: page navigation only swaps the keyboard ─────────────────
+    # Caption is identical on all pages → edit_message_reply_markup (~20ms, 1 call)
+    if query and query.message and query.message.reply_markup:
+        try:
+            await query.message.edit_reply_markup(reply_markup=markup)
+            return
+        except Exception as exc:
+            err = str(exc).lower()
+            if "not modified" in err:
+                return  # already showing this page
+            # Fall through to full panel delivery
 
     await _deliver_panel(
         context.bot, chat_id, "admin",
@@ -9320,6 +9360,8 @@ async def button_handler(
             pass  # Already answered or expired — never block on this
 
     data = _data_override if _data_override is not None else (query.data or "")
+    # ── Resolve short-code aliases (admin panel buttons use short codes) ──────────
+    data = _CB_ALIAS.get(data, data)
     uid = query.from_user.id if query.from_user else 0
     chat_id = query.message.chat_id if query.message else uid
 
