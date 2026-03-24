@@ -1124,34 +1124,64 @@ async def _deliver_panel(
     query=None,
 ) -> bool:
     """
-    Ultra-fast panel delivery using pre-stored file_ids.
+    Ultra-fast panel delivery — primary path: edit_media in-place (1 API call ≈ 50ms).
 
-    Flow:
-      1. Delete triggering message (if any)
-      2. Check panel store for pre-cached file_id
-      3a. If found: send_photo with cached file_id + keyboard (CDN-speed, ~50ms)
-      3b. If not found: get_panel_pic() → send_photo → store file_id for next time
+    Speed priority:
+      1. query.message has a photo → edit_media() in-place — INSTANT, no flash, 1 call
+      2. query.message is text only → edit_message_text() in-place
+      3. No query or edit failed → delete old + send_photo (cached file_id)
       4. Text fallback if no photo available at all
 
-    The inline keyboard is always attached fresh (contains dynamic data like
-    toggle states) — only the photo is cached/reused.
+    The inline keyboard is always attached fresh (contains dynamic toggle states).
+    Only the photo is cached/reused. Caption always updated.
     """
-    # ── Step 1: Delete old message ─────────────────────────────────────────────
+    # ── Get cached file_id (synchronous, <1ms) ─────────────────────────────────
+    stored = _ps_get(panel_type)
+    photo_to_send = stored["file_id"] if stored else None
+    if not photo_to_send:
+        photo_to_send = get_panel_pic(panel_type)
+
+    # ── FAST PATH 1: edit photo in-place — no delete, no flash ────────────────
+    if query and query.message and query.message.photo and photo_to_send:
+        try:
+            await query.message.edit_media(
+                media=InputMediaPhoto(
+                    media=photo_to_send,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                ),
+                reply_markup=reply_markup,
+            )
+            if not stored:
+                _ps_set(panel_type, photo_to_send, caption)
+            return True
+        except Exception as exc:
+            err = str(exc).lower()
+            # Bad file_id → clear and re-try fresh
+            if any(k in err for k in ("wrong", "file", "media", "invalid", "not found")):
+                _ps_invalidate(panel_type)
+                photo_to_send = get_panel_pic(panel_type)
+            # else fall through to delete+send
+
+    # ── FAST PATH 2: existing message is text-only → edit_message_text ─────────
+    if query and query.message and not query.message.photo and not photo_to_send:
+        try:
+            await query.edit_message_text(
+                text=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup,
+            )
+            return True
+        except Exception:
+            pass
+
+    # ── NORMAL PATH: delete old + send new ─────────────────────────────────────
     if query and query.message:
         try:
             await query.message.delete()
         except Exception:
             pass
 
-    # ── Step 2: Look up cached file_id ─────────────────────────────────────────
-    stored = _ps_get(panel_type)
-    photo_to_send = stored["file_id"] if stored else None
-
-    # ── Step 3a: If no cached file_id, get from panel image system ─────────────
-    if not photo_to_send:
-        photo_to_send = get_panel_pic(panel_type)
-
-    # ── Step 3b: Send ──────────────────────────────────────────────────────────
     if photo_to_send:
         try:
             sent = await bot.send_photo(
@@ -1161,11 +1191,9 @@ async def _deliver_panel(
                 parse_mode=ParseMode.HTML,
                 reply_markup=reply_markup,
             )
-            # ── Store file_id for next time (if not already stored) ───────────
             if sent and sent.photo and not stored:
                 fid = sent.photo[-1].file_id
                 _ps_set(panel_type, fid, caption)
-                # Also update panel_image cache
                 if _PANEL_IMAGE_AVAILABLE:
                     try:
                         from panel_image import set_tg_fileid
@@ -1176,10 +1204,9 @@ async def _deliver_panel(
             return True
         except Exception as exc:
             logger.debug(f"_deliver_panel photo failed for {panel_type}: {exc}")
-            # Invalidate bad file_id
             _ps_invalidate(panel_type)
 
-    # ── Step 4: Text fallback ──────────────────────────────────────────────────
+    # ── Text fallback ──────────────────────────────────────────────────────────
     try:
         await bot.send_message(
             chat_id=chat_id,
@@ -1239,7 +1266,7 @@ async def _prebuild_all_panels(bot) -> None:
                         pass
                 logger.debug(f"[panel_store] pre-built {ptype}")
 
-            await asyncio.sleep(0.3)  # small delay between sends
+            await asyncio.sleep(0.1)  # small delay between sends
 
         except Exception as exc:
             logger.debug(f"[panel_store] pre-build {ptype} failed: {exc}")
@@ -1562,19 +1589,18 @@ async def loading_animation_start(
     except Exception:
         pass
 
-    # Fast 3-frame ❗ animation (~0.5s total — snappy but visible)
-    frames = ["❗", "❗❗", "❗❗❗"]
+    # Fast 2-frame ❗ animation (~0.2s total)
+    frames = ["❗", "❗❗❗"]
     try:
         msg = await context.bot.send_message(
             chat_id, b(frames[0]), parse_mode=ParseMode.HTML
         )
         _safety_anchors[chat_id] = msg.message_id
-        for frame in frames[1:]:
-            await asyncio.sleep(0.18)
-            try:
-                await msg.edit_text(b(frame), parse_mode=ParseMode.HTML)
-            except Exception:
-                break
+        await asyncio.sleep(0.1)
+        try:
+            await msg.edit_text(b(frames[1]), parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
     except Exception as exc:
         logger.debug(f"loading_animation_start failed: {exc}")
     return msg
@@ -3309,7 +3335,10 @@ def _style_label(label: str) -> str:
     except Exception:
         style = BUTTON_STYLE
     # Preserve allowed emojis at start/end
-    _ALLOWED_PFXS = ('◀ ','▶ ','✖️ ','🔙 ','🔜 ','➕ ','✔️ ','♻️ ','❗ ','✨ ','🟢 ','🔴 ','◀','▶','✖️','🔙','🔜','➕','✔️','♻️','❗','✨','🟢','🔴')
+    _ALLOWED_PFXS = (
+        '🔙 ','🔜 ','✖️ ','♻️ ','🔴 ','🟢 ','✨ ','❗ ','✔️ ','➕ ','😅 ','⚠️ ','🚩 ',
+        '🔙','🔜','✖️','♻️','🔴','🟢','✨','❗','✔️','➕','😅','⚠️','🚩',
+    )
     prefix = ""
     clean = label
     for p in _ALLOWED_PFXS:
@@ -3599,10 +3628,10 @@ def _build_panel_pages(maint: bool, clone_red: bool, clean_gc: bool) -> dict:
     def _nav(cur):
         row = []
         if cur > 0:
-            row.append(InlineKeyboardButton("◀", callback_data=f"adm_page_{cur-1}"))
+            row.append(InlineKeyboardButton("🔙", callback_data=f"adm_page_{cur-1}"))
         row.append(InlineKeyboardButton(f"· {cur+1}/{TOTAL} ·", callback_data="noop"))
         if cur < TOTAL - 1:
-            row.append(InlineKeyboardButton("▶", callback_data=f"adm_page_{cur+1}"))
+            row.append(InlineKeyboardButton("🔜", callback_data=f"adm_page_{cur+1}"))
         row.append(_close_btn())
         return row
 
@@ -3615,60 +3644,60 @@ def _build_panel_pages(maint: bool, clone_red: bool, clean_gc: bool) -> dict:
         return InlineKeyboardMarkup(rows)
 
     main_btns = [
-        _btn("📊 STATS",     "admin_stats"),
-        _btn("📢 BROADCAST", "admin_broadcast_start"),
-        _btn("👥 USERS",     "user_management"),
-        _btn("📡 CHANNELS",  "manage_force_sub"),
-        _btn("🔗 LINKS",     "generate_links"),
-        _btn("🤖 CLONES",    "manage_clones"),
-        _btn("⚙️ SETTINGS",  "admin_settings"),
-        _btn("🎌 CATEGORY",  "admin_category_settings"),
-        _btn("📤 UPLOAD",    "upload_menu"),
-        _btn("📋 FILTERS",   "admin_filter_settings"),
-        _btn("🎨 POSTER DB", "admin_filter_poster"),
-        _btn("🚩 FLAGS",     "admin_feature_flags"),
+        _btn("STATS",      "admin_stats"),
+        _btn("BROADCAST",  "admin_broadcast_start"),
+        _btn("USERS",      "user_management"),
+        _btn("CHANNELS",   "manage_force_sub"),
+        _btn("LINKS",      "generate_links"),
+        _btn("CLONES",     "manage_clones"),
+        _btn("SETTINGS",   "admin_settings"),
+        _btn("CATEGORY",   "admin_category_settings"),
+        _btn("UPLOAD",     "upload_menu"),
+        _btn("FILTERS",    "admin_filter_settings"),
+        _btn("POSTER DB",  "admin_filter_poster"),
+        _btn("🚩 FLAGS",   "admin_feature_flags"),
     ]
     tools_btns = [
         _btn("♻️ AUTO FWD",  "admin_autoforward"),
-        _btn("📖 MANGA",     "admin_autoupdate"),
-        _btn("🎨 STYLE",     "admin_text_style"),
-        _btn("📊 SYSTEM",    "admin_sysstats"),
-        _btn("📜 LOGS",      "admin_logs"),
-        _btn("🔄 RESTART",   "admin_restart_confirm"),
-        _btn("📥 IMP USERS", "admin_import_users"),
-        _btn("📥 IMP LINKS", "admin_import_links"),
-        _btn("📤 EXP USERS", "admin_export_users_quick"),
-        _btn("💾 DB CLEAN",  "dbcleanup_confirm"),
-        _btn("🖼 PANELS",    "panel_img_add_urls"),
-        _btn("🌐 ENV VARS",  "admin_env_panel"),
+        _btn("MANGA",        "admin_autoupdate"),
+        _btn("STYLE",        "admin_text_style"),
+        _btn("SYSTEM",       "admin_sysstats"),
+        _btn("LOGS",         "admin_logs"),
+        _btn("RESTART",      "admin_restart_confirm"),
+        _btn("IMP USERS",    "admin_import_users"),
+        _btn("IMP LINKS",    "admin_import_links"),
+        _btn("EXP USERS",    "admin_export_users_quick"),
+        _btn("DB CLEAN",     "dbcleanup_confirm"),
+        _btn("PANELS",       "panel_img_add_urls"),
+        _btn("ENV VARS",     "admin_env_panel"),
     ]
     feat_btns = [
-        _btn("👫 COUPLE",    "feat_couple"),
-        _btn("👋 SLAP",      "feat_slap"),
-        _btn("🤗 HUG",       "feat_hug"),
-        _btn("💋 KISS",      "feat_kiss"),
-        _btn("🤲 PAT",       "feat_pat"),
-        _btn("🔍 INLINE",    "feat_inline_search"),
-        _btn("😂 REACTIONS", "feat_reactions"),
-        _btn("🤖 CHATBOT",   "feat_chatbot"),
-        _btn("🎲 T/DARE",    "feat_truth_dare"),
-        _btn("📝 NOTES",     "feat_notes"),
+        _btn("COUPLE",       "feat_couple"),
+        _btn("SLAP",         "feat_slap"),
+        _btn("HUG",          "feat_hug"),
+        _btn("KISS",         "feat_kiss"),
+        _btn("PAT",          "feat_pat"),
+        _btn("INLINE",       "feat_inline_search"),
+        _btn("REACTIONS",    "feat_reactions"),
+        _btn("CHATBOT",      "feat_chatbot"),
+        _btn("T/DARE",       "feat_truth_dare"),
+        _btn("NOTES",        "feat_notes"),
         _btn("⚠️ WARNS",     "feat_warns"),
-        _btn("🔇 MUTE",      "feat_muting"),
+        _btn("MUTE",         "feat_muting"),
     ]
     poster_btns = [
-        _btn("🎌 ANI",   "poster_cmd_ani"),
-        _btn("🔴 NET",   "poster_cmd_net"),
-        _btn("🎬 CRUN",  "poster_cmd_crun"),
-        _btn("🌑 DARK",  "poster_cmd_dark"),
-        _btn("☀️ LIGHT", "poster_cmd_light"),
-        _btn("✨ MOD",   "poster_cmd_mod"),
-        _btn("🚫 BANS",  "feat_bans"),
-        _btn("📋 RULES", "feat_rules"),
-        _btn("📡 AIRING","feat_airing"),
-        _btn("👤 CHAR",  "feat_character"),
-        _btn("ℹ️ ANIME", "feat_anime_info"),
-        _btn("💤 AFK",   "feat_afk"),
+        _btn("ANI",          "poster_cmd_ani"),
+        _btn("🔴 NET",       "poster_cmd_net"),
+        _btn("CRUN",         "poster_cmd_crun"),
+        _btn("DARK",         "poster_cmd_dark"),
+        _btn("LIGHT",        "poster_cmd_light"),
+        _btn("✨ MOD",       "poster_cmd_mod"),
+        _btn("BANS",         "feat_bans"),
+        _btn("RULES",        "feat_rules"),
+        _btn("AIRING",       "feat_airing"),
+        _btn("CHAR",         "feat_character"),
+        _btn("ANIME INFO",   "feat_anime_info"),
+        _btn("AFK",          "feat_afk"),
     ]
     all_mods = [
         _btn("ADMIN",      "mod_admin"),      _btn("ANTIFLOOD",  "mod_antiflood"),
@@ -3715,13 +3744,12 @@ async def send_admin_menu(
     """
     global _PANEL_PAGES, _PANEL_PAGES_TS
 
-    # ── No lock — pre-built pages are read-only, safe for concurrent access ───
-    # Drop duplicate clicks: if same message_id received twice, ignore 2nd
+    # ── Debounce: drop rapid duplicate clicks within 0.6s ─────────────────────
     if query:
-        _dup_key = f"adm_dup_{chat_id}_{getattr(query.message, 'message_id', 0)}"
+        _dup_key = f"adm_dup_{chat_id}_{page}"
         _ts_now = time.monotonic()
         _last_ts = _panel_cache_get(_dup_key)
-        if _last_ts and (_ts_now - _last_ts) < 0.8:
+        if _last_ts and (_ts_now - _last_ts) < 0.6:
             try: await query.answer()
             except Exception: pass
             return
@@ -3733,10 +3761,17 @@ async def send_admin_menu(
     now = time.monotonic()
 
     # ── Rebuild page cache if stale (<1ms when fresh) ──────────────────────────
+    # Uses cached values first — DB fetch only happens once per TTL, in a thread
     if not _PANEL_PAGES or (now - _PANEL_PAGES_TS) > _PANEL_PAGES_TTL:
-        maint     = get_setting("maintenance_mode",       "false") == "true"
-        clone_red = get_setting("clone_redirect_enabled", "false") == "true"
-        clean_gc  = get_setting("clean_gc_enabled",       "true")  == "true"
+        try:
+            maint     = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: get_setting("maintenance_mode", "false") == "true")
+            clone_red = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: get_setting("clone_redirect_enabled", "false") == "true")
+            clean_gc  = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: get_setting("clean_gc_enabled", "true") == "true")
+        except Exception:
+            maint, clone_red, clean_gc = False, False, True
         _PANEL_PAGES, _status_line = _build_panel_pages(maint, clone_red, clean_gc)
         _PANEL_PAGES["_status"] = _status_line
         _PANEL_PAGES_TS = now
@@ -3771,12 +3806,14 @@ async def send_stats_panel(
 ) -> None:
     """Send bot statistics panel — instant via edit-in-place."""
     try:
-        user_count = get_user_count()
-        channel_count = len(get_all_force_sub_channels())
-        link_count = get_links_count()
-        clones = get_all_clone_bots(active_only=True)
-        blocked = get_blocked_users_count()
-        maint = "🔴 ON" if get_setting("maintenance_mode", "false") == "true" else "🟢 OFF"
+        loop = asyncio.get_event_loop()
+        user_count    = await loop.run_in_executor(None, get_user_count)
+        channel_count = await loop.run_in_executor(None, lambda: len(get_all_force_sub_channels()))
+        link_count    = await loop.run_in_executor(None, get_links_count)
+        clones        = await loop.run_in_executor(None, lambda: get_all_clone_bots(active_only=True))
+        blocked       = await loop.run_in_executor(None, get_blocked_users_count)
+        maint_val     = await loop.run_in_executor(None, lambda: get_setting("maintenance_mode", "false"))
+        maint = "🔴 ON" if maint_val == "true" else "🟢 OFF"
 
         text = (
             b(" Bot Statistics") + "\n\n"
@@ -3861,24 +3898,14 @@ async def show_category_settings_menu(
             await query.delete_message()
         except Exception:
             pass
-        img_url = None
-        if _PANEL_IMAGE_AVAILABLE:
-            try:
-                img_url = await get_panel_pic_async("categories")
-            except Exception:
-                pass
+        img_url = get_panel_pic("categories")
         if img_url:
             sent = await safe_send_photo(context.bot, chat_id, img_url, caption=text, reply_markup=markup)
             if sent:
                 return
         await safe_send_message(context.bot, chat_id, text, reply_markup=markup)
     else:
-        img_url = None
-        if _PANEL_IMAGE_AVAILABLE:
-            try:
-                img_url = await get_panel_pic_async("categories")
-            except Exception:
-                pass
+        img_url = get_panel_pic("categories")
         if img_url:
             sent = await safe_send_photo(context.bot, chat_id, img_url, caption=text, reply_markup=markup)
             if sent:
@@ -4499,6 +4526,23 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     /cmd — Show commands based on who is asking.
     Everyone can use this. Output is filtered by authority level.
     """
+    try:
+        await _cmd_command_inner(update, context)
+    except Exception as exc:
+        logger.error(f"cmd_command failed: {exc}", exc_info=True)
+        try:
+            uid = update.effective_user.id if update.effective_user else 0
+            await context.bot.send_message(
+                uid,
+                f"<b>❗ /cmd failed:</b> <code>{html.escape(str(exc)[:300])}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+
+
+async def _cmd_command_inner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Inner implementation of /cmd — wrapped by cmd_command for error catching."""
     await delete_update_message(update, context)
     uid  = update.effective_user.id if update.effective_user else 0
     chat = update.effective_chat
@@ -4515,16 +4559,16 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     # ── Section builder ────────────────────────────────────────────────────
     def sec(title, cmds):
-        lines = f"<b>{small_caps(title)}</b>\n"
+        # Use title as-is (no small_caps on section titles — avoids emoji mangling)
+        lines = f"<b>{e(title)}</b>\n"
         for cmd, desc in cmds:
-            # Never small-cap the command itself (it starts with /)
             lines += f"  /{cmd} — {small_caps(desc)}\n"
         return lines + "\n"
 
     # ══════════════════════════════════════════════
     # SECTION 1 — EVERYONE (always shown)
     # ══════════════════════════════════════════════
-    public = sec("🌐 General — Everyone", [
+    public = sec("General — Everyone", [
         ("start",       "Main menu"),
         ("help",        "Help & channel links"),
         ("cmd",         "Show all commands (this list)"),
@@ -4541,7 +4585,7 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ("report",      "<reason> — Report a message to admins (reply)"),
     ])
 
-    anime_s = sec("🎌 Anime & Media — Everyone", [
+    anime_s = sec("Anime & Media — Everyone", [
         ("anime",      "<name> — Anime poster + info"),
         ("manga",      "<name> — Manga poster + info"),
         ("movie",      "<name> — Movie poster + info"),
@@ -4552,7 +4596,7 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ("imdb",       "<name> — IMDb lookup"),
     ])
 
-    fun_s = sec("🎮 Fun & Reactions — Everyone", [
+    fun_s = sec("Fun & Reactions — Everyone", [
         ("hug",         "Hug someone (reply to their message)"),
         ("slap",        "Slap someone (reply)"),
         ("kiss",        "Kiss someone (reply)"),
@@ -4579,7 +4623,7 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ("afk",         "<reason> — Set yourself as AFK"),
     ])
 
-    tools_s = sec("🛠 Tools — Everyone", [
+    tools_s = sec("Tools — Everyone", [
         ("wiki",        "<topic> — Wikipedia summary"),
         ("ud",          "<word> — Urban Dictionary definition"),
         ("tr",          "<lang> <text> — Translate text"),
@@ -4603,7 +4647,7 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ("google",      "<query> — Google search"),
     ])
 
-    group_s = sec("📋 Group Info — Everyone", [
+    group_s = sec("Group Info — Everyone", [
         ("rules",      "View group rules"),
         ("warns",      "Check your warn count"),
         ("notes",      "List all saved notes"),
@@ -4617,7 +4661,7 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # ══════════════════════════════════════════════
     # SECTION 2 — GROUP ADMINS (shown if admin in group)
     # ══════════════════════════════════════════════
-    moderation_s = sec("🛡 Moderation — Group Admins", [
+    moderation_s = sec("Moderation — Group Admins", [
         ("ban",        "@user <reason> — Ban"),
         ("tban",       "@user <time> — Temp ban (1h, 2d)"),
         ("kick",       "@user — Kick from group"),
@@ -4631,7 +4675,7 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ("gban",       "@user <reason> — Global ban"),
     ])
 
-    group_mgmt_s = sec("⚙️ Group Settings — Group Admins", [
+    group_mgmt_s = sec("Group Settings — Group Admins", [
         ("setrules",   "<text> — Set rules"),
         ("clearrules", "Clear rules"),
         ("save",       "<name> <text> — Save note"),
@@ -4650,7 +4694,7 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ("setsticker", "Set group sticker (reply)"),
     ])
 
-    welcome_s = sec("👋 Welcome System — Group Admins", [
+    welcome_s = sec("Welcome System — Group Admins", [
         ("welcome",         "<on/off/noformat> — Toggle/view welcome"),
         ("setwelcome",      "<text> — Set custom welcome message"),
         ("resetwelcome",    "Reset welcome to default"),
@@ -4666,7 +4710,7 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ("welcomemutehelp", "Explain soft/strong mute modes"),
     ])
 
-    filter_s = sec("🔍 Filters & Locks — Group Admins", [
+    filter_s = sec("Filters & Locks — Group Admins", [
         ("filter",     "<keyword> <reply> — Add filter"),
         ("stop",       "<keyword> — Remove filter"),
         ("filters",    "List all filters"),
@@ -4683,7 +4727,7 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ("blstickermode","<action> — Sticker BL action"),
     ])
 
-    anti_s = sec("🌊 Anti-Spam — Group Admins", [
+    anti_s = sec("Anti-Spam — Group Admins", [
         ("setflood",   "<number/off> — Set flood limit"),
         ("setfloodmode","<action> — Flood action"),
         ("flood",      "Current flood settings"),
@@ -4699,7 +4743,7 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ("wordaction", "<action> — Bad word action"),
     ])
 
-    log_s = sec("📋 Logging — Group Admins", [
+    log_s = sec("Logging — Group Admins", [
         ("setlog",     "Set log channel (use in channel)"),
         ("unsetlog",   "Remove log channel"),
         ("logchannel", "Show log channel info"),
@@ -4713,7 +4757,7 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # ══════════════════════════════════════════════
     # SECTION 3 — BOT ADMIN ONLY
     # ══════════════════════════════════════════════
-    bot_admin_s = sec("🔴 Bot Admin Only", [
+    bot_admin_s = sec("Bot Admin Only", [
         ("stats",           "Full bot statistics dashboard"),
         ("sysstats",        "Server CPU/RAM/disk usage"),
         ("users",           "Total registered users count"),
@@ -4768,35 +4812,35 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # ── Build final text based on who's asking ────────────────────────────
     if is_bot_admin:
         text = (
-            b("📋 All Commands — Bot Admin View") + "\n\n"
+            b("All Commands — Bot Admin View") + "\n\n"
             + public + anime_s + fun_s + tools_s + group_s
             + moderation_s + group_mgmt_s + welcome_s
             + filter_s + anti_s + log_s + bot_admin_s
         )
-        title = "📋 ᴀʟʟ ᴄᴏᴍᴍᴀɴᴅs — Admin"
+        title = "All Commands — Admin"
     elif is_group_admin:
         text = (
-            b("📋 Commands — Group Admin View") + "\n\n"
+            b("Commands — Group Admin View") + "\n\n"
             + public + anime_s + fun_s + tools_s + group_s
             + moderation_s + group_mgmt_s + welcome_s
             + filter_s + anti_s + log_s
             + "\n<i>Bot admin commands not shown</i>"
         )
-        title = "📋 ᴄᴏᴍᴍᴀɴᴅs — Group Admin"
+        title = "Commands — Group Admin"
     else:
         text = (
-            b("📋 Commands — User View") + "\n\n"
+            b("Commands — User View") + "\n\n"
             + public + anime_s + fun_s + tools_s + group_s
             + "\n<i>Group admin and bot admin commands not shown</i>"
         )
-        title = "📋 ᴄᴏᴍᴍᴀɴᴅs"
+        title = "Commands"
 
-    # ── Send /cmd — always to user's DM (private) to avoid group spam ──────
-    # Telegram message limit is 4096 chars. We split at 3800 to be safe.
+    # ── Send /cmd — split at 3800 chars per page ──────────────────────────
     TELE_MAX = 3800
 
-    # Always try DM first; fall back to current chat if DM blocked
-    send_to = update.effective_user.id  # DM
+    # Admin in DM: send directly here. In a group: try DM first, else current chat.
+    is_dm = update.effective_chat and update.effective_chat.type == "private"
+    send_to = update.effective_user.id  # always try DM / current DM
     close_kb = InlineKeyboardMarkup([[InlineKeyboardButton("✖️ Close", callback_data="close_message")]])
 
     # Build pages: split text into ≤3800-char chunks on section boundaries
@@ -8970,7 +9014,9 @@ async def post_init(application: Application) -> None:
             logger.warning(f"poster_cache migration: {_e}")
 
     # ── SPEED: Pre-warm all panel caches in background (non-blocking) ─────────
+    # Fire and forget — also pre-builds file_ids so first panel tap is instant
     asyncio.create_task(_prewarm_all_caches(application.bot))
+    asyncio.create_task(_prebuild_all_panels(application.bot))
 
     # ── Apply missing DB migrations ────────────────────────────────────────────
     _migration_sqls = [
@@ -9279,9 +9325,9 @@ async def button_handler(
 
     is_admin = uid in (ADMIN_ID, OWNER_ID)
 
-    # ── Global debounce: if this user's panel lock is held AND this callback
-    #    is a known panel-navigation action, drop the duplicate click silently.
-    #    This prevents ping degradation when users click rapidly.
+    # ── Global debounce: if this user is already processing the same callback,
+    #    drop the duplicate click silently. Uses uid+data as key so navigating
+    #    to different panels is never blocked.
     _PANEL_CALLBACKS = {
         "admin_back", "admin_stats", "admin_settings", "admin_sysstats",
         "admin_channels", "admin_clones", "admin_users", "admin_broadcast",
@@ -9289,9 +9335,12 @@ async def button_handler(
         "user_management", "fsub_link_stats",
     }
     if data in _PANEL_CALLBACKS or data.startswith("adm_page_"):
-        lock = _get_panel_lock(uid)
-        if lock.locked():
-            return  # drop — already processing
+        _db_key = f"btn_debounce_{uid}_{data}"
+        _now = time.monotonic()
+        _prev = _panel_cache_get(_db_key)
+        if _prev and (_now - _prev) < 0.5:
+            return  # drop duplicate — already processing this exact action
+        _panel_cache_set(_db_key, _now)
 
     # ── Utility ────────────────────────────────────────────────────────────────────
     if data == "noop":
@@ -9477,7 +9526,7 @@ async def button_handler(
             await query.delete_message()
         except Exception:
             pass
-        img_url = await get_panel_pic_async("default")
+        img_url = get_panel_pic("default")
         if img_url:
             try:
                 await context.bot.send_photo(chat_id, img_url, caption=text,
@@ -14599,9 +14648,11 @@ def main() -> None:
     application = (
         Application.builder()
         .token(BOT_TOKEN)
-        .connect_timeout(30)
-        .read_timeout(30)
-        .write_timeout(30)
+        .connect_timeout(15)
+        .read_timeout(15)
+        .write_timeout(20)
+        .pool_timeout(60)
+        .concurrent_updates(True)
         .build()
     )
 
@@ -14769,6 +14820,12 @@ def main() -> None:
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,
         close_loop=False,
+        poll_interval=0.0,      # return immediately when update arrives
+        timeout=10,             # long-poll window (seconds)
+        read_timeout=15,
+        write_timeout=20,
+        connect_timeout=15,
+        pool_timeout=60,
     )
 
 
