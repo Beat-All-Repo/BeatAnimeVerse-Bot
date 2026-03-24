@@ -22,9 +22,14 @@ from telegram.ext import (
     CallbackContext,
     CallbackQueryHandler,
     CommandHandler,
-    Filters,
     MessageHandler,
 )
+try:
+    from telegram.ext import Filters
+    _TEXT_FILTER = Filters.text & (~Filters.regex(r"^#[^\s]+") & ~Filters.regex(r"^!") & ~Filters.regex(r"^\/"))
+except ImportError:
+    from telegram.ext import filters as _f
+    _TEXT_FILTER = _f.TEXT & ~_f.Regex(r"^#[^\s]+") & ~_f.Regex(r"^!") & ~_f.COMMAND
 from telegram.utils.helpers import mention_html
 
 import modules.sql.chatbot_sql as sql
@@ -133,13 +138,18 @@ def chatbot(update: Update, context: CallbackContext):
     if message.text and not message.document:
         if not beat_message(context, message):
             return
-        bot.send_chat_action(chat_id, action="typing")
-        request = requests.get(
-            f"https://api.affiliateplus.xyz/api/chatbot?message={message.text}"
-        )
-        results = json.loads(request.text)
-        sleep(0.5)
-        message.reply_text(results["reply"])
+        try:
+            bot.send_chat_action(chat_id, action="typing")
+            request = requests.get(
+                f"https://api.affiliateplus.xyz/api/chatbot?message={message.text}",
+                timeout=8,
+            )
+            results = json.loads(request.text)
+            sleep(0.5)
+            message.reply_text(results["reply"])
+        except Exception:
+            # Silently ignore chatbot API failures (network unreachable, timeout, etc.)
+            pass
 
 
 __help__ = f"""
@@ -151,14 +161,12 @@ __help__ = f"""
 __mod_name__ = "Cʜᴀᴛʙᴏᴛ"
 
 
-CHATBOTK_HANDLER = CommandHandler("chatbot", chatbot_panel, run_async=True)
-ADD_CHAT_HANDLER = CallbackQueryHandler(beatadd, pattern=r"add_chat", run_async=True)
-RM_CHAT_HANDLER = CallbackQueryHandler(beatrm, pattern=r"rm_chat", run_async=True)
+CHATBOTK_HANDLER = CommandHandler("chatbot", chatbot_panel)
+ADD_CHAT_HANDLER = CallbackQueryHandler(beatadd, pattern=r"add_chat")
+RM_CHAT_HANDLER = CallbackQueryHandler(beatrm, pattern=r"rm_chat")
 CHATBOT_HANDLER = MessageHandler(
-    Filters.text
-    & (~Filters.regex(r"^#[^\s]+") & ~Filters.regex(r"^!") & ~Filters.regex(r"^\/")),
+    _TEXT_FILTER,
     chatbot,
-    run_async=True,
 )
 
 dispatcher.add_handler(ADD_CHAT_HANDLER)
