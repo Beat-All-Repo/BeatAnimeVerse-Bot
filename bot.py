@@ -1124,64 +1124,34 @@ async def _deliver_panel(
     query=None,
 ) -> bool:
     """
-    Ultra-fast panel delivery — primary path: edit_media in-place (1 API call ≈ 50ms).
+    Ultra-fast panel delivery using pre-stored file_ids.
 
-    Speed priority:
-      1. query.message has a photo → edit_media() in-place — INSTANT, no flash, 1 call
-      2. query.message is text only → edit_message_text() in-place
-      3. No query or edit failed → delete old + send_photo (cached file_id)
+    Flow:
+      1. Delete triggering message (if any)
+      2. Check panel store for pre-cached file_id
+      3a. If found: send_photo with cached file_id + keyboard (CDN-speed, ~50ms)
+      3b. If not found: get_panel_pic() → send_photo → store file_id for next time
       4. Text fallback if no photo available at all
 
-    The inline keyboard is always attached fresh (contains dynamic toggle states).
-    Only the photo is cached/reused. Caption always updated.
+    The inline keyboard is always attached fresh (contains dynamic data like
+    toggle states) — only the photo is cached/reused.
     """
-    # ── Get cached file_id (synchronous, <1ms) ─────────────────────────────────
-    stored = _ps_get(panel_type)
-    photo_to_send = stored["file_id"] if stored else None
-    if not photo_to_send:
-        photo_to_send = get_panel_pic(panel_type)
-
-    # ── FAST PATH 1: edit photo in-place — no delete, no flash ────────────────
-    if query and query.message and query.message.photo and photo_to_send:
-        try:
-            await query.message.edit_media(
-                media=InputMediaPhoto(
-                    media=photo_to_send,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                ),
-                reply_markup=reply_markup,
-            )
-            if not stored:
-                _ps_set(panel_type, photo_to_send, caption)
-            return True
-        except Exception as exc:
-            err = str(exc).lower()
-            # Bad file_id → clear and re-try fresh
-            if any(k in err for k in ("wrong", "file", "media", "invalid", "not found")):
-                _ps_invalidate(panel_type)
-                photo_to_send = get_panel_pic(panel_type)
-            # else fall through to delete+send
-
-    # ── FAST PATH 2: existing message is text-only → edit_message_text ─────────
-    if query and query.message and not query.message.photo and not photo_to_send:
-        try:
-            await query.edit_message_text(
-                text=caption,
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup,
-            )
-            return True
-        except Exception:
-            pass
-
-    # ── NORMAL PATH: delete old + send new ─────────────────────────────────────
+    # ── Step 1: Delete old message ─────────────────────────────────────────────
     if query and query.message:
         try:
             await query.message.delete()
         except Exception:
             pass
 
+    # ── Step 2: Look up cached file_id ─────────────────────────────────────────
+    stored = _ps_get(panel_type)
+    photo_to_send = stored["file_id"] if stored else None
+
+    # ── Step 3a: If no cached file_id, get from panel image system ─────────────
+    if not photo_to_send:
+        photo_to_send = get_panel_pic(panel_type)
+
+    # ── Step 3b: Send ──────────────────────────────────────────────────────────
     if photo_to_send:
         try:
             sent = await bot.send_photo(
@@ -1191,9 +1161,11 @@ async def _deliver_panel(
                 parse_mode=ParseMode.HTML,
                 reply_markup=reply_markup,
             )
+            # ── Store file_id for next time (if not already stored) ───────────
             if sent and sent.photo and not stored:
                 fid = sent.photo[-1].file_id
                 _ps_set(panel_type, fid, caption)
+                # Also update panel_image cache
                 if _PANEL_IMAGE_AVAILABLE:
                     try:
                         from panel_image import set_tg_fileid
@@ -1204,9 +1176,10 @@ async def _deliver_panel(
             return True
         except Exception as exc:
             logger.debug(f"_deliver_panel photo failed for {panel_type}: {exc}")
+            # Invalidate bad file_id
             _ps_invalidate(panel_type)
 
-    # ── Text fallback ──────────────────────────────────────────────────────────
+    # ── Step 4: Text fallback ──────────────────────────────────────────────────
     try:
         await bot.send_message(
             chat_id=chat_id,
@@ -1266,7 +1239,7 @@ async def _prebuild_all_panels(bot) -> None:
                         pass
                 logger.debug(f"[panel_store] pre-built {ptype}")
 
-            await asyncio.sleep(0.1)  # small delay between sends
+            await asyncio.sleep(0.3)  # small delay between sends
 
         except Exception as exc:
             logger.debug(f"[panel_store] pre-build {ptype} failed: {exc}")
@@ -1589,18 +1562,19 @@ async def loading_animation_start(
     except Exception:
         pass
 
-    # Fast 2-frame ❗ animation (~0.2s total)
-    frames = ["❗", "❗❗❗"]
+    # Fast 3-frame ❗ animation (~0.5s total — snappy but visible)
+    frames = ["❗", "❗❗", "❗❗❗"]
     try:
         msg = await context.bot.send_message(
             chat_id, b(frames[0]), parse_mode=ParseMode.HTML
         )
         _safety_anchors[chat_id] = msg.message_id
-        await asyncio.sleep(0.1)
-        try:
-            await msg.edit_text(b(frames[1]), parse_mode=ParseMode.HTML)
-        except Exception:
-            pass
+        for frame in frames[1:]:
+            await asyncio.sleep(0.18)
+            try:
+                await msg.edit_text(b(frame), parse_mode=ParseMode.HTML)
+            except Exception:
+                break
     except Exception as exc:
         logger.debug(f"loading_animation_start failed: {exc}")
     return msg
@@ -3323,22 +3297,36 @@ def _build_pagination_kb(
 
 # ── Button helpers (ONLY allowed emojis: ➕ 🔙 ✔️ 🔜 ♻️ ❗ ✨ 🟢 🔴) ────────────
 
+# ── Button style 60s cache — eliminates 70+ DB calls per panel open ──────────
+_CACHED_BTN_STYLE: str = ""
+_CACHED_BTN_STYLE_TS: float = 0.0
+_BTN_STYLE_TTL: float = 60.0
+
+def _refresh_btn_style_cache() -> None:
+    """Force-refresh button style cache (call after admin changes style)."""
+    global _CACHED_BTN_STYLE, _CACHED_BTN_STYLE_TS
+    _CACHED_BTN_STYLE = ""
+    _CACHED_BTN_STYLE_TS = 0.0
+
 def _style_label(label: str) -> str:
     """Apply current button style to label text.
-    Reads BUTTON_STYLE env at runtime so it can be changed without restart.
-    Preserves allowed emojis: ➕ 🔙 ✔️ 🔜 ♻️ ❗ ✨ 🟢 🔴
+    Uses 60s in-memory cache — ZERO per-button DB calls.
+    Without cache: 70+ DB round-trips = 1 min panel load.
+    With cache: 1 DB read per 60s = instant panel load.
     """
-    # Get runtime style (can be overridden via admin panel)
-    try:
-        from database_dual import get_setting as _gs
-        style = _gs("button_style", BUTTON_STYLE) or BUTTON_STYLE
-    except Exception:
-        style = BUTTON_STYLE
+    global _CACHED_BTN_STYLE, _CACHED_BTN_STYLE_TS
+    import time as _t
+    now = _t.monotonic()
+    if not _CACHED_BTN_STYLE or (now - _CACHED_BTN_STYLE_TS) > _BTN_STYLE_TTL:
+        try:
+            from database_dual import get_setting as _gs
+            _CACHED_BTN_STYLE = _gs("button_style", BUTTON_STYLE) or BUTTON_STYLE
+        except Exception:
+            _CACHED_BTN_STYLE = BUTTON_STYLE
+        _CACHED_BTN_STYLE_TS = now
+    style = _CACHED_BTN_STYLE
     # Preserve allowed emojis at start/end
-    _ALLOWED_PFXS = (
-        '🔙 ','🔜 ','✖️ ','♻️ ','🔴 ','🟢 ','✨ ','❗ ','✔️ ','➕ ','😅 ','⚠️ ','🚩 ',
-        '🔙','🔜','✖️','♻️','🔴','🟢','✨','❗','✔️','➕','😅','⚠️','🚩',
-    )
+    _ALLOWED_PFXS = ('◀ ','▶ ','✖️ ','🔙 ','🔜 ','➕ ','✔️ ','♻️ ','❗ ','✨ ','🟢 ','🔴 ','◀','▶','✖️','🔙','🔜','➕','✔️','♻️','❗','✨','🟢','🔴')
     prefix = ""
     clean = label
     for p in _ALLOWED_PFXS:
@@ -3597,17 +3585,15 @@ async def get_panel_pic_async(panel_type: str = "default") -> Optional[str]:
 
 
 # ── Pre-built cached panel pages (rebuilt once on first call / after TTL) ─────
-_PANEL_PAGES: dict = {}       # page_num → InlineKeyboardMarkup (frozen at build time)
+_PANEL_PAGES: dict = {}       # page_num → (text, InlineKeyboardMarkup)
 _PANEL_PAGES_TS: float = 0.0
-_PANEL_PAGES_TTL: float = 180.0  # rebuild markup every 3 min (flags change rarely)
+_PANEL_PAGES_TTL: float = 60.0   # rebuild markup every 60 s
 
 
 def _build_panel_pages(maint: bool, clone_red: bool, clean_gc: bool) -> dict:
     """
     5-page admin panel, 4x3 grid (12 buttons per page).
     Pre-built as InlineKeyboardMarkup objects — zero build time on open.
-    SHORT callback_data codes (<= 6 chars each) keep JSON payload tiny (~400 bytes
-    vs ~5 KB with full strings). Aliases resolved in button_handler via _CB_ALIAS.
     """
     maint_icon = "🔴" if maint     else "🟢"
     gc_icon    = "✔️" if clean_gc  else "❗"
@@ -3630,10 +3616,10 @@ def _build_panel_pages(maint: bool, clone_red: bool, clean_gc: bool) -> dict:
     def _nav(cur):
         row = []
         if cur > 0:
-            row.append(InlineKeyboardButton("🔙", callback_data=f"adm_page_{cur-1}"))
+            row.append(InlineKeyboardButton("◀", callback_data=f"adm_page_{cur-1}"))
         row.append(InlineKeyboardButton(f"· {cur+1}/{TOTAL} ·", callback_data="noop"))
         if cur < TOTAL - 1:
-            row.append(InlineKeyboardButton("🔜", callback_data=f"adm_page_{cur+1}"))
+            row.append(InlineKeyboardButton("▶", callback_data=f"adm_page_{cur+1}"))
         row.append(_close_btn())
         return row
 
@@ -3645,56 +3631,79 @@ def _build_panel_pages(maint: bool, clone_red: bool, clean_gc: bool) -> dict:
         rows.append(_nav(num))
         return InlineKeyboardMarkup(rows)
 
-    # ── Buttons use SHORT codes — aliases resolved in button_handler ──────────
     main_btns = [
-        _btn("STATS",      "a_st"),   _btn("BROADCAST",  "a_bc"),
-        _btn("USERS",      "a_um"),   _btn("CHANNELS",   "a_fs"),
-        _btn("LINKS",      "a_gl"),   _btn("CLONES",     "a_cl"),
-        _btn("SETTINGS",   "a_se"),   _btn("CATEGORY",   "a_cs"),
-        _btn("UPLOAD",     "a_up"),   _btn("FILTERS",    "a_fil"),
-        _btn("POSTER DB",  "a_fp"),   _btn("🚩 FLAGS",   "a_ff"),
+        _btn("📊 STATS",     "admin_stats"),
+        _btn("📢 BROADCAST", "admin_broadcast_start"),
+        _btn("👥 USERS",     "user_management"),
+        _btn("📡 CHANNELS",  "manage_force_sub"),
+        _btn("🔗 LINKS",     "generate_links"),
+        _btn("🤖 CLONES",    "manage_clones"),
+        _btn("⚙️ SETTINGS",  "admin_settings"),
+        _btn("🎌 CATEGORY",  "admin_category_settings"),
+        _btn("📤 UPLOAD",    "upload_menu"),
+        _btn("📋 FILTERS",   "admin_filter_settings"),
+        _btn("🎨 POSTER DB", "admin_filter_poster"),
+        _btn("🚩 FLAGS",     "admin_feature_flags"),
     ]
     tools_btns = [
-        _btn("♻️ AUTO FWD","a_af"),   _btn("MANGA",      "a_au"),
-        _btn("STYLE",      "a_ts"),   _btn("SYSTEM",     "a_ss"),
-        _btn("LOGS",       "a_lg"),   _btn("RESTART",    "a_rs"),
-        _btn("IMP USERS",  "a_iu"),   _btn("IMP LINKS",  "a_il"),
-        _btn("EXP USERS",  "a_eu"),   _btn("DB CLEAN",   "a_dc"),
-        _btn("PANELS",     "a_pi"),   _btn("ENV VARS",   "a_ev"),
+        _btn("♻️ AUTO FWD",  "admin_autoforward"),
+        _btn("📖 MANGA",     "admin_autoupdate"),
+        _btn("🎨 STYLE",     "admin_text_style"),
+        _btn("📊 SYSTEM",    "admin_sysstats"),
+        _btn("📜 LOGS",      "admin_logs"),
+        _btn("🔄 RESTART",   "admin_restart_confirm"),
+        _btn("📥 IMP USERS", "admin_import_users"),
+        _btn("📥 IMP LINKS", "admin_import_links"),
+        _btn("📤 EXP USERS", "admin_export_users_quick"),
+        _btn("💾 DB CLEAN",  "dbcleanup_confirm"),
+        _btn("🖼 PANELS",    "panel_img_add_urls"),
+        _btn("🌐 ENV VARS",  "admin_env_panel"),
     ]
     feat_btns = [
-        _btn("COUPLE",     "f_cp"),   _btn("SLAP",       "f_sl"),
-        _btn("HUG",        "f_hg"),   _btn("KISS",       "f_ks"),
-        _btn("PAT",        "f_pt"),   _btn("INLINE",     "f_is"),
-        _btn("REACTIONS",  "f_rc"),   _btn("CHATBOT",    "f_cb"),
-        _btn("T/DARE",     "f_td"),   _btn("NOTES",      "f_nt"),
-        _btn("⚠️ WARNS",  "f_wn"),   _btn("MUTE",       "f_mt"),
+        _btn("👫 COUPLE",    "feat_couple"),
+        _btn("👋 SLAP",      "feat_slap"),
+        _btn("🤗 HUG",       "feat_hug"),
+        _btn("💋 KISS",      "feat_kiss"),
+        _btn("🤲 PAT",       "feat_pat"),
+        _btn("🔍 INLINE",    "feat_inline_search"),
+        _btn("😂 REACTIONS", "feat_reactions"),
+        _btn("🤖 CHATBOT",   "feat_chatbot"),
+        _btn("🎲 T/DARE",    "feat_truth_dare"),
+        _btn("📝 NOTES",     "feat_notes"),
+        _btn("⚠️ WARNS",     "feat_warns"),
+        _btn("🔇 MUTE",      "feat_muting"),
     ]
     poster_btns = [
-        _btn("ANI",        "p_an"),   _btn("🔴 NET",     "p_nt"),
-        _btn("CRUN",       "p_cr"),   _btn("DARK",       "p_dk"),
-        _btn("LIGHT",      "p_lt"),   _btn("✨ MOD",     "p_md"),
-        _btn("BANS",       "f_bn"),   _btn("RULES",      "f_rl"),
-        _btn("AIRING",     "f_ar"),   _btn("CHAR",       "f_ch"),
-        _btn("ANIME INFO", "f_ai"),   _btn("AFK",        "f_ak"),
+        _btn("🎌 ANI",   "poster_cmd_ani"),
+        _btn("🔴 NET",   "poster_cmd_net"),
+        _btn("🎬 CRUN",  "poster_cmd_crun"),
+        _btn("🌑 DARK",  "poster_cmd_dark"),
+        _btn("☀️ LIGHT", "poster_cmd_light"),
+        _btn("✨ MOD",   "poster_cmd_mod"),
+        _btn("🚫 BANS",  "feat_bans"),
+        _btn("📋 RULES", "feat_rules"),
+        _btn("📡 AIRING","feat_airing"),
+        _btn("👤 CHAR",  "feat_character"),
+        _btn("ℹ️ ANIME", "feat_anime_info"),
+        _btn("💤 AFK",   "feat_afk"),
     ]
     all_mods = [
-        _btn("ADMIN",      "m_ad"),   _btn("ANTIFLOOD",  "m_af"),
-        _btn("APPROVE",    "m_ap"),   _btn("BLACKLIST",  "m_bl"),
-        _btn("BL STICKER", "m_bs"),   _btn("CHATBOT",    "m_cb"),
-        _btn("CLEANER",    "m_cl"),   _btn("CONNECTION", "m_cn"),
-        _btn("CURRENCY",   "m_cu"),   _btn("FILTERS",    "m_cf"),
-        _btn("GBAN",       "m_gb"),   _btn("IMDB",       "m_im"),
-        _btn("LOCKS",      "m_lk"),   _btn("LOGCHAN",    "m_lc"),
-        _btn("PING",       "m_pg"),   _btn("PURGE",      "m_pu"),
-        _btn("REPORTING",  "m_rp"),   _btn("SED",        "m_sd"),
-        _btn("SHELL",      "m_sh"),   _btn("SPEEDTEST",  "m_sp"),
-        _btn("STICKERS",   "m_st"),   _btn("TAGALL",     "m_ta"),
-        _btn("TRANSLATE",  "m_tr"),   _btn("TRUTH/DARE", "m_tt"),
-        _btn("UD",         "m_ud"),   _btn("WALLPAPER",  "m_wp"),
-        _btn("WIKI",       "m_wk"),   _btn("WRITE",      "m_wr"),
-        _btn("ANIMEQUOTE", "m_aq"),   _btn("GETTIME",    "m_gt"),
-        _btn("BAD WORDS",  "m_bw"),
+        _btn("ADMIN",      "mod_admin"),      _btn("ANTIFLOOD",  "mod_antiflood"),
+        _btn("APPROVE",    "mod_approve"),    _btn("BLACKLIST",  "mod_blacklist"),
+        _btn("BL STICKER", "mod_blsticker"),  _btn("CHATBOT",    "mod_chatbot"),
+        _btn("CLEANER",    "mod_cleaner"),    _btn("CONNECTION", "mod_connection"),
+        _btn("CURRENCY",   "mod_currency"),   _btn("FILTERS",    "mod_custfilters"),
+        _btn("GBAN",       "mod_globalbans"), _btn("IMDB",       "mod_imdb"),
+        _btn("LOCKS",      "mod_locks"),      _btn("LOGCHAN",    "mod_logchannel"),
+        _btn("PING",       "mod_ping"),       _btn("PURGE",      "mod_purge"),
+        _btn("REPORTING",  "mod_reporting"),  _btn("SED",        "mod_sed"),
+        _btn("SHELL",      "mod_shell"),      _btn("SPEEDTEST",  "mod_speedtest"),
+        _btn("STICKERS",   "mod_stickers"),   _btn("TAGALL",     "mod_tagall"),
+        _btn("TRANSLATE",  "mod_translator"), _btn("TRUTH/DARE", "mod_truthdare"),
+        _btn("UD",         "mod_ud"),         _btn("WALLPAPER",  "mod_wallpaper"),
+        _btn("WIKI",       "mod_wiki"),       _btn("WRITE",      "mod_writetool"),
+        _btn("ANIMEQUOTE", "mod_animequotes"),_btn("GETTIME",    "mod_gettime"),
+        _btn("BAD WORDS",  "mod_badwords"),
     ]
 
     return {
@@ -3704,57 +3713,6 @@ def _build_panel_pages(maint: bool, clone_red: bool, clean_gc: bool) -> dict:
         3: _page(3, "POSTER",   poster_btns),
         4: _page(4, "MODULES",  all_mods),
     }, status_line
-
-
-# ── Short-code alias map: short → canonical callback_data ────────────────────
-# button_handler resolves these before the main if/elif chain runs.
-_CB_ALIAS: dict = {
-    # Main page
-    "a_st":  "admin_stats",            "a_bc":  "admin_broadcast_start",
-    "a_um":  "user_management",        "a_fs":  "manage_force_sub",
-    "a_gl":  "generate_links",         "a_cl":  "manage_clones",
-    "a_se":  "admin_settings",         "a_cs":  "admin_category_settings",
-    "a_up":  "upload_menu",            "a_fil": "admin_filter_settings",
-    "a_fp":  "admin_filter_poster",    "a_ff":  "admin_feature_flags",
-    # Tools page
-    "a_af":  "admin_autoforward",      "a_au":  "admin_autoupdate",
-    "a_ts":  "admin_text_style",       "a_ss":  "admin_sysstats",
-    "a_lg":  "admin_logs",             "a_rs":  "admin_restart_confirm",
-    "a_iu":  "admin_import_users",     "a_il":  "admin_import_links",
-    "a_eu":  "admin_export_users_quick","a_dc": "dbcleanup_confirm",
-    "a_pi":  "panel_img_add_urls",     "a_ev":  "admin_env_panel",
-    # Features page
-    "f_cp":  "feat_couple",            "f_sl":  "feat_slap",
-    "f_hg":  "feat_hug",               "f_ks":  "feat_kiss",
-    "f_pt":  "feat_pat",               "f_is":  "feat_inline_search",
-    "f_rc":  "feat_reactions",         "f_cb":  "feat_chatbot",
-    "f_td":  "feat_truth_dare",        "f_nt":  "feat_notes",
-    "f_wn":  "feat_warns",             "f_mt":  "feat_muting",
-    # Poster page
-    "p_an":  "poster_cmd_ani",         "p_nt":  "poster_cmd_net",
-    "p_cr":  "poster_cmd_crun",        "p_dk":  "poster_cmd_dark",
-    "p_lt":  "poster_cmd_light",       "p_md":  "poster_cmd_mod",
-    "f_bn":  "feat_bans",              "f_rl":  "feat_rules",
-    "f_ar":  "feat_airing",            "f_ch":  "feat_character",
-    "f_ai":  "feat_anime_info",        "f_ak":  "feat_afk",
-    # Modules page
-    "m_ad":  "mod_admin",              "m_af":  "mod_antiflood",
-    "m_ap":  "mod_approve",            "m_bl":  "mod_blacklist",
-    "m_bs":  "mod_blsticker",          "m_cb":  "mod_chatbot",
-    "m_cl":  "mod_cleaner",            "m_cn":  "mod_connection",
-    "m_cu":  "mod_currency",           "m_cf":  "mod_custfilters",
-    "m_gb":  "mod_globalbans",         "m_im":  "mod_imdb",
-    "m_lk":  "mod_locks",              "m_lc":  "mod_logchannel",
-    "m_pg":  "mod_ping",               "m_pu":  "mod_purge",
-    "m_rp":  "mod_reporting",          "m_sd":  "mod_sed",
-    "m_sh":  "mod_shell",              "m_sp":  "mod_speedtest",
-    "m_st":  "mod_stickers",           "m_ta":  "mod_tagall",
-    "m_tr":  "mod_translator",         "m_tt":  "mod_truthdare",
-    "m_ud":  "mod_ud",                 "m_wp":  "mod_wallpaper",
-    "m_wk":  "mod_wiki",               "m_wr":  "mod_writetool",
-    "m_aq":  "mod_animequotes",        "m_gt":  "mod_gettime",
-    "m_bw":  "mod_badwords",
-}
 
 
 async def send_admin_menu(
@@ -3774,12 +3732,13 @@ async def send_admin_menu(
     """
     global _PANEL_PAGES, _PANEL_PAGES_TS
 
-    # ── Debounce: drop rapid duplicate clicks within 0.6s ─────────────────────
+    # ── No lock — pre-built pages are read-only, safe for concurrent access ───
+    # Drop duplicate clicks: if same message_id received twice, ignore 2nd
     if query:
-        _dup_key = f"adm_dup_{chat_id}_{page}"
+        _dup_key = f"adm_dup_{chat_id}_{getattr(query.message, 'message_id', 0)}"
         _ts_now = time.monotonic()
         _last_ts = _panel_cache_get(_dup_key)
-        if _last_ts and (_ts_now - _last_ts) < 0.6:
+        if _last_ts and (_ts_now - _last_ts) < 0.8:
             try: await query.answer()
             except Exception: pass
             return
@@ -3791,17 +3750,10 @@ async def send_admin_menu(
     now = time.monotonic()
 
     # ── Rebuild page cache if stale (<1ms when fresh) ──────────────────────────
-    # Uses cached values first — DB fetch only happens once per TTL, in a thread
     if not _PANEL_PAGES or (now - _PANEL_PAGES_TS) > _PANEL_PAGES_TTL:
-        try:
-            maint     = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: get_setting("maintenance_mode", "false") == "true")
-            clone_red = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: get_setting("clone_redirect_enabled", "false") == "true")
-            clean_gc  = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: get_setting("clean_gc_enabled", "true") == "true")
-        except Exception:
-            maint, clone_red, clean_gc = False, False, True
+        maint     = get_setting("maintenance_mode",       "false") == "true"
+        clone_red = get_setting("clone_redirect_enabled", "false") == "true"
+        clean_gc  = get_setting("clean_gc_enabled",       "true")  == "true"
         _PANEL_PAGES, _status_line = _build_panel_pages(maint, clone_red, clean_gc)
         _PANEL_PAGES["_status"] = _status_line
         _PANEL_PAGES_TS = now
@@ -3819,17 +3771,7 @@ async def send_admin_menu(
         )
     )
 
-    # ── ULTRA-FAST PATH: page navigation only swaps the keyboard ─────────────────
-    # Caption is identical on all pages → edit_message_reply_markup (~20ms, 1 call)
-    if query and query.message and query.message.reply_markup:
-        try:
-            await query.message.edit_reply_markup(reply_markup=markup)
-            return
-        except Exception as exc:
-            err = str(exc).lower()
-            if "not modified" in err:
-                return  # already showing this page
-            # Fall through to full panel delivery
+    img_url = get_panel_pic("admin")
 
     await _deliver_panel(
         context.bot, chat_id, "admin",
@@ -3846,14 +3788,12 @@ async def send_stats_panel(
 ) -> None:
     """Send bot statistics panel — instant via edit-in-place."""
     try:
-        loop = asyncio.get_event_loop()
-        user_count    = await loop.run_in_executor(None, get_user_count)
-        channel_count = await loop.run_in_executor(None, lambda: len(get_all_force_sub_channels()))
-        link_count    = await loop.run_in_executor(None, get_links_count)
-        clones        = await loop.run_in_executor(None, lambda: get_all_clone_bots(active_only=True))
-        blocked       = await loop.run_in_executor(None, get_blocked_users_count)
-        maint_val     = await loop.run_in_executor(None, lambda: get_setting("maintenance_mode", "false"))
-        maint = "🔴 ON" if maint_val == "true" else "🟢 OFF"
+        user_count = get_user_count()
+        channel_count = len(get_all_force_sub_channels())
+        link_count = get_links_count()
+        clones = get_all_clone_bots(active_only=True)
+        blocked = get_blocked_users_count()
+        maint = "🔴 ON" if get_setting("maintenance_mode", "false") == "true" else "🟢 OFF"
 
         text = (
             b(" Bot Statistics") + "\n\n"
@@ -3938,14 +3878,24 @@ async def show_category_settings_menu(
             await query.delete_message()
         except Exception:
             pass
-        img_url = get_panel_pic("categories")
+        img_url = None
+        if _PANEL_IMAGE_AVAILABLE:
+            try:
+                img_url = await get_panel_pic_async("categories")
+            except Exception:
+                pass
         if img_url:
             sent = await safe_send_photo(context.bot, chat_id, img_url, caption=text, reply_markup=markup)
             if sent:
                 return
         await safe_send_message(context.bot, chat_id, text, reply_markup=markup)
     else:
-        img_url = get_panel_pic("categories")
+        img_url = None
+        if _PANEL_IMAGE_AVAILABLE:
+            try:
+                img_url = await get_panel_pic_async("categories")
+            except Exception:
+                pass
         if img_url:
             sent = await safe_send_photo(context.bot, chat_id, img_url, caption=text, reply_markup=markup)
             if sent:
@@ -4566,23 +4516,6 @@ async def cmd_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     /cmd — Show commands based on who is asking.
     Everyone can use this. Output is filtered by authority level.
     """
-    try:
-        await _cmd_command_inner(update, context)
-    except Exception as exc:
-        logger.error(f"cmd_command failed: {exc}", exc_info=True)
-        try:
-            uid = update.effective_user.id if update.effective_user else 0
-            await context.bot.send_message(
-                uid,
-                f"<b>❗ /cmd failed:</b> <code>{html.escape(str(exc)[:300])}</code>",
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception:
-            pass
-
-
-async def _cmd_command_inner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Inner implementation of /cmd — wrapped by cmd_command for error catching."""
     await delete_update_message(update, context)
     uid  = update.effective_user.id if update.effective_user else 0
     chat = update.effective_chat
@@ -4599,16 +4532,16 @@ async def _cmd_command_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # ── Section builder ────────────────────────────────────────────────────
     def sec(title, cmds):
-        # Use title as-is (no small_caps on section titles — avoids emoji mangling)
-        lines = f"<b>{e(title)}</b>\n"
+        lines = f"<b>{small_caps(title)}</b>\n"
         for cmd, desc in cmds:
+            # Never small-cap the command itself (it starts with /)
             lines += f"  /{cmd} — {small_caps(desc)}\n"
         return lines + "\n"
 
     # ══════════════════════════════════════════════
     # SECTION 1 — EVERYONE (always shown)
     # ══════════════════════════════════════════════
-    public = sec("General — Everyone", [
+    public = sec("🌐 General — Everyone", [
         ("start",       "Main menu"),
         ("help",        "Help & channel links"),
         ("cmd",         "Show all commands (this list)"),
@@ -4625,7 +4558,7 @@ async def _cmd_command_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ("report",      "<reason> — Report a message to admins (reply)"),
     ])
 
-    anime_s = sec("Anime & Media — Everyone", [
+    anime_s = sec("🎌 Anime & Media — Everyone", [
         ("anime",      "<name> — Anime poster + info"),
         ("manga",      "<name> — Manga poster + info"),
         ("movie",      "<name> — Movie poster + info"),
@@ -4636,7 +4569,7 @@ async def _cmd_command_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ("imdb",       "<name> — IMDb lookup"),
     ])
 
-    fun_s = sec("Fun & Reactions — Everyone", [
+    fun_s = sec("🎮 Fun & Reactions — Everyone", [
         ("hug",         "Hug someone (reply to their message)"),
         ("slap",        "Slap someone (reply)"),
         ("kiss",        "Kiss someone (reply)"),
@@ -4663,7 +4596,7 @@ async def _cmd_command_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ("afk",         "<reason> — Set yourself as AFK"),
     ])
 
-    tools_s = sec("Tools — Everyone", [
+    tools_s = sec("🛠 Tools — Everyone", [
         ("wiki",        "<topic> — Wikipedia summary"),
         ("ud",          "<word> — Urban Dictionary definition"),
         ("tr",          "<lang> <text> — Translate text"),
@@ -4687,7 +4620,7 @@ async def _cmd_command_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ("google",      "<query> — Google search"),
     ])
 
-    group_s = sec("Group Info — Everyone", [
+    group_s = sec("📋 Group Info — Everyone", [
         ("rules",      "View group rules"),
         ("warns",      "Check your warn count"),
         ("notes",      "List all saved notes"),
@@ -4701,7 +4634,7 @@ async def _cmd_command_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # ══════════════════════════════════════════════
     # SECTION 2 — GROUP ADMINS (shown if admin in group)
     # ══════════════════════════════════════════════
-    moderation_s = sec("Moderation — Group Admins", [
+    moderation_s = sec("🛡 Moderation — Group Admins", [
         ("ban",        "@user <reason> — Ban"),
         ("tban",       "@user <time> — Temp ban (1h, 2d)"),
         ("kick",       "@user — Kick from group"),
@@ -4715,7 +4648,7 @@ async def _cmd_command_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ("gban",       "@user <reason> — Global ban"),
     ])
 
-    group_mgmt_s = sec("Group Settings — Group Admins", [
+    group_mgmt_s = sec("⚙️ Group Settings — Group Admins", [
         ("setrules",   "<text> — Set rules"),
         ("clearrules", "Clear rules"),
         ("save",       "<name> <text> — Save note"),
@@ -4734,7 +4667,7 @@ async def _cmd_command_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ("setsticker", "Set group sticker (reply)"),
     ])
 
-    welcome_s = sec("Welcome System — Group Admins", [
+    welcome_s = sec("👋 Welcome System — Group Admins", [
         ("welcome",         "<on/off/noformat> — Toggle/view welcome"),
         ("setwelcome",      "<text> — Set custom welcome message"),
         ("resetwelcome",    "Reset welcome to default"),
@@ -4750,7 +4683,7 @@ async def _cmd_command_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ("welcomemutehelp", "Explain soft/strong mute modes"),
     ])
 
-    filter_s = sec("Filters & Locks — Group Admins", [
+    filter_s = sec("🔍 Filters & Locks — Group Admins", [
         ("filter",     "<keyword> <reply> — Add filter"),
         ("stop",       "<keyword> — Remove filter"),
         ("filters",    "List all filters"),
@@ -4767,7 +4700,7 @@ async def _cmd_command_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ("blstickermode","<action> — Sticker BL action"),
     ])
 
-    anti_s = sec("Anti-Spam — Group Admins", [
+    anti_s = sec("🌊 Anti-Spam — Group Admins", [
         ("setflood",   "<number/off> — Set flood limit"),
         ("setfloodmode","<action> — Flood action"),
         ("flood",      "Current flood settings"),
@@ -4783,7 +4716,7 @@ async def _cmd_command_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
         ("wordaction", "<action> — Bad word action"),
     ])
 
-    log_s = sec("Logging — Group Admins", [
+    log_s = sec("📋 Logging — Group Admins", [
         ("setlog",     "Set log channel (use in channel)"),
         ("unsetlog",   "Remove log channel"),
         ("logchannel", "Show log channel info"),
@@ -4797,7 +4730,7 @@ async def _cmd_command_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # ══════════════════════════════════════════════
     # SECTION 3 — BOT ADMIN ONLY
     # ══════════════════════════════════════════════
-    bot_admin_s = sec("Bot Admin Only", [
+    bot_admin_s = sec("🔴 Bot Admin Only", [
         ("stats",           "Full bot statistics dashboard"),
         ("sysstats",        "Server CPU/RAM/disk usage"),
         ("users",           "Total registered users count"),
@@ -4852,35 +4785,35 @@ async def _cmd_command_inner(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # ── Build final text based on who's asking ────────────────────────────
     if is_bot_admin:
         text = (
-            b("All Commands — Bot Admin View") + "\n\n"
+            b("📋 All Commands — Bot Admin View") + "\n\n"
             + public + anime_s + fun_s + tools_s + group_s
             + moderation_s + group_mgmt_s + welcome_s
             + filter_s + anti_s + log_s + bot_admin_s
         )
-        title = "All Commands — Admin"
+        title = "📋 ᴀʟʟ ᴄᴏᴍᴍᴀɴᴅs — Admin"
     elif is_group_admin:
         text = (
-            b("Commands — Group Admin View") + "\n\n"
+            b("📋 Commands — Group Admin View") + "\n\n"
             + public + anime_s + fun_s + tools_s + group_s
             + moderation_s + group_mgmt_s + welcome_s
             + filter_s + anti_s + log_s
             + "\n<i>Bot admin commands not shown</i>"
         )
-        title = "Commands — Group Admin"
+        title = "📋 ᴄᴏᴍᴍᴀɴᴅs — Group Admin"
     else:
         text = (
-            b("Commands — User View") + "\n\n"
+            b("📋 Commands — User View") + "\n\n"
             + public + anime_s + fun_s + tools_s + group_s
             + "\n<i>Group admin and bot admin commands not shown</i>"
         )
-        title = "Commands"
+        title = "📋 ᴄᴏᴍᴍᴀɴᴅs"
 
-    # ── Send /cmd — split at 3800 chars per page ──────────────────────────
+    # ── Send /cmd — always to user's DM (private) to avoid group spam ──────
+    # Telegram message limit is 4096 chars. We split at 3800 to be safe.
     TELE_MAX = 3800
 
-    # Admin in DM: send directly here. In a group: try DM first, else current chat.
-    is_dm = update.effective_chat and update.effective_chat.type == "private"
-    send_to = update.effective_user.id  # always try DM / current DM
+    # Always try DM first; fall back to current chat if DM blocked
+    send_to = update.effective_user.id  # DM
     close_kb = InlineKeyboardMarkup([[InlineKeyboardButton("✖️ Close", callback_data="close_message")]])
 
     # Build pages: split text into ≤3800-char chunks on section boundaries
@@ -6199,13 +6132,23 @@ async def id_command(
                 pass
 
         # Forwarded from channel
-        if rep.forward_from_chat:
-            fch = rep.forward_from_chat
+        # PTB v21: forward_from_chat removed, use forward_origin
+        _fwd_chat = None
+        try:
+            _fo = getattr(rep, "forward_origin", None)
+            if _fo and hasattr(_fo, "chat"):
+                _fwd_chat = _fo.chat
+            elif _fo and hasattr(_fo, "sender_chat"):
+                _fwd_chat = _fo.sender_chat
+        except Exception:
+            pass
+        if _fwd_chat:
+            fch = _fwd_chat
             text += (
                 f"» {b(small_caps('fwd channel id'))} {code(str(fch.id))}\n"
                 f"» {b(small_caps('fwd channel title'))} {e(fch.title or '')}\n"
             )
-            if fch.username:
+            if getattr(fch, "username", None):
                 text += f"» {b(small_caps('fwd username'))} @{e(fch.username)}\n"
 
         if rep.from_user and not rep.sender_chat:
@@ -6699,42 +6642,42 @@ async def inline_query_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """
-    @bot inline query handler.
+    @bot inline query handler — 4 divisions:
+    1. (empty)   → show main menu: Poster / Watch / Character / Group Mgmt
+    2. poster <name> or just <name> → AniList search with cover photo
+    3. watch <name> → browse generated_links (anime channels)
+    4. character <name> or char <name> → character info with photo
+    5. manage → group management quick cards
 
-    Menu options (shown when query is empty or starts with a keyword):
-      poster          → make anime poster
-      watch / atw     → anime to watch from generated_links
-      character / char → anime character info
-      manage          → group management quick commands
-
-    Force-sub gate: non-admin users must be subscribed to force-sub channels.
+    Force-sub gate: non-admin users must subscribe first.
     """
-    query = update.inline_query
-    if not query:
+    query_obj = update.inline_query
+    if not query_obj:
         return
 
-    uid    = query.from_user.id
-    search = (query.query or "").strip()
+    uid    = query_obj.from_user.id
+    search = (query_obj.query or "").strip()
 
-    # ── Force-sub gate for inline ──────────────────────────────────────────────
+    # ── Force-sub gate ─────────────────────────────────────────────────────────
     if uid not in (ADMIN_ID, OWNER_ID):
         if is_user_banned(uid):
             return
         try:
             unsubbed = await get_unsubscribed_channels(uid, context.bot)
             if unsubbed:
-                from telegram import InlineQueryResultArticle, InputTextMessageContent
-                warning = InlineQueryResultArticle(
-                    id="fsub_gate",
-                    title=small_caps("⚠️ please subscribe first"),
-                    description=small_caps("subscribe to all required channels to use inline"),
-                    input_message_content=InputTextMessageContent(
-                        b(small_caps("⚠️ subscribe to all required channels first.")) + "\n"
-                        + bq(small_caps("use /start in the bot to see the channels.")),
-                        parse_mode=ParseMode.HTML,
-                    ),
-                )
-                await query.answer([warning], cache_time=10, is_personal=True)
+                ch_list = "\n".join(f"• {n}" for n, _, _ in unsubbed[:3])
+                await query_obj.answer([
+                    InlineQueryResultArticle(
+                        id="fsub_gate",
+                        title=small_caps("⚠️ subscribe to channels first"),
+                        description=small_caps("tap to see required channels"),
+                        input_message_content=InputTextMessageContent(
+                            b(small_caps("⚠️ please subscribe to all required channels first.")) + "\n"
+                            + bq(ch_list + "\n\n" + small_caps("use /start in the bot to join.")),
+                            parse_mode=ParseMode.HTML,
+                        ),
+                    )
+                ], cache_time=10, is_personal=True)
                 return
         except Exception:
             pass
@@ -6747,111 +6690,66 @@ async def inline_query_handler(
     results = []
     search_lower = search.lower()
 
-    # ── EMPTY QUERY: show main menu options ────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # EMPTY QUERY — show 4 division menu
+    # ══════════════════════════════════════════════════════════════════════════
     if not search:
         menu_items = [
-            ("🎌 ᴘᴏsᴛᴇʀ",          "poster",    "Make anime/movie poster", "Type the anime name after 'poster '"),
-            ("📺 ᴀɴɪᴍᴇ ᴛᴏ ᴡᴀᴛᴄʜ",   "watch",     "Browse available anime channels", "Type anime name or browse"),
-            ("👤 ᴄʜᴀʀᴀᴄᴛᴇʀ ɪɴꜰᴏ",   "character", "Anime character details", "Type character name after 'character '"),
-            ("⚙️ ɢʀᴏᴜᴘ ᴍɢᴍᴛ",       "manage",    "Group management commands", "Quick group admin commands"),
+            (
+                "🎌 Poster", "poster",
+                "Search anime/manga/movie poster",
+                "Type: @bot poster demon slayer",
+            ),
+            (
+                "📺 Anime to Watch", "watch",
+                "Browse available anime channels",
+                "Type: @bot watch jujutsu kaisen",
+            ),
+            (
+                "👤 Character Info", "character",
+                "Search anime character details",
+                "Type: @bot character tanjiro",
+            ),
+            (
+                "⚙️ Group Mgmt", "manage",
+                "Group management quick commands",
+                "Type: @bot manage to see commands",
+            ),
         ]
-        for title_lbl, keyword, desc, hint in menu_items:
+        for title_lbl, kw, desc, hint in menu_items:
             results.append(
                 InlineQueryResultArticle(
-                    id=f"menu_{keyword}",
-                    title=title_lbl,
+                    id=f"menu_{kw}",
+                    title=small_caps(title_lbl),
                     description=small_caps(desc),
                     input_message_content=InputTextMessageContent(
-                        b(small_caps(f"typing @{BOT_USERNAME} {keyword} <query>")) + "\n"
-                        + bq(small_caps(hint)),
+                        b(small_caps(title_lbl)) + "\n" + bq(small_caps(hint)),
                         parse_mode=ParseMode.HTML,
                     ),
                 )
             )
         try:
-            await query.answer(results, cache_time=30, is_personal=False)
+            await query_obj.answer(results, cache_time=30, is_personal=False, button=None)
         except Exception:
             pass
         return
 
-    # ── POSTER: /poster <query> or just <query> (default mode) ────────────────
-    if search_lower.startswith("poster ") or (
-        not any(search_lower.startswith(k) for k in ("watch ", "character ", "char ", "manage"))
-    ):
-        anime_q = search[7:].strip() if search_lower.startswith("poster ") else search
-        if anime_q:
-            try:
-                from modules.anime import _al_sync, _ANIME_GQL, _resolve_query
-                loop = asyncio.get_event_loop()
-                data = await loop.run_in_executor(
-                    None, _al_sync, _ANIME_GQL, _resolve_query(anime_q)
-                )
-                if data:
-                    t_d    = data.get("title", {}) or {}
-                    title  = t_d.get("english") or t_d.get("romaji") or anime_q
-                    native = t_d.get("native", "")
-                    score  = data.get("averageScore", "?")
-                    status = (data.get("status") or "").replace("_", " ").title()
-                    genres = ", ".join((data.get("genres") or [])[:3])
-                    cover  = (data.get("coverImage") or {}).get("large") or ""
-                    site   = data.get("siteUrl", "")
-                    cap = f"<b>{e(title)}</b>"
-                    if native:
-                        cap += f"\n<i>{e(native)}</i>"
-                    cap += f"\n\n» <b>{small_caps('Rating')}:</b> <code>{score}/100</code>"
-                    if genres:
-                        cap += f"\n» <b>{small_caps('Genre')}:</b> {e(genres)}"
-                    cap += f"\n» <b>{small_caps('Status')}:</b> {e(status)}"
-                    if len(cap) > 1020:
-                        cap = cap[:1016] + "…"
-
-                    kb_markup = None
-                    if site:
-                        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-                        kb_markup = InlineKeyboardMarkup([[
-                            InlineKeyboardButton(small_caps("📋 Info"), url=site)
-                        ]])
-
-                    if cover:
-                        results.append(
-                            InlineQueryResultPhoto(
-                                id=f"anime_poster_{data.get('id', 0)}",
-                                photo_url=cover,
-                                thumbnail_url=cover,
-                                title=title,
-                                description=f"{score}/100 • {status} • {genres}",
-                                caption=cap,
-                                parse_mode=ParseMode.HTML,
-                                reply_markup=kb_markup,
-                            )
-                        )
-                    else:
-                        results.append(
-                            InlineQueryResultArticle(
-                                id=f"anime_art_{data.get('id', 0)}",
-                                title=f"🎌 {title}",
-                                description=f"{score}/100 • {status} • {genres}",
-                                input_message_content=InputTextMessageContent(
-                                    cap, parse_mode=ParseMode.HTML,
-                                ),
-                                reply_markup=kb_markup,
-                            )
-                        )
-            except Exception as exc:
-                logger.debug(f"[inline] poster: {exc}")
-
-    # ── ANIME TO WATCH: browse generated_links ─────────────────────────────────
-    if search_lower.startswith("watch ") or search_lower.startswith("atw "):
-        watch_q = re.sub(r'^(watch|atw)\s+', '', search, flags=re.IGNORECASE)
+    # ══════════════════════════════════════════════════════════════════════════
+    # ANIME TO WATCH — search generated_links
+    # ══════════════════════════════════════════════════════════════════════════
+    if search_lower.startswith("watch ") or search_lower == "watch":
+        watch_q = re.sub(r"^watch\s*", "", search, flags=re.IGNORECASE).strip()
         try:
             from database_dual import get_all_links
+            from modules.anime import _al_sync, _ANIME_GQL, _resolve_query
             all_links = get_all_links(limit=200, offset=0) or []
+            loop = asyncio.get_event_loop()
 
             seen_t: set = set()
             for row in all_links:
-                link_id_r   = row[0]
-                ch_id_r     = row[1]
-                ch_title    = (row[2] or "").strip()
+                link_id_r  = row[0]
+                ch_id_r    = row[1]
+                ch_title   = (row[2] or "").strip()
                 if not ch_title or ch_title.lower() in seen_t:
                     continue
                 if watch_q and watch_q.lower() not in ch_title.lower():
@@ -6859,26 +6757,24 @@ async def inline_query_handler(
                 seen_t.add(ch_title.lower())
 
                 deep_link = f"https://t.me/{BOT_USERNAME}?start={link_id_r}"
+                join_text = (get_setting("env_JOIN_BTN_TEXT", "") or small_caps("ᴊᴏɪɴ ɴᴏᴡ"))
 
-                # Try to get AniList cover
+                # Try to get AniList cover for richer result
                 cover_url = ""
+                score_str = ""
                 try:
-                    from modules.anime import _al_sync, _ANIME_GQL
-                    loop = asyncio.get_event_loop()
                     al_d = await loop.run_in_executor(None, _al_sync, _ANIME_GQL, ch_title)
                     if al_d:
                         cover_url = (al_d.get("coverImage") or {}).get("medium") or ""
+                        score = al_d.get("averageScore", "")
+                        status = (al_d.get("status") or "").replace("_", " ").title()
+                        genres = ", ".join((al_d.get("genres") or [])[:2])
+                        score_str = f"{score}/100" if score else ""
                 except Exception:
                     pass
 
                 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-                join_text = (
-                    get_setting("env_JOIN_BTN_TEXT", "") or
-                    small_caps("ᴊᴏɪɴ ɴᴏᴡ")
-                )
-                kb_watch = InlineKeyboardMarkup([[
-                    InlineKeyboardButton(join_text, url=deep_link)
-                ]])
+                kb = InlineKeyboardMarkup([[InlineKeyboardButton(join_text, url=deep_link)]])
 
                 if cover_url:
                     results.append(
@@ -6887,10 +6783,12 @@ async def inline_query_handler(
                             photo_url=cover_url,
                             thumbnail_url=cover_url,
                             title=small_caps(ch_title[:40]),
-                            description=small_caps("tap to get join link"),
-                            caption=b(small_caps(ch_title)),
+                            description=small_caps(f"{score_str} • tap to get join link"),
+                            caption=b(small_caps(ch_title)) + (
+                                f"\n» <b>{small_caps('Rating')}:</b> <code>{score_str}</code>" if score_str else ""
+                            ),
                             parse_mode=ParseMode.HTML,
-                            reply_markup=kb_watch,
+                            reply_markup=kb,
                         )
                     )
                 else:
@@ -6900,101 +6798,227 @@ async def inline_query_handler(
                             title=small_caps(ch_title[:40]),
                             description=small_caps("tap to get join link"),
                             input_message_content=InputTextMessageContent(
-                                b(small_caps(ch_title)),
-                                parse_mode=ParseMode.HTML,
+                                b(small_caps(ch_title)), parse_mode=ParseMode.HTML,
                             ),
-                            reply_markup=kb_watch,
+                            reply_markup=kb,
                         )
                     )
                 if len(results) >= 10:
                     break
+
         except Exception as exc:
             logger.debug(f"[inline] watch: {exc}")
 
-    # ── CHARACTER INFO ─────────────────────────────────────────────────────────
+        try:
+            await query_obj.answer(results or [
+                InlineQueryResultArticle(
+                    id="watch_empty",
+                    title=small_caps("no anime channels found"),
+                    description=small_caps("generate links first using /start"),
+                    input_message_content=InputTextMessageContent(
+                        b(small_caps("no anime channels available yet.")), parse_mode=ParseMode.HTML,
+                    ),
+                )
+            ], cache_time=10, is_personal=True)
+        except Exception:
+            pass
+        return
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # CHARACTER INFO
+    # ══════════════════════════════════════════════════════════════════════════
     if search_lower.startswith("character ") or search_lower.startswith("char "):
-        char_q = re.sub(r'^(character|char)\s+', '', search, flags=re.IGNORECASE)
+        char_q = re.sub(r"^(character|char)\s+", "", search, flags=re.IGNORECASE).strip()
         if char_q:
             try:
                 from modules.anime import _al_sync, _CHAR_GQL
                 loop = asyncio.get_event_loop()
                 data = await loop.run_in_executor(None, _al_sync, _CHAR_GQL, char_q)
                 if data:
-                    nm     = data.get("name", {}) or {}
-                    full   = nm.get("full", char_q)
-                    native = nm.get("native", "")
-                    desc   = re.sub(r"<[^>]+>", "", data.get("description", "") or "")
-                    desc   = (desc[:150].rsplit(" ", 1)[0] + "…") if len(desc) > 150 else desc
-                    img    = (data.get("image") or {}).get("large") or ""
-                    site   = data.get("siteUrl", "")
-                    cap    = f"<b>{e(full)}</b>"
+                    nm      = data.get("name", {}) or {}
+                    full    = nm.get("full", char_q)
+                    native  = nm.get("native", "")
+                    desc    = re.sub(r"<[^>]+>", "", data.get("description", "") or "")
+                    desc    = (desc[:180].rsplit(" ", 1)[0] + "…") if len(desc) > 180 else desc
+                    img     = (data.get("image") or {}).get("large") or ""
+                    site    = data.get("siteUrl", "")
+                    cap     = f"<b>{e(full)}</b>"
                     if native:
                         cap += f" (<i>{e(native)}</i>)"
                     if desc:
                         cap += f"\n\n{e(desc)}"
+                    if len(cap) > 900:
+                        cap = cap[:896] + "…"
 
-                    kb_c = None
-                    if site:
-                        from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-                        kb_c = InlineKeyboardMarkup([[
-                            InlineKeyboardButton("📋 AniList", url=site)
-                        ]])
+                    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+                    kb = InlineKeyboardMarkup([[InlineKeyboardButton("📋 AniList", url=site)]]) if site else None
 
                     if img:
                         results.append(
                             InlineQueryResultPhoto(
-                                id=f"char_{hash(full) % 100000}",
+                                id=f"char_{abs(hash(full)) % 1000000}",
                                 photo_url=img,
                                 thumbnail_url=img,
                                 title=full,
-                                description=desc[:80] if desc else "",
+                                description=(desc[:80] + "…") if len(desc) > 80 else desc,
                                 caption=cap,
                                 parse_mode=ParseMode.HTML,
-                                reply_markup=kb_c,
+                                reply_markup=kb,
                             )
                         )
                     else:
                         results.append(
                             InlineQueryResultArticle(
-                                id=f"char_art_{hash(full) % 100000}",
+                                id=f"char_art_{abs(hash(full)) % 1000000}",
                                 title=full,
-                                description=desc[:80] if desc else "",
-                                input_message_content=InputTextMessageContent(
-                                    cap, parse_mode=ParseMode.HTML,
-                                ),
-                                reply_markup=kb_c,
+                                description=(desc[:80] + "…") if len(desc) > 80 else desc,
+                                input_message_content=InputTextMessageContent(cap, parse_mode=ParseMode.HTML),
+                                reply_markup=kb,
                             )
                         )
             except Exception as exc:
                 logger.debug(f"[inline] character: {exc}")
 
-    # ── GROUP MANAGEMENT quick reference ──────────────────────────────────────
+        try:
+            await query_obj.answer(results or [
+                InlineQueryResultArticle(
+                    id="char_empty",
+                    title=small_caps(f"character not found: {char_q}"),
+                    description=small_caps("try a different name"),
+                    input_message_content=InputTextMessageContent(
+                        b(small_caps(f"character \'{char_q}\' not found.")), parse_mode=ParseMode.HTML,
+                    ),
+                )
+            ], cache_time=20, is_personal=False)
+        except Exception:
+            pass
+        return
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # GROUP MANAGEMENT quick reference
+    # ══════════════════════════════════════════════════════════════════════════
     if search_lower.startswith("manage"):
         manage_items = [
-            ("🚫 /ban @user",    "Ban a user from the group"),
-            ("🔇 /mute @user",   "Mute a user"),
-            ("👢 /kick @user",   "Kick (not ban) a user"),
-            ("⚠️ /warn @user",   "Warn a user (3 warns = ban)"),
-            ("📌 /pin",          "Pin replied message"),
-            ("📋 /rules",        "Show group rules"),
-            ("🗑 /purge",        "Delete messages in bulk"),
-            ("👑 /promote @user","Promote user to admin"),
+            ("🚫 Ban",       "/ban @user reason",    "Ban a user from the group"),
+            ("🔇 Mute",      "/mute @user",          "Mute a user (can't send messages)"),
+            ("👢 Kick",      "/kick @user",          "Kick (remove, can rejoin)"),
+            ("⚠️ Warn",      "/warn @user reason",   "Warn user (3 = auto ban)"),
+            ("📌 Pin",       "/pin (reply to msg)",  "Pin a message in the group"),
+            ("📋 Rules",     "/rules",               "Show group rules"),
+            ("🗑 Purge",     "/purge (reply to msg)","Delete messages in bulk"),
+            ("👑 Promote",   "/promote @user",       "Promote user to admin"),
+            ("📉 Demote",    "/demote @user",        "Demote admin to member"),
+            ("🔕 Mute All",  "/mutechat",            "Mute entire chat"),
+            ("📢 Unmute All","/unmutechat",          "Unmute entire chat"),
+            ("🔗 Link",      "/invitelink",          "Get group invite link"),
         ]
-        for lbl, desc in manage_items:
+        for lbl, cmd, desc in manage_items:
             results.append(
                 InlineQueryResultArticle(
-                    id=f"mgmt_{hash(lbl) % 100000}",
+                    id=f"mgmt_{abs(hash(lbl)) % 1000000}",
                     title=small_caps(lbl),
                     description=small_caps(desc),
                     input_message_content=InputTextMessageContent(
-                        b(small_caps(lbl)) + "\n" + bq(small_caps(desc)),
+                        b(small_caps(lbl)) + "\n" + code(cmd) + "\n" + bq(small_caps(desc)),
                         parse_mode=ParseMode.HTML,
                     ),
                 )
             )
+        try:
+            await query_obj.answer(results, cache_time=60, is_personal=False)
+        except Exception:
+            pass
+        return
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # POSTER / DEFAULT — anime search (handles "poster <name>" or just "<name>")
+    # ══════════════════════════════════════════════════════════════════════════
+    anime_q = re.sub(r"^poster\s+", "", search, flags=re.IGNORECASE).strip() or search
+
+    if anime_q:
+        try:
+            from modules.anime import _al_sync, _ANIME_GQL, _resolve_query
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(
+                None, _al_sync, _ANIME_GQL, _resolve_query(anime_q)
+            )
+            if data:
+                t_d    = data.get("title", {}) or {}
+                title  = t_d.get("english") or t_d.get("romaji") or anime_q
+                native = t_d.get("native", "")
+                score  = data.get("averageScore", "?")
+                status = (data.get("status") or "").replace("_", " ").title()
+                genres = ", ".join((data.get("genres") or [])[:3])
+                cover  = (data.get("coverImage") or {}).get("large") or ""
+                banner = data.get("bannerImage") or ""
+                site   = data.get("siteUrl", "")
+                eps    = data.get("episodes", "?")
+                fmt    = (data.get("format") or "").replace("_", " ")
+                stnode = ((data.get("studios") or {}).get("nodes") or [])
+                studio = stnode[0].get("name", "") if stnode else ""
+
+                cap = f"<b>{e(title)}</b>"
+                if native:
+                    cap += f"\n<i>{e(native)}</i>"
+                cap += "\n\n"
+                if genres:
+                    cap += f"» <b>{small_caps('Genre')}:</b> {e(genres)}\n"
+                if str(score) not in ("?", "0", "None"):
+                    cap += f"» <b>{small_caps('Rating')}:</b> <code>{score}/100</code>\n"
+                if status:
+                    cap += f"» <b>{small_caps('Status')}:</b> {e(status)}\n"
+                if str(eps) not in ("?", "0", "None"):
+                    cap += f"» <b>{small_caps('Episodes')}:</b> <code>{eps}</code>\n"
+                if fmt:
+                    cap += f"» <b>{small_caps('Format')}:</b> {e(fmt)}\n"
+                if studio:
+                    cap += f"» <b>{small_caps('Studio')}:</b> {e(studio)}\n"
+                if len(cap) > 1000:
+                    cap = cap[:996] + "…"
+
+                from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+                kb = None
+                if site:
+                    kb = InlineKeyboardMarkup([[InlineKeyboardButton(small_caps("📋 Info"), url=site)]])
+
+                use_img = cover or banner
+                if use_img:
+                    results.append(
+                        InlineQueryResultPhoto(
+                            id=f"anime_poster_{data.get('id', abs(hash(title)) % 1000000)}",
+                            photo_url=use_img,
+                            thumbnail_url=(data.get("coverImage") or {}).get("medium") or use_img,
+                            title=title,
+                            description=f"{score}/100 • {status} • {genres}",
+                            caption=cap,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=kb,
+                        )
+                    )
+                else:
+                    results.append(
+                        InlineQueryResultArticle(
+                            id=f"anime_art_{data.get('id', abs(hash(title)) % 1000000)}",
+                            title=f"🎌 {title}",
+                            description=f"{score}/100 • {status} • {genres}",
+                            input_message_content=InputTextMessageContent(cap, parse_mode=ParseMode.HTML),
+                            reply_markup=kb,
+                        )
+                    )
+        except Exception as exc:
+            logger.debug(f"[inline] poster: {exc}")
 
     try:
-        await query.answer(results[:10], cache_time=15, is_personal=True)
+        await query_obj.answer(results[:10] or [
+            InlineQueryResultArticle(
+                id="not_found",
+                title=small_caps(f"not found: {anime_q[:30]}"),
+                description=small_caps("try a different search term"),
+                input_message_content=InputTextMessageContent(
+                    b(small_caps(f"\'{anime_q}\' not found on AniList.")), parse_mode=ParseMode.HTML,
+                ),
+            )
+        ], cache_time=15, is_personal=False)
     except Exception as exc:
         logger.debug(f"[inline] answer: {exc}")
 
@@ -7760,10 +7784,19 @@ async def handle_admin_photo(
     # ── PENDING_CHANNEL_POST: forwarded message used to extract channel ID ────
     if state == PENDING_CHANNEL_POST:
         fwd_chat = None
-        if msg.forward_from_chat:
-            fwd_chat = msg.forward_from_chat
-        elif msg.forward_origin and hasattr(msg.forward_origin, "chat"):
-            fwd_chat = msg.forward_origin.chat
+        fwd_chat = None
+        try:
+            _fo = getattr(msg, "forward_origin", None)
+            if _fo and hasattr(_fo, "chat"):
+                fwd_chat = _fo.chat
+            elif _fo and hasattr(_fo, "sender_chat"):
+                fwd_chat = _fo.sender_chat
+            elif getattr(msg, "forward_from_chat", None):
+                fwd_chat = msg.forward_from_chat
+        except Exception:
+            pass
+        if fwd_chat:
+            pass  # fwd_chat is set
         if not fwd_chat:
             await msg.reply_text(
                 b("❌ This doesn't look like a forwarded channel post.\n\n")
@@ -7800,10 +7833,19 @@ async def handle_admin_photo(
     # ── AF source from forwarded post ─────────────────────────────────────────
     if state == AF_ADD_CONNECTION_SOURCE:
         fwd_chat = None
-        if msg.forward_from_chat:
-            fwd_chat = msg.forward_from_chat
-        elif msg.forward_origin and hasattr(msg.forward_origin, "chat"):
-            fwd_chat = msg.forward_origin.chat
+        fwd_chat = None
+        try:
+            _fo = getattr(msg, "forward_origin", None)
+            if _fo and hasattr(_fo, "chat"):
+                fwd_chat = _fo.chat
+            elif _fo and hasattr(_fo, "sender_chat"):
+                fwd_chat = _fo.sender_chat
+            elif getattr(msg, "forward_from_chat", None):
+                fwd_chat = msg.forward_from_chat
+        except Exception:
+            pass
+        if fwd_chat:
+            pass  # fwd_chat is set
         if fwd_chat:
             try:
                 tg_chat = await context.bot.get_chat(fwd_chat.id)
@@ -7826,10 +7868,19 @@ async def handle_admin_photo(
     # ── AF target from forwarded post ─────────────────────────────────────────
     if state == AF_ADD_CONNECTION_TARGET:
         fwd_chat = None
-        if msg.forward_from_chat:
-            fwd_chat = msg.forward_from_chat
-        elif msg.forward_origin and hasattr(msg.forward_origin, "chat"):
-            fwd_chat = msg.forward_origin.chat
+        fwd_chat = None
+        try:
+            _fo = getattr(msg, "forward_origin", None)
+            if _fo and hasattr(_fo, "chat"):
+                fwd_chat = _fo.chat
+            elif _fo and hasattr(_fo, "sender_chat"):
+                fwd_chat = _fo.sender_chat
+            elif getattr(msg, "forward_from_chat", None):
+                fwd_chat = msg.forward_from_chat
+        except Exception:
+            pass
+        if fwd_chat:
+            pass  # fwd_chat is set
         if fwd_chat:
             try:
                 tg_chat = await context.bot.get_chat(fwd_chat.id)
@@ -7863,10 +7914,19 @@ async def handle_admin_photo(
     # ── AU manga target from forwarded post ───────────────────────────────────
     if state == AU_ADD_MANGA_TARGET:
         fwd_chat = None
-        if msg.forward_from_chat:
-            fwd_chat = msg.forward_from_chat
-        elif msg.forward_origin and hasattr(msg.forward_origin, "chat"):
-            fwd_chat = msg.forward_origin.chat
+        fwd_chat = None
+        try:
+            _fo = getattr(msg, "forward_origin", None)
+            if _fo and hasattr(_fo, "chat"):
+                fwd_chat = _fo.chat
+            elif _fo and hasattr(_fo, "sender_chat"):
+                fwd_chat = _fo.sender_chat
+            elif getattr(msg, "forward_from_chat", None):
+                fwd_chat = msg.forward_from_chat
+        except Exception:
+            pass
+        if fwd_chat:
+            pass  # fwd_chat is set
         if fwd_chat:
             try:
                 tg_chat = await context.bot.get_chat(fwd_chat.id)
@@ -8435,7 +8495,8 @@ def _register_all_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("stats", stats_command, filters=admin_filter))
     app.add_handler(CommandHandler("sysstats", sysstats_command, filters=admin_filter))
     app.add_handler(CommandHandler("users", users_command, filters=admin_filter))
-    app.add_handler(CommandHandler("cmd", cmd_command))  # No filter — everyone can use /cmd, output filtered inside
+    app.add_handler(CommandHandler("cmd", cmd_command))
+    app.add_handler(CommandHandler("commands", cmd_command))
     app.add_handler(CommandHandler("upload", upload_command, filters=admin_filter))
     app.add_handler(CommandHandler("settings", settings_command, filters=admin_filter))
     app.add_handler(CommandHandler("autoupdate", autoupdate_command, filters=admin_filter))
@@ -9054,9 +9115,7 @@ async def post_init(application: Application) -> None:
             logger.warning(f"poster_cache migration: {_e}")
 
     # ── SPEED: Pre-warm all panel caches in background (non-blocking) ─────────
-    # Fire and forget — also pre-builds file_ids so first panel tap is instant
     asyncio.create_task(_prewarm_all_caches(application.bot))
-    asyncio.create_task(_prebuild_all_panels(application.bot))
 
     # ── Apply missing DB migrations ────────────────────────────────────────────
     _migration_sqls = [
@@ -9360,16 +9419,14 @@ async def button_handler(
             pass  # Already answered or expired — never block on this
 
     data = _data_override if _data_override is not None else (query.data or "")
-    # ── Resolve short-code aliases (admin panel buttons use short codes) ──────────
-    data = _CB_ALIAS.get(data, data)
     uid = query.from_user.id if query.from_user else 0
     chat_id = query.message.chat_id if query.message else uid
 
     is_admin = uid in (ADMIN_ID, OWNER_ID)
 
-    # ── Global debounce: if this user is already processing the same callback,
-    #    drop the duplicate click silently. Uses uid+data as key so navigating
-    #    to different panels is never blocked.
+    # ── Global debounce: if this user's panel lock is held AND this callback
+    #    is a known panel-navigation action, drop the duplicate click silently.
+    #    This prevents ping degradation when users click rapidly.
     _PANEL_CALLBACKS = {
         "admin_back", "admin_stats", "admin_settings", "admin_sysstats",
         "admin_channels", "admin_clones", "admin_users", "admin_broadcast",
@@ -9377,12 +9434,9 @@ async def button_handler(
         "user_management", "fsub_link_stats",
     }
     if data in _PANEL_CALLBACKS or data.startswith("adm_page_"):
-        _db_key = f"btn_debounce_{uid}_{data}"
-        _now = time.monotonic()
-        _prev = _panel_cache_get(_db_key)
-        if _prev and (_now - _prev) < 0.5:
-            return  # drop duplicate — already processing this exact action
-        _panel_cache_set(_db_key, _now)
+        lock = _get_panel_lock(uid)
+        if lock.locked():
+            return  # drop — already processing
 
     # ── Utility ────────────────────────────────────────────────────────────────────
     if data == "noop":
@@ -9568,7 +9622,7 @@ async def button_handler(
             await query.delete_message()
         except Exception:
             pass
-        img_url = get_panel_pic("default")
+        img_url = await get_panel_pic_async("default")
         if img_url:
             try:
                 await context.bot.send_photo(chat_id, img_url, caption=text,
@@ -14683,20 +14737,80 @@ def main() -> None:
 
     # Wire up compat shim with bot globals (so BeatVerse modules work)
     import beataniversebot_compat as _compat
-    _compat._set_dispatcher(None)  # Will be set properly after build
+    # NOTE: We pass None here and fix it after build below
     _compat._set_bot_info(0, BOT_NAME, "")
 
     # Build application
     application = (
         Application.builder()
         .token(BOT_TOKEN)
-        .connect_timeout(15)
-        .read_timeout(15)
-        .write_timeout(20)
-        .pool_timeout(60)
-        .concurrent_updates(True)
+        .connect_timeout(30)
+        .read_timeout(30)
+        .write_timeout(30)
         .build()
     )
+
+    # ── Wire module dispatcher bridge ─────────────────────────────────────────
+    # PTB v21 Application has no .dispatcher attribute; modules use the v13
+    # dispatcher shim. We create a bridge that replays module handlers onto
+    # the real PTB v21 application, wrapping any sync callbacks as async.
+    class _AppDispatcherBridge:
+        """
+        Bridge PTB v13 dispatcher.add_handler() calls into PTB v21 Application.
+        Wraps sync callbacks as async (PTB v21 requires all callbacks to be async).
+        Uses group=50 for module handlers so they run AFTER bot.py's own handlers.
+        """
+        def __init__(self, app):
+            self._app = app
+            self._count = 0
+
+        def add_handler(self, handler, group=50, *args, **kwargs):
+            """Register module handler in PTB v21 Application at group=50."""
+            try:
+                orig_cb = getattr(handler, "callback", None)
+                if orig_cb is not None and not asyncio.iscoroutinefunction(orig_cb):
+                    import functools
+                    @functools.wraps(orig_cb)
+                    async def _async_wrapper(update, context, _cb=orig_cb):
+                        try:
+                            result = _cb(update, context)
+                            if asyncio.iscoroutine(result):
+                                await result
+                        except Exception as exc:
+                            logger.debug(f"[bridge] {getattr(_cb, '__name__', '?')}: {exc}")
+                    handler.callback = _async_wrapper
+                # Use group=50 so module handlers run after bot.py's own handlers
+                # but are still active for group commands
+                self._app.add_handler(handler, group=50)
+                self._count += 1
+            except Exception as exc:
+                logger.debug(f"[bridge] add_handler failed: {exc}")
+
+        def add_error_handler(self, *args, **kwargs):
+            try:
+                self._app.add_error_handler(*args, **kwargs)
+            except Exception:
+                pass
+
+        def bot(self):
+            return self._app.bot
+
+    _bridge = _AppDispatcherBridge(application)
+    import beataniversebot_compat as _compat
+    _compat._set_dispatcher(_bridge)
+    logger.info("[bridge] Module dispatcher wired to PTB v21 Application (group=50)")
+
+    # ── Update bot info with real ID/username (available after build) ──────────
+    try:
+        import asyncio as _asyncio_tmp
+        async def _get_me():
+            me = await application.bot.get_me()
+            import beataniversebot_compat as _c
+            _c._set_bot_info(me.id, me.first_name or BOT_NAME, me.username or "")
+            logger.info(f"[bot] identity set: @{me.username} id={me.id}")
+        _asyncio_tmp.get_event_loop().run_until_complete(_get_me())
+    except Exception as _bex:
+        logger.debug(f"[bot] get_me: {_bex}")
 
     # ── Load BeatVerse modules ──────────────────────────────────────────────────
     try:
@@ -14745,8 +14859,8 @@ def main() -> None:
     application.add_handler(CommandHandler("stats", stats_command, filters=admin_filter))
     application.add_handler(CommandHandler("sysstats", sysstats_command, filters=admin_filter))
     application.add_handler(CommandHandler("users", users_command, filters=admin_filter))
-    application.add_handler(CommandHandler("cmd", cmd_command, filters=admin_filter))
-    application.add_handler(CommandHandler("commands", cmd_command, filters=admin_filter))
+    application.add_handler(CommandHandler("cmd", cmd_command))       # Everyone can use /cmd
+    application.add_handler(CommandHandler("commands", cmd_command))  # Everyone can use /commands
     application.add_handler(CommandHandler("upload", upload_command, filters=admin_filter))
     application.add_handler(CommandHandler("settings", settings_command, filters=admin_filter))
     application.add_handler(CommandHandler("autoupdate", autoupdate_command, filters=admin_filter))
@@ -14845,7 +14959,7 @@ def main() -> None:
             filters.ChatType.GROUPS & filters.COMMAND,
             _clean_gc_command_handler,
         ),
-        group=-1,
+        group=10,  # AFTER all command handlers (was -1 which blocked everything)
     )
 
         
@@ -14862,12 +14976,6 @@ def main() -> None:
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=True,
         close_loop=False,
-        poll_interval=0.0,      # return immediately when update arrives
-        timeout=10,             # long-poll window (seconds)
-        read_timeout=15,
-        write_timeout=20,
-        connect_timeout=15,
-        pool_timeout=60,
     )
 
 
