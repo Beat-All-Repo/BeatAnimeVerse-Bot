@@ -116,124 +116,101 @@ SIZE_CB_TO_TEMPLATE = {cb: tmpl for _, cb, tmpl in SIZE_OPTIONS if tmpl}
 # "demon slayer" → "kimetsu no yaiba"  (causes wrong results — REMOVED)
 
 _ABBR: Dict[str, str] = {
-    # Short codes → canonical English title
-    "aot":          "Attack on Titan",
-    "snk":          "Attack on Titan",
-    "bnha":         "My Hero Academia",
-    "mha":          "My Hero Academia",
-    "hxh":          "Hunter x Hunter",
-    "jjk":          "Jujutsu Kaisen",
-    "csm":          "Chainsaw Man",
-    "op":           "One Piece",
-    "fma":          "Fullmetal Alchemist",
-    "fmab":         "Fullmetal Alchemist: Brotherhood",
-    "kny":          "Demon Slayer",
-    "ds":           "Demon Slayer",
-    "re zero":      "Re:Zero",
-    "rezero":       "Re:Zero",
-    "re:zero":      "Re:Zero",
-    "slime":        "That Time I Got Reincarnated as a Slime",
-    "tensura":      "That Time I Got Reincarnated as a Slime",
-    "shield hero":  "The Rising of the Shield Hero",
-    "sao":          "Sword Art Online",
-    "dbs":          "Dragon Ball Super",
-    "dbz":          "Dragon Ball Z",
-    "db":           "Dragon Ball",
-    "cote":         "Classroom of the Elite",
-    "eminence":     "The Eminence in Shadow",
-    "konosuba":     "KonoSuba",
-    "danmachi":     "Is It Wrong to Try to Pick Up Girls in a Dungeon?",
-    "opm":          "One Punch Man",
-    "tpn":          "The Promised Neverland",
-    "sg":           "Steins;Gate",
-    "mia":          "Made in Abyss",
-    "ngnl":         "No Game No Life",
-    "nge":          "Neon Genesis Evangelion",
-    "eva":          "Neon Genesis Evangelion",
-    "bsd":          "Bungo Stray Dogs",
-    "jojo":         "JoJo's Bizarre Adventure",
-    "aot final":    "Attack on Titan The Final Season",
-    # English → canonical English (prevent AniList from picking wrong entry)
-    "demon slayer":                   "Demon Slayer",
-    "kimetsu no yaiba":               "Demon Slayer",
-    "demon slayer swordsmith":        "Demon Slayer: Kimetsu no Yaiba Swordsmith Village Arc",
-    "swordsmith village":             "Demon Slayer: Kimetsu no Yaiba Swordsmith Village Arc",
-    "frieren":                        "Frieren: Beyond Journey's End",
-    "sousou no frieren":              "Frieren: Beyond Journey's End",
-    "frieren beyond":                 "Frieren: Beyond Journey's End",
-    "spy x family":                   "Spy x Family",
-    "spy family":                     "Spy x Family",
-    "blue lock":                      "Blue Lock",
-    "oshi no ko":                     "Oshi no Ko",
-    "overlord":                       "Overlord",
-    "attack on titan":                "Attack on Titan",
-    "shingeki no kyojin":             "Attack on Titan",
-    "one punch man":                  "One Punch Man",
-    "death note":                     "Death Note",
-    "hunter x hunter":                "Hunter x Hunter",
-    "black clover":                   "Black Clover",
-    "dr stone":                       "Dr. Stone",
-    "dr. stone":                      "Dr. Stone",
-    "food wars":                      "Food Wars! Shokugeki no Soma",
-    "shokugeki":                      "Food Wars! Shokugeki no Soma",
-    "vinland saga":                   "Vinland Saga",
-    "jojos bizarre adventure":        "JoJo's Bizarre Adventure",
-    "promised neverland":             "The Promised Neverland",
-    "made in abyss":                  "Made in Abyss",
-    "violet evergarden":              "Violet Evergarden",
-    "your lie in april":              "Your Lie in April",
-    "shigatsu":                       "Your Lie in April",
-    "steins gate":                    "Steins;Gate",
-    "steins;gate":                    "Steins;Gate",
-    "toradora":                       "Toradora",
-    "angel beats":                    "Angel Beats!",
-    "black butler":                   "Black Butler",
-    "kuroshitsuji":                   "Black Butler",
-    "blue exorcist":                  "Blue Exorcist",
-    "ao no exorcist":                 "Blue Exorcist",
-    "bungo stray dogs":               "Bungo Stray Dogs",
-    "bungou stray dogs":              "Bungo Stray Dogs",
-    "noragami":                       "Noragami",
-    "sound euphonium":                "Sound! Euphonium",
-    "hibike euphonium":               "Sound! Euphonium",
-    "k on":                           "K-On!",
-    "k-on":                           "K-On!",
-    "code geass":                     "Code Geass",
-    "cowboy bebop":                   "Cowboy Bebop",
-    "evangelion":                     "Neon Genesis Evangelion",
-    "neon genesis evangelion":        "Neon Genesis Evangelion",
-    "spirited away":                  "Spirited Away",
-    "chainsaw man":                   "Chainsaw Man",
-    "mushoku tensei":                 "Mushoku Tensei: Jobless Reincarnation",
-    "jobless reincarnation":          "Mushoku Tensei: Jobless Reincarnation",
-    "that time i got reincarnated as a slime": "That Time I Got Reincarnated as a Slime",
-    "solo leveling":                  "Solo Leveling",
-    "ore dake":                       "Solo Leveling",
-    "dungeon meshi":                  "Delicious in Dungeon",
-    "delicious in dungeon":           "Delicious in Dungeon",
-    "jujutsu kaisen":                 "Jujutsu Kaisen",
-    "my hero academia":               "My Hero Academia",
-    "sword art online":               "Sword Art Online",
-    "classroom of the elite":         "Classroom of the Elite",
-    "fairy tail":                     "Fairy Tail",
-    "bleach":                         "Bleach",
-    "naruto":                         "Naruto",
-    "one piece":                      "One Piece",
-    "fullmetal alchemist":            "Fullmetal Alchemist",
-    "fullmetal alchemist brotherhood":"Fullmetal Alchemist: Brotherhood",
-    "tokyo ghoul":                    "Tokyo Ghoul",
-    "no game no life":                "No Game No Life",
+    # Short codes → canonical search query
+    "aot":   "attack on titan", "snk": "attack on titan",
+    "bnha":  "my hero academia", "mha": "my hero academia",
+    "hxh":   "hunter x hunter", "jjk": "jujutsu kaisen",
+    "csm":   "chainsaw man", "op":  "one piece",
+    "fma":   "fullmetal alchemist", "fmab": "fullmetal alchemist brotherhood",
+    "kny":   "kimetsu no yaiba", "ds":  "kimetsu no yaiba",
+    "dbs":   "dragon ball super", "dbz": "dragon ball z", "db": "dragon ball",
+    "cote":  "classroom of the elite",
+    "opm":   "one punch man", "tpn": "promised neverland",
+    "sg":    "steins gate", "mia": "made in abyss",
+    "ngnl":  "no game no life", "nge": "neon genesis evangelion",
+    "eva":   "neon genesis evangelion", "bsd": "bungo stray dogs",
+    "sao":   "sword art online", "re zero": "re zero", "rezero": "re zero",
+    # English common names → Romaji that AniList knows well
+    "demon slayer":              "Kimetsu no Yaiba",
+    "demon slayer swordsmith":   "Kimetsu no Yaiba: Katanakaji no Sato-hen",
+    "attack on titan":           "Shingeki no Kyojin",
+    "my hero academia":          "Boku no Hero Academia",
+    "jujutsu kaisen":            "Jujutsu Kaisen",
+    "one punch man":             "One Punch-Man",
+    "dr stone":                  "Dr. Stone",
+    "dr. stone":                 "Dr. Stone",
+    "promised neverland":        "Yakusoku no Neverland",
+    "your lie in april":         "Shigatsu wa Kimi no Uso",
+    "a silent voice":            "Koe no Katachi",
+    "spirited away":             "Sen to Chihiro no Kamikakushi",
+    "violet evergarden":         "Violet Evergarden",
+    "sword art online":          "Sword Art Online",
+    "re:zero":                   "Re:Zero kara Hajimeru Isekai Seikatsu",
+    "slime":                     "Tensei shitara Slime Datta Ken",
+    "tensura":                   "Tensei shitara Slime Datta Ken",
+    "that time i got reincarnated as a slime": "Tensei shitara Slime Datta Ken",
+    "black clover":              "Black Clover",
+    "tokyo revengers":           "Tokyo Revengers",
+    "blue lock":                 "Blue Lock",
+    "chainsaw man":              "Chainsaw Man",
+    "spy x family":              "Spy x Family",
+    "spy family":                "Spy x Family",
+    "bleach":                    "Bleach",
+    "naruto":                    "Naruto",
+    "made in abyss":             "Made in Abyss",
+    "frieren":                   "Sousou no Frieren",
+    "frieren beyond journeys end": "Sousou no Frieren",
+    "oshi no ko":                "Oshi no Ko",
+    "vinland saga":              "Vinland Saga",
+    "mushoku tensei":            "Mushoku Tensei: Jobless Reincarnation",
+    "jobless reincarnation":     "Mushoku Tensei: Jobless Reincarnation",
+    "overlord":                  "Overlord",
+    "no game no life":           "No Game No Life",
+    "hunter x hunter":           "Hunter x Hunter (2011)",
+    "fullmetal alchemist":        "Fullmetal Alchemist: Brotherhood",
+    "fullmetal alchemist brotherhood": "Fullmetal Alchemist: Brotherhood",
+    "steins gate":               "Steins;Gate",
+    "steins;gate":               "Steins;Gate",
+    "death note":                "Death Note",
+    "code geass":                "Code Geass: Hangyaku no Lelouch",
+    "evangelion":                "Neon Genesis Evangelion",
+    "neon genesis evangelion":   "Neon Genesis Evangelion",
+    "cowboy bebop":              "Cowboy Bebop",
+    "fairy tail":                "Fairy Tail",
+    "konosuba":                  "Kono Subarashii Sekai ni Shukufuku wo!",
+    "danmachi":                  "Dungeon ni Deai wo Motomeru no wa Machigatteiru Darou ka",
+    "eminence in shadow":        "Kage no Jitsuryokusha ni Naritakute!",
+    "eminence":                  "Kage no Jitsuryokusha ni Naritakute!",
+    "classroom of the elite":    "Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e",
+    "shield hero":               "Tate no Yuusha no Nariagari",
+    "rising of shield hero":     "Tate no Yuusha no Nariagari",
+    "solo leveling":             "Ore dake Level Up na Ken",
+    "dungeon meshi":             "Dungeon Meshi",
+    "delicious in dungeon":      "Dungeon Meshi",
+    "toradora":                  "Toradora",
+    "angel beats":               "Angel Beats!",
+    "black butler":              "Kuroshitsuji",
+    "blue exorcist":             "Ao no Exorcist",
+    "bungo stray dogs":          "Bungou Stray Dogs",
+    "bungou stray dogs":         "Bungou Stray Dogs",
+    "noragami":                  "Noragami",
+    "sound euphonium":           "Hibike! Euphonium",
+    "k on":                      "K-On!",
+    "k-on":                      "K-On!",
+    "code geass lelouch":        "Code Geass: Hangyaku no Lelouch",
+    "jojo":                      "JoJo no Kimyou na Bouken",
+    "jojos bizarre adventure":   "JoJo no Kimyou na Bouken",
 }
 
-# Season number patterns
+# Season suffix patterns
 _SEASON_RE = [
-    (r'\b(s(\d+))\b',                         lambda m: int(m.group(2))),
-    (r'\bseason\s*(\d+)\b',                   lambda m: int(m.group(1))),
-    (r'\b(\d+)(st|nd|rd|th)\s*season\b',      lambda m: int(m.group(1))),
-    (r'\b(ii)\b',                              lambda m: 2),
-    (r'\b(iii)\b',                             lambda m: 3),
-    (r'\b(iv)\b',                              lambda m: 4),
-    (r'\b(final\s*season)\b',                  lambda m: 99),
+    (r"\b(s(\d+))\b",                        lambda m: int(m.group(2))),
+    (r"\bseason\s*(\d+)\b",                  lambda m: int(m.group(1))),
+    (r"\b(\d+)(st|nd|rd|th)\s*season\b",    lambda m: int(m.group(1))),
+    (r"\b(ii)\b",                              lambda m: 2),
+    (r"\b(iii)\b",                             lambda m: 3),
+    (r"\b(iv)\b",                              lambda m: 4),
+    (r"\b(final\s*season)\b",                 lambda m: 99),
 ]
 
 _SEASON_SUFFIXES: Dict[int, List[str]] = {
@@ -244,21 +221,23 @@ _SEASON_SUFFIXES: Dict[int, List[str]] = {
     99: ["Final Season", "The Final Season"],
 }
 
-
-# ── AniList GQL queries ───────────────────────────────────────────────────────
-
+# AniList GQL
 _ANIME_GQL = """query($s:String){Media(search:$s,type:ANIME,sort:[SEARCH_MATCH,POPULARITY_DESC]){
   id siteUrl title{romaji english native} description(asHtml:false)
   coverImage{extraLarge large medium} bannerImage format status season seasonYear
-  episodes duration averageScore genres studios(isMain:true){nodes{name}}
-  nextAiringEpisode{episode timeUntilAiring}}}"""
+  episodes duration averageScore popularity genres
+  studios(isMain:true){nodes{name}}
+  startDate{year month day}
+  nextAiringEpisode{episode timeUntilAiring}
+  countryOfOrigin}}"""
 
 _ANIME_PAGE_GQL = """query($s:String){Page(page:1,perPage:8){media(search:$s,type:ANIME,sort:[SEARCH_MATCH,POPULARITY_DESC]){
   id title{romaji english native} coverImage{medium} averageScore status seasonYear format}}}"""
 
 _MANGA_GQL = """query($s:String){Media(search:$s,type:MANGA,sort:[SEARCH_MATCH,POPULARITY_DESC]){
   id siteUrl title{romaji english native} description(asHtml:false)
-  coverImage{extraLarge large} format status chapters volumes averageScore genres}}"""
+  coverImage{extraLarge large} format status chapters volumes averageScore popularity genres
+  startDate{year month day} countryOfOrigin}}"""
 
 _CHAR_GQL = """query($s:String){Character(search:$s){
   name{full native} description siteUrl image{large}}}"""
@@ -268,14 +247,11 @@ _AIRING_GQL = """query($s:String){Media(search:$s,type:ANIME,sort:[SEARCH_MATCH,
   nextAiringEpisode{episode timeUntilAiring}}}"""
 
 
-# ── Query processing ──────────────────────────────────────────────────────────
-
 def _normalise(q: str) -> str:
     return re.sub(r"[^\w\s]", "", q.lower()).strip()
 
 
 def _extract_season(query: str):
-    """Extract season number and return (clean_base_query, season_num_or_None)."""
     q = query.strip()
     for pattern, extractor in _SEASON_RE:
         m = re.search(pattern, q, re.IGNORECASE)
@@ -288,35 +264,29 @@ def _extract_season(query: str):
 
 
 def _resolve_query(raw: str) -> str:
-    """Resolve abbreviation/alias to canonical English title."""
-    q_norm     = _normalise(raw)
-    mapped     = _ABBR.get(q_norm)
+    q_norm = _normalise(raw)
+    mapped = _ABBR.get(q_norm)
     if not mapped:
         q_nopunct = re.sub(r"[^a-z0-9\s]", " ", q_norm).strip()
-        mapped    = _ABBR.get(q_nopunct)
+        mapped = _ABBR.get(q_nopunct)
     return mapped or raw
 
 
 def _season_queries(base: str, n: int) -> List[str]:
-    """Build AniList search queries for a specific season."""
     suffixes = _SEASON_SUFFIXES.get(n, [f"Season {n}"])
     return [f"{base} {s}" for s in suffixes] + [f"{base} {n}"]
 
 
-# ── AniList fetching ──────────────────────────────────────────────────────────
-
 def _al_sync(gql: str, search: str) -> Optional[Any]:
     """
-    Multi-query AniList search with smart fallback:
-    1. Mapped canonical title
-    2. Original query
-    3. Title-cased original
-    4. First 3 words (handles "Demon Slayer Season 2 Full HD" → "Demon Slayer Season")
+    Smart multi-strategy AniList search.
+    Uses SEARCH_MATCH,POPULARITY_DESC to return most popular matching result.
+    Includes sanity check to prevent "Demon Slayer → Onigiri" type wrong results.
     """
-    mapped = _resolve_query(search)
+    resolved = _resolve_query(search)
     queries: List[str] = []
-    if mapped.lower() != search.lower():
-        queries.append(mapped)
+    if resolved.lower() != search.lower():
+        queries.append(resolved)
     queries.append(search)
     if search.title() != search:
         queries.append(search.title())
@@ -334,21 +304,38 @@ def _al_sync(gql: str, search: str) -> Optional[Any]:
             r = requests.post(
                 _AL_URL,
                 json={"query": gql, "variables": {"s": q}},
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json", "Accept": "application/json"},
                 timeout=12,
             )
-            if r.status_code == 200:
-                d = r.json().get("data", {})
-                result = d.get("Media") or d.get("Character") or d.get("Page")
-                if result:
-                    return result
+            if r.status_code != 200:
+                continue
+            data = r.json().get("data", {})
+            result = data.get("Media") or data.get("Character") or data.get("Page")
+            if not result:
+                continue
+
+            # Sanity check: for 2+ word queries, at least one significant word
+            # must appear in the result title — prevents completely wrong results
+            if "Media" in r.json().get("data", {}):
+                res_titles = [
+                    (result.get("title") or {}).get("english") or "",
+                    (result.get("title") or {}).get("romaji") or "",
+                ]
+                search_words = [w for w in search.lower().split() if len(w) > 3]
+                if len(search_words) >= 2:
+                    res_text = " ".join(res_titles).lower()
+                    word_match = any(w in res_text for w in search_words)
+                    if not word_match:
+                        logger.debug(f"[anime] sanity fail: \'{q}\' → \'{res_titles[0]}\' (skipping)")
+                        continue
+
+            return result
         except Exception as exc:
-            logger.debug(f"AniList [{q}]: {exc}")
+            logger.debug(f"[anime] AniList [{q}]: {exc}")
     return None
 
 
 def _al_page_sync(search: str) -> List[Dict]:
-    """Get up to 8 AniList results for the similar-anime panel."""
     try:
         r = requests.post(
             _AL_URL,
