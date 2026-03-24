@@ -296,13 +296,6 @@ BOT_HELP_TEXT: str       = os.getenv("BOT_HELP_TEXT",       "")
 # Options: "mathbold" (default) | "smallcaps"
 BUTTON_STYLE: str = os.getenv("BUTTON_STYLE", "mathbold")
 
-# ── Button style cache — avoids per-button DB call in _build_panel_pages ──────
-# _style_label() was calling get_setting() for EVERY button → 70+ DB roundtrips
-# = up to 1+ min on cold DB. This cache makes admin panel as instant as user panel.
-_CACHED_BUTTON_STYLE: str = ""
-_CACHED_BUTTON_STYLE_TS: float = 0.0
-_BTN_STYLE_TTL: float = 60.0  # re-read DB at most once per minute
-
 # External APIs
 TMDB_API_KEY: str = os.getenv("TMDB_API_KEY", "")
 
@@ -3306,20 +3299,15 @@ def _build_pagination_kb(
 
 def _style_label(label: str) -> str:
     """Apply current button style to label text.
-    Uses a 60-second in-memory cache so DB is read at most once per minute
-    instead of once per button (which caused 1+ min delay on admin panel).
+    Reads BUTTON_STYLE env at runtime so it can be changed without restart.
+    Preserves allowed emojis: ➕ 🔙 ✔️ 🔜 ♻️ ❗ ✨ 🟢 🔴
     """
-    global _CACHED_BUTTON_STYLE, _CACHED_BUTTON_STYLE_TS
-    import time as _t
-    now = _t.monotonic()
-    if not _CACHED_BUTTON_STYLE or (now - _CACHED_BUTTON_STYLE_TS) > _BTN_STYLE_TTL:
-        try:
-            from database_dual import get_setting as _gs
-            _CACHED_BUTTON_STYLE = _gs("button_style", BUTTON_STYLE) or BUTTON_STYLE
-        except Exception:
-            _CACHED_BUTTON_STYLE = BUTTON_STYLE
-        _CACHED_BUTTON_STYLE_TS = now
-    style = _CACHED_BUTTON_STYLE
+    # Get runtime style (can be overridden via admin panel)
+    try:
+        from database_dual import get_setting as _gs
+        style = _gs("button_style", BUTTON_STYLE) or BUTTON_STYLE
+    except Exception:
+        style = BUTTON_STYLE
     # Preserve allowed emojis at start/end
     _ALLOWED_PFXS = ('◀ ','▶ ','✖️ ','🔙 ','🔜 ','➕ ','✔️ ','♻️ ','❗ ','✨ ','🟢 ','🔴 ','◀','▶','✖️','🔙','🔜','➕','✔️','♻️','❗','✨','🟢','🔴')
     prefix = ""
@@ -3358,6 +3346,13 @@ def _grid3(items: list) -> list:
     rows = []
     for i in range(0, len(items), 3):
         rows.append(items[i:i+3])
+    return rows
+
+def _grid4(items: list) -> list:
+    """Arrange a flat list of InlineKeyboardButtons into rows of 4."""
+    rows = []
+    for i in range(0, len(items), 4):
+        rows.append(items[i:i+4])
     return rows
 
 def _panel_kb(grid_items: list, back_cb: str = "admin_back",
@@ -3580,171 +3575,127 @@ _PANEL_PAGES_TTL: float = 60.0   # rebuild markup every 60 s
 
 def _build_panel_pages(maint: bool, clone_red: bool, clean_gc: bool) -> dict:
     """
-    Build all admin panel pages.
-    Page 0 = MAIN (9 buttons)
-    Page 1 = TOOLS (9 buttons)
-    Page 2 = FEATURES (9 buttons, first half)
-    Page 3 = FEATURES (9 buttons, second half)
-    Page 4 = POSTER CMDS + IMPORT/EXPORT (12 buttons)
-    Page 5 = MODULES GUIDE (12 buttons, first half)
-    Page 6 = MODULES GUIDE (12 buttons, second half)
-    Page 7 = MODULES GUIDE (remaining buttons)
-    Each page ≤ 12 buttons + nav row = fast Telegram delivery.
+    5-page admin panel, 4x3 grid (12 buttons per page).
+    Pre-built as InlineKeyboardMarkup objects — zero build time on open.
     """
-    maint_icon = "🔴" if maint      else "🟢"
-    gc_icon    = "✔️" if clean_gc   else "❗"
-    cl_icon    = "✔️" if clone_red  else "🔴"
+    maint_icon = "🔴" if maint     else "🟢"
+    gc_icon    = "✔️" if clean_gc  else "❗"
+    cl_icon    = "✔️" if clone_red else "🔴"
 
     status_line = (
-        f"{maint_icon} <b>Maintenance:</b> {'ON' if maint else 'OFF'}  "
-        f"{gc_icon} <b>Clean GC:</b> {'ON' if clean_gc else 'OFF'}  "
-        f"{cl_icon} <b>Clone Redirect:</b> {'ON' if clone_red else 'OFF'}"
+        f"{maint_icon} <b>{small_caps('Maintenance')}:</b> {small_caps('ON' if maint else 'OFF')}  "
+        f"{gc_icon} <b>{small_caps('Clean GC')}:</b> {small_caps('ON' if clean_gc else 'OFF')}  "
+        f"{cl_icon} <b>{small_caps('Clone Redirect')}:</b> {small_caps('ON' if clone_red else 'OFF')}"
     )
 
-    def _row3(btns):
-        """Split flat list into rows of 3."""
+    def _row4(btns):
         rows = []
-        for i in range(0, len(btns), 3):
-            rows.append(btns[i:i+3])
+        for i in range(0, len(btns), 4):
+            rows.append(btns[i:i+4])
         return rows
 
-    def _nav(cur, total):
-        """Navigation row — ◀ page_num/total ▶."""
+    TOTAL = 5
+
+    def _nav(cur):
         row = []
         if cur > 0:
-            row.append(InlineKeyboardButton("🔙", callback_data=f"adm_page_{cur-1}"))
-        row.append(InlineKeyboardButton(f"· {cur+1}/{total} ·", callback_data="noop"))
-        if cur < total - 1:
-            row.append(InlineKeyboardButton("🔜", callback_data=f"adm_page_{cur+1}"))
+            row.append(InlineKeyboardButton("◀", callback_data=f"adm_page_{cur-1}"))
+        row.append(InlineKeyboardButton(f"· {cur+1}/{TOTAL} ·", callback_data="noop"))
+        if cur < TOTAL - 1:
+            row.append(InlineKeyboardButton("▶", callback_data=f"adm_page_{cur+1}"))
         row.append(_close_btn())
         return row
-
-    # ── Define all sections ───────────────────────────────────────────────────
-    main_btns = [
-        _btn("STATS",      "admin_stats"),
-        _btn("BROADCAST",  "admin_broadcast_start"),
-        _btn("USERS",      "user_management"),
-        _btn("CHANNELS",   "manage_force_sub"),
-        _btn("LINKS",      "generate_links"),
-        _btn("CLONES",     "manage_clones"),
-        _btn("SETTINGS",   "admin_settings"),
-        _btn("CATEGORIES", "admin_category_settings"),
-        _btn("UPLOAD",     "upload_menu"),
-    ]
-
-    tools_btns = [
-        _btn("AUTO FWD",  "admin_autoforward"),
-        _btn("MANGA",     "admin_autoupdate"),
-        _btn("POSTER DB", "admin_filter_poster"),
-        _btn("FLAGS",     "admin_feature_flags"),
-        _btn("FILTERS",   "admin_filter_settings"),
-        _btn("STYLE",     "admin_text_style"),
-        _btn("SYSTEM",    "admin_sysstats"),
-        _btn("LOGS",      "admin_logs"),
-        _btn("RESTART",   "admin_restart_confirm"),
-    ]
-
-    feat_a = [
-        _btn("COUPLE",     "feat_couple"),
-        _btn("SLAP",       "feat_slap"),
-        _btn("HUG",        "feat_hug"),
-        _btn("KISS",       "feat_kiss"),
-        _btn("PAT",        "feat_pat"),
-        _btn("INLINE",     "feat_inline_search"),
-        _btn("REACTIONS",  "feat_reactions"),
-        _btn("CHATBOT",    "feat_chatbot"),
-        _btn("TRUTH/DARE", "feat_truth_dare"),
-    ]
-
-    feat_b = [
-        _btn("NOTES",      "feat_notes"),
-        _btn("WARNS",      "feat_warns"),
-        _btn("MUTE",       "feat_muting"),
-        _btn("BANS",       "feat_bans"),
-        _btn("RULES",      "feat_rules"),
-        _btn("AIRING",     "feat_airing"),
-        _btn("CHARACTER",  "feat_character"),
-        _btn("ANIME INFO", "feat_anime_info"),
-        _btn("AFK",        "feat_afk"),
-    ]
-
-    poster_btns = [
-        _btn("ANI",   "poster_cmd_ani"),
-        _btn("NET",   "poster_cmd_net"),
-        _btn("CRUN",  "poster_cmd_crun"),
-        _btn("DARK",  "poster_cmd_dark"),
-        _btn("LIGHT", "poster_cmd_light"),
-        _btn("MOD",   "poster_cmd_mod"),
-        _btn("DARKM", "poster_cmd_darkm"),
-        _btn("NETM",  "poster_cmd_netm"),
-        _btn("MODM",  "poster_cmd_modm"),
-        _btn("IMPORT USERS", "admin_import_users"),
-        _btn("IMPORT LINKS", "admin_import_links"),
-        _btn("EXPORT USERS", "admin_export_users_quick"),
-    ]
-
-    all_mods = [
-        _btn("ADMIN",      "mod_admin"),
-        _btn("ANTIFLOOD",  "mod_antiflood"),
-        _btn("APPROVE",    "mod_approve"),
-        _btn("BLACKLIST",  "mod_blacklist"),
-        _btn("BL STICKER", "mod_blsticker"),
-        _btn("CHATBOT",    "mod_chatbot"),
-        _btn("CLEANER",    "mod_cleaner"),
-        _btn("CONNECTION", "mod_connection"),
-        _btn("CURRENCY",   "mod_currency"),
-        _btn("FILTERS",    "mod_custfilters"),
-        _btn("GBAN",       "mod_globalbans"),
-        _btn("IMDB",       "mod_imdb"),
-        _btn("LOCKS",      "mod_locks"),
-        _btn("LOGCHAN",    "mod_logchannel"),
-        _btn("PING",       "mod_ping"),
-        _btn("PURGE",      "mod_purge"),
-        _btn("REPORTING",  "mod_reporting"),
-        _btn("SED",        "mod_sed"),
-        _btn("SHELL",      "mod_shell"),
-        _btn("SPEEDTEST",  "mod_speedtest"),
-        _btn("STICKERS",   "mod_stickers"),
-        _btn("TAGALL",     "mod_tagall"),
-        _btn("TRANSLATE",  "mod_translator"),
-        _btn("TRUTH/DARE", "mod_truthdare"),
-        _btn("UD",         "mod_ud"),
-        _btn("WALLPAPER",  "mod_wallpaper"),
-        _btn("WIKI",       "mod_wiki"),
-        _btn("WRITE",      "mod_writetool"),
-        _btn("ANIMEQUOTE", "mod_animequotes"),
-        _btn("GETTIME",    "mod_gettime"),
-        _btn("BAD WORDS",  "mod_badwords"),
-    ]
-    mods_a = all_mods[:12]
-    mods_b = all_mods[12:24]
-    mods_c = all_mods[24:]
-
-    # ── Total pages ───────────────────────────────────────────────────────────
-    TOTAL = 8
 
     def _header(title):
         return InlineKeyboardButton(math_bold(title), callback_data="noop")
 
-    pages = {}
+    def _page(num, label, btns):
+        rows = [[_header(label)]] + _row4(btns)
+        rows.append(_nav(num))
+        return InlineKeyboardMarkup(rows)
 
-    def _page(num, section_label, btns_list, extra_rows=None):
-        r = [[ _header(section_label) ]] + _row3(btns_list)
-        if extra_rows:
-            r += extra_rows
-        r.append(_nav(num, TOTAL))
-        pages[num] = InlineKeyboardMarkup(r)
+    main_btns = [
+        _btn("📊 STATS",     "admin_stats"),
+        _btn("📢 BROADCAST", "admin_broadcast_start"),
+        _btn("👥 USERS",     "user_management"),
+        _btn("📡 CHANNELS",  "manage_force_sub"),
+        _btn("🔗 LINKS",     "generate_links"),
+        _btn("🤖 CLONES",    "manage_clones"),
+        _btn("⚙️ SETTINGS",  "admin_settings"),
+        _btn("🎌 CATEGORY",  "admin_category_settings"),
+        _btn("📤 UPLOAD",    "upload_menu"),
+        _btn("📋 FILTERS",   "admin_filter_settings"),
+        _btn("🎨 POSTER DB", "admin_filter_poster"),
+        _btn("🚩 FLAGS",     "admin_feature_flags"),
+    ]
+    tools_btns = [
+        _btn("♻️ AUTO FWD",  "admin_autoforward"),
+        _btn("📖 MANGA",     "admin_autoupdate"),
+        _btn("🎨 STYLE",     "admin_text_style"),
+        _btn("📊 SYSTEM",    "admin_sysstats"),
+        _btn("📜 LOGS",      "admin_logs"),
+        _btn("🔄 RESTART",   "admin_restart_confirm"),
+        _btn("📥 IMP USERS", "admin_import_users"),
+        _btn("📥 IMP LINKS", "admin_import_links"),
+        _btn("📤 EXP USERS", "admin_export_users_quick"),
+        _btn("💾 DB CLEAN",  "dbcleanup_confirm"),
+        _btn("🖼 PANELS",    "panel_img_add_urls"),
+        _btn("🌐 ENV VARS",  "admin_env_panel"),
+    ]
+    feat_btns = [
+        _btn("👫 COUPLE",    "feat_couple"),
+        _btn("👋 SLAP",      "feat_slap"),
+        _btn("🤗 HUG",       "feat_hug"),
+        _btn("💋 KISS",      "feat_kiss"),
+        _btn("🤲 PAT",       "feat_pat"),
+        _btn("🔍 INLINE",    "feat_inline_search"),
+        _btn("😂 REACTIONS", "feat_reactions"),
+        _btn("🤖 CHATBOT",   "feat_chatbot"),
+        _btn("🎲 T/DARE",    "feat_truth_dare"),
+        _btn("📝 NOTES",     "feat_notes"),
+        _btn("⚠️ WARNS",     "feat_warns"),
+        _btn("🔇 MUTE",      "feat_muting"),
+    ]
+    poster_btns = [
+        _btn("🎌 ANI",   "poster_cmd_ani"),
+        _btn("🔴 NET",   "poster_cmd_net"),
+        _btn("🎬 CRUN",  "poster_cmd_crun"),
+        _btn("🌑 DARK",  "poster_cmd_dark"),
+        _btn("☀️ LIGHT", "poster_cmd_light"),
+        _btn("✨ MOD",   "poster_cmd_mod"),
+        _btn("🚫 BANS",  "feat_bans"),
+        _btn("📋 RULES", "feat_rules"),
+        _btn("📡 AIRING","feat_airing"),
+        _btn("👤 CHAR",  "feat_character"),
+        _btn("ℹ️ ANIME", "feat_anime_info"),
+        _btn("💤 AFK",   "feat_afk"),
+    ]
+    all_mods = [
+        _btn("ADMIN",      "mod_admin"),      _btn("ANTIFLOOD",  "mod_antiflood"),
+        _btn("APPROVE",    "mod_approve"),    _btn("BLACKLIST",  "mod_blacklist"),
+        _btn("BL STICKER", "mod_blsticker"),  _btn("CHATBOT",    "mod_chatbot"),
+        _btn("CLEANER",    "mod_cleaner"),    _btn("CONNECTION", "mod_connection"),
+        _btn("CURRENCY",   "mod_currency"),   _btn("FILTERS",    "mod_custfilters"),
+        _btn("GBAN",       "mod_globalbans"), _btn("IMDB",       "mod_imdb"),
+        _btn("LOCKS",      "mod_locks"),      _btn("LOGCHAN",    "mod_logchannel"),
+        _btn("PING",       "mod_ping"),       _btn("PURGE",      "mod_purge"),
+        _btn("REPORTING",  "mod_reporting"),  _btn("SED",        "mod_sed"),
+        _btn("SHELL",      "mod_shell"),      _btn("SPEEDTEST",  "mod_speedtest"),
+        _btn("STICKERS",   "mod_stickers"),   _btn("TAGALL",     "mod_tagall"),
+        _btn("TRANSLATE",  "mod_translator"), _btn("TRUTH/DARE", "mod_truthdare"),
+        _btn("UD",         "mod_ud"),         _btn("WALLPAPER",  "mod_wallpaper"),
+        _btn("WIKI",       "mod_wiki"),       _btn("WRITE",      "mod_writetool"),
+        _btn("ANIMEQUOTE", "mod_animequotes"),_btn("GETTIME",    "mod_gettime"),
+        _btn("BAD WORDS",  "mod_badwords"),
+    ]
 
-    _page(0, "MAIN",          main_btns)
-    _page(1, "TOOLS",         tools_btns)
-    _page(2, "FEATURES 1/2",  feat_a)
-    _page(3, "FEATURES 2/2",  feat_b)
-    _page(4, "POSTER & IO",   poster_btns)
-    _page(5, "MODULES 1/3",   mods_a)
-    _page(6, "MODULES 2/3",   mods_b)
-    _page(7, "MODULES 3/3",   mods_c)
-
-    return pages, status_line
+    return {
+        0: _page(0, "MAIN",     main_btns),
+        1: _page(1, "TOOLS",    tools_btns),
+        2: _page(2, "FEATURES", feat_btns),
+        3: _page(3, "POSTER",   poster_btns),
+        4: _page(4, "MODULES",  all_mods),
+    }, status_line
 
 
 async def send_admin_menu(
@@ -3764,55 +3715,51 @@ async def send_admin_menu(
     """
     global _PANEL_PAGES, _PANEL_PAGES_TS
 
-    # ── Debounce: drop duplicate CALLBACK clicks only, never drop /start commands ──
-    uid = chat_id  # for DM admin panels uid == chat_id
-    lock = _get_panel_lock(uid)
-    if query and lock.locked():
-        # Already processing a panel callback for this user — drop the duplicate click
-        try:
-            await query.answer()
-        except Exception:
-            pass
-        return
+    # ── No lock — pre-built pages are read-only, safe for concurrent access ───
+    # Drop duplicate clicks: if same message_id received twice, ignore 2nd
+    if query:
+        _dup_key = f"adm_dup_{chat_id}_{getattr(query.message, 'message_id', 0)}"
+        _ts_now = time.monotonic()
+        _last_ts = _panel_cache_get(_dup_key)
+        if _last_ts and (_ts_now - _last_ts) < 0.8:
+            try: await query.answer()
+            except Exception: pass
+            return
+        _panel_cache_set(_dup_key, _ts_now)
 
-    async with lock:
-        await delete_bot_prompt(context, chat_id)
-        user_states.pop(chat_id, None)
+    await delete_bot_prompt(context, chat_id)
+    user_states.pop(chat_id, None)
 
-        import time as _time
-        now = _time.monotonic()
+    now = time.monotonic()
 
-        # ── Rebuild page cache if stale (<1ms when fresh) ─────────────────────
-        if not _PANEL_PAGES or (now - _PANEL_PAGES_TS) > _PANEL_PAGES_TTL:
-            maint     = get_setting("maintenance_mode",       "false") == "true"
-            clone_red = get_setting("clone_redirect_enabled", "false") == "true"
-            clean_gc  = get_setting("clean_gc_enabled",       "true")  == "true"
-            _PANEL_PAGES, _status_line = _build_panel_pages(maint, clone_red, clean_gc)
-            _PANEL_PAGES["_status"] = _status_line
-            _PANEL_PAGES_TS = now
+    # ── Rebuild page cache if stale (<1ms when fresh) ──────────────────────────
+    if not _PANEL_PAGES or (now - _PANEL_PAGES_TS) > _PANEL_PAGES_TTL:
+        maint     = get_setting("maintenance_mode",       "false") == "true"
+        clone_red = get_setting("clone_redirect_enabled", "false") == "true"
+        clean_gc  = get_setting("clean_gc_enabled",       "true")  == "true"
+        _PANEL_PAGES, _status_line = _build_panel_pages(maint, clone_red, clean_gc)
+        _PANEL_PAGES["_status"] = _status_line
+        _PANEL_PAGES_TS = now
 
-        status_line = _PANEL_PAGES.get("_status", "")
-        markup = _PANEL_PAGES.get(page, _PANEL_PAGES.get(0))
+    status_line = _PANEL_PAGES.get("_status", "")
+    markup      = _PANEL_PAGES.get(page, _PANEL_PAGES.get(0))
 
-        text = (
-            b("ADMIN PANEL") + "\n\n"
-            + status_line + "\n\n"
-            + bq(
-                f"<b>Bot:</b> @{e(BOT_USERNAME)}\n"
-                f"<b>Mode:</b> {'Clone' if I_AM_CLONE else 'Main'}\n"
-                f"<b>Name:</b> {e(BOT_NAME)}"
-            )
+    text = (
+        b(small_caps("admin panel")) + "\n\n"
+        + status_line + "\n\n"
+        + bq(
+            f"<b>{small_caps('Bot')}:</b> @{e(BOT_USERNAME)}\n"
+            f"<b>{small_caps('Mode')}:</b> {small_caps('Clone' if I_AM_CLONE else 'Main')}\n"
+            f"<b>{small_caps('Name')}:</b> {e(BOT_NAME)}"
         )
+    )
 
-        # ── Get image URL (always instant — pre-warmed static or file_id) ─────
-        img_url = get_panel_pic("admin")
+    img_url = get_panel_pic("admin")
 
-        # ── Send/edit panel using optimised helper ─────────────────────────────
-        await safe_edit_panel(
-            context.bot, query, chat_id,
-            photo=img_url, caption=text, reply_markup=markup,
-            panel_type="admin",
-        )
+    await _deliver_panel(
+        context.bot, chat_id, "admin",
+        caption=text, reply_markup=markup, query=query,
+    )
 
 
 
@@ -6121,87 +6068,90 @@ async def id_command(
 ) -> None:
     if not update.message:
         return
-    msg = update.message
-    text = (
-        b("🆔 Identifier Info") + "\n\n"
-        f"<b>Your User ID:</b> {code(str(update.effective_user.id))}\n"
-        f"<b>Chat ID:</b> {code(str(update.effective_chat.id))}\n"
-        f"<b>Chat Type:</b> {code(update.effective_chat.type)}"
+    msg  = update.message
+    user = update.effective_user
+    chat = update.effective_chat
+
+    text = b(small_caps("🆔 id info")) + "\n\n"
+
+    # Own info
+    if user:
+        uname = f" @{e(user.username)}" if user.username else ""
+        text += (
+            f"» {b(small_caps('user id'))} {code(str(user.id))}{uname}\n"
+            f"» {b(small_caps('name'))} {e(user.full_name or '')}\n"
+        )
+    text += (
+        f"» {b(small_caps('chat id'))} {code(str(chat.id))}\n"
+        f"» {b(small_caps('type'))} {code(chat.type)}\n"
     )
+    if chat.username:
+        text += f"» {b(small_caps('username'))} @{e(chat.username)}\n"
+
+    # Reply info
     if msg.reply_to_message:
         rep = msg.reply_to_message
-        text += "\n\n<b>━━ Replied Message ━━</b>"
+        text += "\n" + b(small_caps("replied message")) + "\n"
 
-        # ── sender_chat: message sent BY a channel (linked group or channel post) ──
+        # Channel message — most important: get channel info
         if rep.sender_chat:
-            sc = rep.sender_chat
-            text += f"\n<b>Sender Chat ID:</b> {code(str(sc.id))}"
-            if sc.title:
-                text += f"\n<b>Sender Title:</b> {e(sc.title)}"
-            if sc.username:
-                text += f"\n<b>Sender Username:</b> @{e(sc.username)}"
-            text += f"\n<b>Sender Type:</b> {code(sc.type)}"
-            # Try to get more info
+            ch = rep.sender_chat
+            text += (
+                f"» {b(small_caps('channel id'))} {code(str(ch.id))}\n"
+                f"» {b(small_caps('channel title'))} {e(ch.title or '')}\n"
+            )
+            if ch.username:
+                text += f"» {b(small_caps('channel username'))} @{e(ch.username)}\n"
+            # Try to get extra info
             try:
-                full_chat = await context.bot.get_chat(sc.id)
-                if hasattr(full_chat, 'member_count') and full_chat.member_count:
-                    text += f"\n<b>Members:</b> {code(format_number(full_chat.member_count))}"
-                elif hasattr(full_chat, 'get_member_count'):
-                    cnt = await full_chat.get_member_count()
-                    text += f"\n<b>Members:</b> {code(format_number(cnt))}"
-                if full_chat.description:
-                    text += f"\n<b>Description:</b> {e(full_chat.description[:80])}"
-                if not sc.username and full_chat.invite_link:
-                    text += f"\n<b>Invite:</b> {e(full_chat.invite_link)}"
+                ch_full = await context.bot.get_chat(ch.id)
+                if ch_full.invite_link:
+                    text += f"» {b(small_caps('invite link'))} {e(ch_full.invite_link)}\n"
+                if ch_full.description:
+                    text += f"» {b(small_caps('description'))} {e(ch_full.description[:100])}\n"
+                if ch_full.member_count:
+                    text += f"» {b(small_caps('members'))} {code(str(ch_full.member_count))}\n"
             except Exception:
                 pass
 
-        # ── from_user: sent by a real user ────────────────────────────────────
-        if rep.from_user:
-            text += f"\n<b>Replied User ID:</b> {code(str(rep.from_user.id))}"
-            if rep.from_user.username:
-                text += f"\n<b>Username:</b> @{e(rep.from_user.username)}"
-            if rep.from_user.first_name:
-                text += f"\n<b>Name:</b> {e(rep.from_user.first_name)}"
-
-        # ── forward_from: forwarded from a private user ───────────────────────
-        if rep.forward_from:
-            text += f"\n<b>Original User ID:</b> {code(str(rep.forward_from.id))}"
-
-        # ── forward_from_chat: forwarded FROM a channel/group ─────────────────
+        # Forwarded from channel
         if rep.forward_from_chat:
-            fc = rep.forward_from_chat
-            text += f"\n<b>Forwarded From Chat ID:</b> {code(str(fc.id))}"
-            if fc.title:
-                text += f"\n<b>Channel Title:</b> {e(fc.title)}"
-            if fc.username:
-                text += f"\n<b>Channel Username:</b> @{e(fc.username)}"
-            text += f"\n<b>Channel Type:</b> {code(fc.type)}"
-            # Try to get subscriber/member count
-            try:
-                full_fc = await context.bot.get_chat(fc.id)
-                if hasattr(full_fc, 'member_count') and full_fc.member_count:
-                    text += f"\n<b>Subscribers:</b> {code(format_number(full_fc.member_count))}"
-                if full_fc.description:
-                    text += f"\n<b>Description:</b> {e(full_fc.description[:80])}"
-            except Exception:
-                pass
+            fch = rep.forward_from_chat
+            text += (
+                f"» {b(small_caps('fwd channel id'))} {code(str(fch.id))}\n"
+                f"» {b(small_caps('fwd channel title'))} {e(fch.title or '')}\n"
+            )
+            if fch.username:
+                text += f"» {b(small_caps('fwd username'))} @{e(fch.username)}\n"
 
-        # ── Media file IDs ────────────────────────────────────────────────────
-        if rep.sticker:
-            text += f"\n<b>Sticker File ID:</b>\n{code(rep.sticker.file_id)}"
-        if rep.photo:
-            text += f"\n<b>Photo File ID:</b>\n{code(rep.photo[-1].file_id)}"
-        if rep.video:
-            text += f"\n<b>Video File ID:</b>\n{code(rep.video.file_id)}"
-        if rep.audio:
-            text += f"\n<b>Audio File ID:</b>\n{code(rep.audio.file_id)}"
-        if rep.document:
-            text += f"\n<b>Document File ID:</b>\n{code(rep.document.file_id)}"
-        if rep.animation:
-            text += f"\n<b>GIF File ID:</b>\n{code(rep.animation.file_id)}"
-        if rep.voice:
-            text += f"\n<b>Voice File ID:</b>\n{code(rep.voice.file_id)}"
+        if rep.from_user and not rep.sender_chat:
+            ru = rep.from_user
+            runame = f" @{e(ru.username)}" if ru.username else ""
+            text += (
+                f"» {b(small_caps('replied user id'))} {code(str(ru.id))}{runame}\n"
+                f"» {b(small_caps('replied name'))} {e(ru.full_name or '')}\n"
+            )
+        if rep.forward_from:
+            fu = rep.forward_from
+            text += f"» {b(small_caps('forward user id'))} {code(str(fu.id))} {e(fu.full_name or '')}\n"
+
+        # Media file IDs
+        media_fields = [
+            ("sticker",   rep.sticker,   rep.sticker.file_id if rep.sticker else None),
+            ("photo",     rep.photo,     rep.photo[-1].file_id if rep.photo else None),
+            ("video",     rep.video,     rep.video.file_id if rep.video else None),
+            ("audio",     rep.audio,     rep.audio.file_id if rep.audio else None),
+            ("document",  rep.document,  rep.document.file_id if rep.document else None),
+            ("animation", rep.animation, rep.animation.file_id if rep.animation else None),
+            ("voice",     rep.voice,     rep.voice.file_id if rep.voice else None),
+            ("video note",rep.video_note,rep.video_note.file_id if rep.video_note else None),
+        ]
+        for label, obj, fid in media_fields:
+            if fid:
+                text += f"» {b(small_caps(label + ' file id'))}\n  {code(fid)}\n"
+
+    if len(text) > 3500:
+        text = text[:3496] + "…"
     await msg.reply_text(text, parse_mode=ParseMode.HTML)
 
 
@@ -6968,10 +6918,7 @@ async def inline_query_handler(
 async def group_message_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle messages in groups — anime/manga/movie commands + filter poster.
-    Does NOT require the group to be in connected_groups to respond.
-    Commands like /ban /mute /del are handled by their own registered handlers.
-    """
+    """Handle messages in bot-connected groups with auto-delete support."""
     if not update.message or not update.effective_chat:
         return
     if get_setting("group_commands_enabled", "true") != "true":
@@ -6979,41 +6926,34 @@ async def group_message_handler(
     if not _passes_filter(update):
         return
 
-    text = update.message.text or ""
-    lower = text.lower()
-
-    # ── Inline content commands (work in ANY group, no DB check needed) ────────
-    for prefix, category in [
-        ("/anime ", "anime"), ("/manga ", "manga"),
-        ("/movie ", "movie"), ("/tvshow ", "tvshow"),
-    ]:
-        if lower.startswith(prefix):
-            query_text = text[len(prefix):].strip()
-            if query_text:
-                await generate_and_send_post(context, update.effective_chat.id, category, query_text)
+    chat_id = update.effective_chat.id
+    # Fast in-memory check — connected groups are cached in _panel_cache_get
+    _connected = _panel_cache_get("connected_groups")
+    if _connected is not None:
+        if chat_id not in _connected:
+            return
+    else:
+        # Cache miss — check DB once, update cache
+        try:
+            with db_manager.get_cursor() as cur:
+                cur.execute(
+                    "SELECT group_id FROM connected_groups WHERE active = TRUE"
+                )
+                rows = cur.fetchall() or []
+            _ids = {r[0] for r in rows}
+            _panel_cache_set("connected_groups", _ids)
+            if chat_id not in _ids:
+                return
+        except Exception:
             return
 
-    # ── Filter-Poster Integration (works in any group with setting enabled) ──
-    chat_id = update.effective_chat.id
-    if _FILTER_POSTER_AVAILABLE and _get_filter_poster_enabled(chat_id):
-        asyncio.create_task(
-            _handle_anime_filter(update, context, lower)
-        )
-        return
-
-    # ── Auto-delete for connected groups only ─────────────────────────────────
-    try:
-        with db_manager.get_cursor() as cur:
-            cur.execute(
-                "SELECT 1 FROM connected_groups WHERE group_id = %s AND active = TRUE",
-                (chat_id,)
-            )
-            if not cur.fetchone():
-                return
-    except Exception:
-        return
-
+    # Read text OR caption (for photo/video messages with captions)
+    text  = update.message.text or update.message.caption or ""
+    lower = text.lower()
     auto_del = get_setting("auto_delete_messages", "true") == "true"
+    del_delay = int(get_setting("auto_delete_delay", "60"))
+
+    # Schedule auto-delete of user command after 5 seconds
     if auto_del:
         async def _del_user_cmd(msg=update.message):
             await asyncio.sleep(5)
@@ -7022,6 +6962,33 @@ async def group_message_handler(
             except Exception:
                 pass
         asyncio.create_task(_del_user_cmd())
+
+    async def _group_post_with_autodel(category: str, query_text: str) -> None:
+        await generate_and_send_post(context, chat_id, category, query_text)
+
+    for prefix, category in [
+        ("/anime ", "anime"), ("/manga ", "manga"),
+        ("/movie ", "movie"), ("/tvshow ", "tvshow"),
+    ]:
+        if lower.startswith(prefix):
+            query_text = text[len(prefix):].strip()
+            if query_text:
+                await _group_post_with_autodel(category, query_text)
+            return
+
+    # ── Filter-Poster Integration ──────────────────────────────────────────────
+    # New logic:
+    #   1. Check if the message text matches any anime_channel_link keyword
+    #   2. If yes: check filter_poster_cache for a pre-built poster (file_id)
+    #   3. If cached: send instantly via file_id + expirable join button
+    #   4. If not cached: generate via poster_engine → save to POSTER_DB_CHANNEL
+    #      → cache file_id for future fast sends → send to user
+    #   5. Button = expirable Telegram invite link for the linked channel
+    #   6. Only fires for anime titles that have a generated channel link
+    if _FILTER_POSTER_AVAILABLE and _get_filter_poster_enabled(chat_id):
+        asyncio.create_task(
+            _handle_anime_filter(update, context, lower)
+        )
 
 
 async def _handle_anime_filter(
@@ -8410,8 +8377,16 @@ def _register_all_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("getfileid", getfileid_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(admin_filter & ~filters.COMMAND, handle_admin_message))
+    # Handle text messages in groups (filter poster, anime commands etc.)
     app.add_handler(MessageHandler(
-        filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, group_message_handler))
+        filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
+        group_message_handler,
+    ))
+    # Also handle non-text (captions, stickers) for filter matching in groups
+    app.add_handler(MessageHandler(
+        filters.ChatType.GROUPS & filters.CAPTION & ~filters.COMMAND,
+        group_message_handler,
+    ))
     app.add_handler(InlineQueryHandler(inline_query_handler))
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, auto_forward_message_handler))
     app.add_handler(MessageHandler(
@@ -8651,30 +8626,60 @@ async def _prewarm_all_caches(bot) -> None:
             except Exception as _pbe:
                 logger.debug(f"[prewarm] prebuild: {_pbe}")
 
+            # ── Self-ping to prevent Render free-tier spin-down ─────────────
+            # Render spins down after 15 min of no HTTP. We ping every 14 min.
+            try:
+                import aiohttp as _ahttp
+                _self_url = __import__("os").getenv("RENDER_EXTERNAL_URL", "")
+                if not _self_url:
+                    _port = __import__("os").getenv("PORT", "10000")
+                    _self_url = f"http://localhost:{_port}"
+                async with _ahttp.ClientSession() as _sess:
+                    async with _sess.get(f"{_self_url}/health", timeout=_ahttp.ClientTimeout(total=5)) as _r:
+                        logger.debug(f"[keepalive] self-ping {_r.status}")
+            except Exception as _kae:
+                logger.debug(f"[keepalive] {_kae}")
+
             # ── Run all panel data fetches in parallel ─────────────────────
+            def _fetch_connected():
+                try:
+                    from database_dual import get_all_connected_groups
+                    rows = get_all_connected_groups()
+                    return {r[0] for r in rows} if rows else set()
+                except Exception:
+                    try:
+                        with db_manager.get_cursor() as cur:
+                            cur.execute("SELECT group_id FROM connected_groups WHERE active = TRUE")
+                            return {r[0] for r in (cur.fetchall() or [])}
+                    except Exception:
+                        return set()
+
             results = await asyncio.gather(
                 asyncio.get_event_loop().run_in_executor(None, get_user_count),
                 asyncio.get_event_loop().run_in_executor(None, get_blocked_users_count),
                 asyncio.get_event_loop().run_in_executor(None, get_all_force_sub_channels),
                 asyncio.get_event_loop().run_in_executor(None, get_all_clone_bots),
                 asyncio.get_event_loop().run_in_executor(None, lambda: get_setting("maintenance_mode", "false")),
-                asyncio.get_event_loop().run_in_executor(None, lambda: get_all_anime_channel_links() if callable(globals().get("get_all_anime_channel_links")) else []),
+                asyncio.get_event_loop().run_in_executor(None, lambda: get_all_links(limit=500, offset=0) if callable(globals().get("get_all_links")) else []),
+                asyncio.get_event_loop().run_in_executor(None, _fetch_connected),
                 return_exceptions=True,
             )
-            user_count, blocked_count, channels, clones, maint, anime_links = results
+            user_count, blocked_count, channels, clones, maint, all_links, connected_ids = results
 
             # Store pre-computed values
-            _panel_cache_set("user_count",    user_count    if isinstance(user_count, int)   else 0)
-            _panel_cache_set("blocked_count", blocked_count if isinstance(blocked_count, int) else 0)
-            _panel_cache_set("channels",      channels      if isinstance(channels, list)     else [])
-            _panel_cache_set("clones",        clones        if isinstance(clones, list)       else [])
-            _panel_cache_set("maint",         maint         if isinstance(maint, str)         else "false")
-            _panel_cache_set("anime_links",   anime_links   if isinstance(anime_links, list)  else [])
+            _panel_cache_set("user_count",       user_count       if isinstance(user_count, int)       else 0)
+            _panel_cache_set("blocked_count",    blocked_count    if isinstance(blocked_count, int)    else 0)
+            _panel_cache_set("channels",         channels         if isinstance(channels, list)        else [])
+            _panel_cache_set("clones",           clones           if isinstance(clones, list)          else [])
+            _panel_cache_set("maint",            maint            if isinstance(maint, str)            else "false")
+            _panel_cache_set("all_links",        all_links        if isinstance(all_links, list)       else [])
+            _panel_cache_set("connected_groups", connected_ids    if isinstance(connected_ids, set)    else set())
 
             logger.debug("[prewarm] panel caches refreshed")
         except Exception as exc:
             logger.debug(f"[prewarm] error: {exc}")
 
+        # Sleep 45s between panel cache refreshes; self-ping runs every cycle
         await asyncio.sleep(_PANEL_CACHE_TTL)
 
 
@@ -9832,6 +9837,43 @@ async def button_handler(
         return
 
     # ── Admin restart ──────────────────────────────────────────────────────────────
+    if data == "dbcleanup_confirm":
+        if not is_admin:
+            return
+        await safe_edit_text(
+            query,
+            b(small_caps("💾 database cleanup")) + "\n\n"
+            + bq(
+                small_caps("removes expired links, old sessions, and stale cache entries.\n\n")
+                + small_caps("click confirm to proceed:")
+            ),
+            reply_markup=InlineKeyboardMarkup([
+                [bold_button(small_caps("✅ confirm cleanup"), callback_data="dbcleanup_run"),
+                 _back_btn("admin_back")],
+            ]),
+        )
+        return
+
+    if data == "dbcleanup_run":
+        if not is_admin:
+            return
+        try:
+            from database_dual import cleanup_expired_links
+            removed = cleanup_expired_links()
+            await safe_edit_text(
+                query,
+                b(small_caps("✅ cleanup done!")) + "\n"
+                + bq(small_caps(f"removed {removed} expired entries.")),
+                reply_markup=InlineKeyboardMarkup([[_back_btn("admin_back"), _close_btn()]]),
+            )
+        except Exception as exc:
+            await safe_edit_text(
+                query,
+                b(small_caps(f"❌ cleanup error: {e(str(exc)[:100])}")) ,
+                reply_markup=InlineKeyboardMarkup([[_back_btn("admin_back")]]),
+            )
+        return
+
     if data == "admin_restart_confirm":
         if not is_admin:
             return
@@ -12728,6 +12770,14 @@ async def button_handler(
         return
 
     # ── IMPORT USERS from CSV/Excel ────────────────────────────────────────────
+    if data == "admin_export_users_quick":
+        if not is_admin:
+            return
+        # Trigger the existing export users command flow
+        asyncio.create_task(exportusers_command(update, context))
+        await safe_answer(query, small_caps("📤 exporting users…"))
+        return
+
     if data == "admin_import_users":
         if not is_admin:
             return
@@ -14485,10 +14535,9 @@ async def _clean_gc_command_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """
-    Delete commands sent in groups silently AFTER a delay (so bot can still process them).
+    Delete ALL commands sent in groups silently after a short delay.
+    The bot still processes the command — this just keeps the chat clean.
     Only runs when clean_gc_enabled = true.
-    NOTE: This runs at NORMAL priority (group=5) so it does NOT block command handlers.
-    The actual command handler fires first, then this deletes the user's command message.
     """
     if not update.message or not update.effective_chat:
         return
@@ -14497,9 +14546,9 @@ async def _clean_gc_command_handler(
     msg = update.message
     chat_id = msg.chat_id
     msg_id  = msg.message_id
-    # Wait 5 seconds so bot can process and respond first
+    # Wait 3 seconds so the bot response arrives before deleting the command
     async def _delayed_del():
-        await asyncio.sleep(5)
+        await asyncio.sleep(3)
         try:
             await context.bot.delete_message(chat_id, msg_id)
         except Exception:
@@ -14569,42 +14618,18 @@ def main() -> None:
                 continue
             try:
                 _mod = importlib.import_module(f"modules.{_mn}")
+                # Wire dispatcher if module needs it
+                if hasattr(_mod, "dispatcher") and _mod.dispatcher is None:
+                    try:
+                        _mod.dispatcher = application.dispatcher if hasattr(application, "dispatcher") else None
+                    except Exception:
+                        pass
                 _loaded.append(_mn)
             except Exception as _exc:
                 logger.warning(f"Module {_mn} failed to load: {_exc}")
         logger.info(f"✅ Loaded {len(_loaded)} BeatVerse modules: {_loaded}")
     except Exception as _exc:
         logger.warning(f"Module loading error: {_exc}")
-
-    # ── CRITICAL: Wire BeatVerse module handlers onto PTB v21 Application ───────
-    # All modules called dispatcher.add_handler() during import → queued in
-    # _LazyDispatcher. Now replay them onto the real Application so /ban /mute
-    # /purge etc. actually work in groups.
-    import beataniversebot_compat as _compat2
-    try:
-        # Create a bridge object so _LazyDispatcher._replay() can call app.add_handler
-        class _AppDispatcherBridge:
-            """Makes PTB v21 Application look like PTB v13 dispatcher for module handler replay."""
-            def __init__(self, app):
-                self._app = app
-            def add_handler(self, handler, group=0, *args, **kwargs):
-                try:
-                    self._app.add_handler(handler, group=group)
-                except Exception as _err:
-                    logger.debug(f"Module handler skip: {_err}")
-            def add_error_handler(self, handler, *args, **kwargs):
-                try:
-                    self._app.add_error_handler(handler)
-                except Exception:
-                    pass
-            @property
-            def bot(self):
-                return self._app.bot
-        _bridge = _AppDispatcherBridge(application)
-        _compat2._set_dispatcher(_bridge)
-        logger.info("✅ BeatVerse module handlers wired onto Application")
-    except Exception as _wire_err:
-        logger.warning(f"Module handler wiring failed: {_wire_err}")
 
     # ── Register all handlers ────────────────────────────────────────────────────
     admin_filter = filters.User(user_id=ADMIN_ID) | filters.User(user_id=OWNER_ID)
@@ -14627,8 +14652,8 @@ def main() -> None:
     application.add_handler(CommandHandler("stats", stats_command, filters=admin_filter))
     application.add_handler(CommandHandler("sysstats", sysstats_command, filters=admin_filter))
     application.add_handler(CommandHandler("users", users_command, filters=admin_filter))
-    application.add_handler(CommandHandler("cmd", cmd_command))
-    application.add_handler(CommandHandler("commands", cmd_command))
+    application.add_handler(CommandHandler("cmd", cmd_command, filters=admin_filter))
+    application.add_handler(CommandHandler("commands", cmd_command, filters=admin_filter))
     application.add_handler(CommandHandler("upload", upload_command, filters=admin_filter))
     application.add_handler(CommandHandler("settings", settings_command, filters=admin_filter))
     application.add_handler(CommandHandler("autoupdate", autoupdate_command, filters=admin_filter))
@@ -14719,17 +14744,15 @@ def main() -> None:
             filters.ChatType.GROUPS & filters.StatusUpdate.ALL,
             _clean_gc_service_handler,
         ),
-        group=5,  # Normal priority — does NOT block command handlers
+        group=-1,  # High priority
     )
-    # ── Clean GC: delete commands in groups silently AFTER processing ────────────
-    # group=5 = runs AFTER command handlers (lower number = higher priority in PTB)
-    # This ensures /ban /mute /pin etc. execute first, THEN the message is cleaned
+    # ── Clean GC: delete all commands in groups silently ──────────────────────
     application.add_handler(
         MessageHandler(
             filters.ChatType.GROUPS & filters.COMMAND,
             _clean_gc_command_handler,
         ),
-        group=5,
+        group=-1,
     )
 
         
