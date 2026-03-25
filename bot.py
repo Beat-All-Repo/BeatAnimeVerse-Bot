@@ -3657,10 +3657,10 @@ def _build_panel_pages(maint: bool, clone_red: bool, clean_gc: bool) -> dict:
     def _nav(cur):
         row = []
         if cur > 0:
-            row.append(InlineKeyboardButton("◀", callback_data=f"adm_page_{cur-1}"))
+            row.append(InlineKeyboardButton("🔙", callback_data=f"adm_page_{cur-1}"))
         row.append(InlineKeyboardButton(f"· {cur+1}/{TOTAL} ·", callback_data="noop"))
         if cur < TOTAL - 1:
-            row.append(InlineKeyboardButton("▶", callback_data=f"adm_page_{cur+1}"))
+            row.append(InlineKeyboardButton("🔜", callback_data=f"adm_page_{cur+1}"))
         row.append(_close_btn())
         return row
 
@@ -4050,10 +4050,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await loading_animation_end(context, chat_id, loading_msg)
                 await safe_send_message(
                     context.bot, chat_id,
-                    b("🔄 Getting your link via our server bot…"),
+                    b(" Getting your link via our server bot…"),
                     reply_markup=InlineKeyboardMarkup([[
                         InlineKeyboardButton(
-                            "📥 Get Your Link",
+                            " Join Now ",
                             url=f"https://t.me/{clone_uname}?start={link_id}"
                         )
                     ]]),
@@ -4072,72 +4072,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await send_admin_menu(chat_id, context)
         return
 
-    # ── Regular user welcome ──────────────────────────────────────────────────────
-    keyboard = [
-          [InlineKeyboardButton("ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ", url=PUBLIC_ANIME_CHANNEL_URL)],
-          [InlineKeyboardButton("ᴄᴏɴᴛᴀᴄᴛ ᴀᴅᴍɪɴ", url=f"https://t.me/{ADMIN_CONTACT_USERNAME}")],
-          [InlineKeyboardButton("ʀᴇǫᴜᴇsᴛ ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ", url=REQUEST_CHANNEL_URL)],
-          [InlineKeyboardButton("ꜰᴇᴀᴛᴜʀᴇs", callback_data="user_features_0"),
-           InlineKeyboardButton("ᴀʙᴏᴜᴛ ᴍᴇ", callback_data="about_bot")],
-          [_close_btn()],
-      ]
-    markup = InlineKeyboardMarkup(keyboard)
-
-    # Try to copy welcome message from source channel
-    _sent_start_msg = None
-    try:
-        _sent_start_msg = await context.bot.copy_message(
-            chat_id=chat_id,
-            from_chat_id=WELCOME_SOURCE_CHANNEL,
-            message_id=WELCOME_SOURCE_MESSAGE_ID,
-            reply_markup=markup,
-        )
-    except Exception:
-        pass
-    if _sent_start_msg:
-        # React with ✨ emoji on start message
-        try:
-            await context.bot.set_message_reaction(
-                chat_id=chat_id,
-                message_id=_sent_start_msg.message_id,
-                reaction=[{"type": "emoji", "emoji": "✨"}],
-                is_big=False,
-            )
-        except Exception:
-            pass
+ ),
+            reply_markup=reply_markup,
+            message_effect_id=5104841245755180586)  # 🔥
+        
         return
-
-    # Fallback welcome
-    if WELCOME_IMAGE_URL:
-        try:
-            await context.bot.send_photo(
-                chat_id,
-                WELCOME_IMAGE_URL,
-                caption=(
-                    b(f"✨ Welcome to {e(BOT_NAME)}!") + "\n\n"
-                    + bq(b("Your gateway to all things Anime, Manga & Movies!"))
-                ),
-                parse_mode=ParseMode.HTML,
-                reply_markup=markup,
-            )
-            return
-        except Exception:
-            pass
-
-    _fb_msg = await safe_send_message(
-        context.bot, chat_id,
-        b(f"Welcome to {e(BOT_NAME)}!") + "\n\n"
-        + bq(b("Your gateway to all things Anime, Manga & Movies!")),
-        reply_markup=markup,
-    )
-    if _fb_msg:
-        try:
-            await context.bot.set_message_reaction(
-                chat_id=chat_id, message_id=_fb_msg.message_id,
-                reaction=[{"type": "emoji", "emoji": "✨"}], is_big=False,
-            )
-        except Exception:
-            pass
 
 
 # ================================================================================
