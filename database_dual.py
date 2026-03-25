@@ -226,7 +226,7 @@ def _migrate_pg() -> None:
                 channel_username TEXT NOT NULL,
                 user_id BIGINT,
                 created_time TIMESTAMP DEFAULT NOW(),
-                never_expires BOOLEAN DEFAULT FALSE,
+                never_expires BOOLEAN DEFAULT TRUE,
                 channel_title TEXT,
                 source_bot_username TEXT
             )""")
