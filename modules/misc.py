@@ -5,12 +5,12 @@
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ParseMode, Update
 from telegram.ext import CallbackContext, CommandHandler, Filters
 
-from beataniversebot_compat import dispatcher
+from beataniversebot_compat import BOT_NAME, dispatcher
 from modules.disable import DisableAbleCommandHandler
 from modules.helper_funcs.chat_status import user_admin
 
 MARKDOWN_HELP = f"""
-Markdown is a very powerful formatting tool supported by telegram. {dispatcher.bot.first_name} has some enhancements, to make sure that \
+Markdown is a very powerful formatting tool supported by telegram. {BOT_NAME} has some enhancements, to make sure that \
 saved messages are correctly parsed, and to allow you to create buttons.
 
 • <code>_italic_</code>: wrapping text with '_' will produce italic text
