@@ -16,6 +16,7 @@ from modules.sql import BASE, SESSION
 
 class Users(BASE):
     __tablename__ = "users"
+    __table_args__ = {"extend_existing": True}
     user_id = Column(BigInteger, primary_key=True)
     username = Column(UnicodeText)
 
