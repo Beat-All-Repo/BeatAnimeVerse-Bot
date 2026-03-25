@@ -613,13 +613,28 @@ async def _deliver_poster(
     sent_poster = None
 
     # ── Message 1: poster + info ──────────────────────────────────────────────
+    as_doc = context.user_data.get("deliver_as_document", False)
     if poster_buf:
         poster_buf.seek(0)
         try:
-            sent_poster = await msg.reply_photo(
-                photo=poster_buf, caption=caption,
-                parse_mode=ParseMode.HTML, reply_markup=kb,
-            )
+            if as_doc:
+                # Send manga poster as PDF-named document for downloading
+                from io import BytesIO as _BIO
+                t_d_   = data.get("title", {}) or {}
+                fname_ = (t_d_.get("english") or t_d_.get("romaji") or "manga").replace(" ", "_")
+                fname_ = fname_[:40] + ".jpg"
+                sent_poster = await msg.reply_document(
+                    document=poster_buf,
+                    filename=fname_,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=kb,
+                )
+            else:
+                sent_poster = await msg.reply_photo(
+                    photo=poster_buf, caption=caption,
+                    parse_mode=ParseMode.HTML, reply_markup=kb,
+                )
         except Exception as exc:
             logger.debug(f"poster send: {exc}")
 
@@ -783,7 +798,7 @@ async def _anime_callback(
         await _deliver_poster(update, context, data, template, media_type)
         return
 
-    # ── Thumbnail: NEXT IMG (completely different template) ───────────────────
+    # ── Thumbnail: NEXT IMG — delete old, send completely new message with info ─
     if cb == "anthmb_next":
         data_dict  = context.user_data.get("poster_data")
         media_type = context.user_data.get("poster_media_type", "ANIME")
@@ -793,23 +808,21 @@ async def _anime_callback(
             await query.answer(_sc("session expired"), show_alert=True)
             return
 
-        # Advance to next template — completely different style
+        # Advance to NEXT template (different visual style entirely)
         tmpl_idx = (tmpl_idx + 1) % len(TEMPLATES)
         new_tmpl = TEMPLATES[tmpl_idx]
         context.user_data["poster_tmpl_idx"] = tmpl_idx
         context.user_data["poster_template"] = new_tmpl
 
         try:
-            await query.answer(
-                _sc(f"generating {TEMPLATE_LABELS.get(new_tmpl, new_tmpl)} style…")
-            )
+            await query.answer(_sc(f"{TEMPLATE_LABELS.get(new_tmpl, new_tmpl)} style…"))
         except Exception:
             pass
 
         loading = None
         try:
             loading = await msg.reply_text(
-                _b(f"🎨 {TEMPLATE_LABELS.get(new_tmpl, new_tmpl)} {_sc('style…')}"),
+                _b(_sc(f"generating {TEMPLATE_LABELS.get(new_tmpl, new_tmpl)} style…")),
                 parse_mode=ParseMode.HTML,
             )
         except Exception:
@@ -825,39 +838,33 @@ async def _anime_callback(
 
         if not new_buf:
             try:
-                await query.answer(_sc("could not generate"), show_alert=True)
+                await query.answer(_sc("could not generate poster"), show_alert=True)
             except Exception:
                 pass
             return
 
+        # Delete old poster message
         prev_msg_id  = context.user_data.get("poster_msg_id")
         prev_chat_id = context.user_data.get("poster_chat_id")
-
         if prev_msg_id and prev_chat_id:
             try:
-                new_buf.seek(0)
-                await query.bot.edit_message_media(
-                    chat_id=prev_chat_id,
-                    message_id=prev_msg_id,
-                    media=InputMediaPhoto(
-                        media=new_buf,
-                        caption=_build_caption(data_dict),
-                        parse_mode=ParseMode.HTML,
-                    ),
-                    reply_markup=_info_kb(data_dict),
-                )
+                await query.bot.delete_message(prev_chat_id, prev_msg_id)
             except Exception:
-                try:
-                    new_buf.seek(0)
-                    sent = await msg.reply_photo(
-                        photo=new_buf,
-                        caption=_build_caption(data_dict),
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=_info_kb(data_dict),
-                    )
-                    context.user_data["poster_msg_id"] = sent.message_id
-                except Exception:
-                    pass
+                pass
+
+        # Send brand new message with NEW poster + info (not just edit)
+        try:
+            new_buf.seek(0)
+            sent = await msg.reply_photo(
+                photo=new_buf,
+                caption=_build_caption(data_dict),
+                parse_mode=ParseMode.HTML,
+                reply_markup=_info_kb(data_dict),
+            )
+            context.user_data["poster_msg_id"] = sent.message_id
+            context.user_data["poster_chat_id"] = msg.chat_id
+        except Exception as exc:
+            logger.debug(f"next img send: {exc}")
         return
 
     # ── Thumbnail: SKIP ───────────────────────────────────────────────────────
@@ -942,15 +949,23 @@ async def _thumbnail_photo_handler(
 # ── Command handlers ──────────────────────────────────────────────────────────
 
 async def anime_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /anime flow:
+    1. Similar panel (choose correct title)
+    2. Language panel
+    3. Size/type panel
+    4. Generate poster + info (Message 1)
+    5. Custom thumbnail prompt (Message 2, separate)
+    NO poster is shown before the user picks the correct title.
+    """
     if not context.args:
         await update.message.reply_text(
             _b("usage:") + " /anime &lt;name&gt;\n"
             + _bq(
                 "• /anime demon slayer\n"
-                "• /anime aot s2   (season 2)\n"
+                "• /anime aot s2\n"
                 "• /anime jjk season 2\n"
-                "• /anime frieren\n"
-                "• /anime solo leveling"
+                "• /anime frieren"
             ),
             parse_mode=ParseMode.HTML,
         )
@@ -965,6 +980,7 @@ async def anime_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "anime_query": resolved,
         "season_num":  sn,
     })
+    # Step 1: Show similar panel — NO poster until user picks correct title
     await _show_similar_panel(update, context, resolved, sn)
 
 
@@ -975,7 +991,13 @@ async def manga_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     q = " ".join(context.args)
-    context.user_data.update({"media_type": "MANGA", "anime_query": q, "season_num": None})
+    # Set flag: deliver as document (PDF-style) not photo
+    context.user_data.update({
+        "media_type":  "MANGA",
+        "anime_query": q,
+        "season_num":  None,
+        "deliver_as_document": True,  # manga posters sent as document/PDF
+    })
     await _show_similar_panel(update, context, q, None)
 
 
