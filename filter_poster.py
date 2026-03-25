@@ -343,14 +343,20 @@ def _default_wm_b() -> dict:
 def _default_wm_c() -> dict:
     """Default layer C: channel logo sticker at bottom-left, small (12% width)."""
     import os as _os
-    _logo_path = _os.path.join(_os.path.dirname(__file__), "assets", "channel_logo.webp")
-    _local_url = f"file://{_logo_path}" if _os.path.exists(_logo_path) else ""
+    # Try multiple path locations for Render.com / local environments
+    _candidates = [
+        _os.path.join(_os.path.dirname(__file__), "assets", "channel_logo.webp"),
+        "/app/assets/channel_logo.webp",
+        _os.path.join(_os.getcwd(), "assets", "channel_logo.webp"),
+    ]
+    _logo_path = next((p for p in _candidates if _os.path.exists(p)), "")
+    _local_url = f"file://{_logo_path}" if _logo_path else ""
     return {
-        "enabled":  True,           # ON by default when logo exists
-        "file_id":  "",             # Telegram file_id (set when admin sends sticker in bot)
-        "url":      _local_url,     # Local fallback: assets/channel_logo.webp
-        "position": "bottom-left",  # Bottom-left corner, small
-        "scale":    0.10,           # 10% of poster width = small logo
+        "enabled":  bool(_logo_path),   # ON by default only when logo file found
+        "file_id":  "",                  # Telegram file_id (set when admin sends sticker in bot)
+        "url":      _local_url,          # Local fallback: assets/channel_logo.webp
+        "position": "bottom-left",       # Bottom-left corner, small
+        "scale":    0.10,                # 10% of poster width = small logo
         "opacity":  230,
     }
 
