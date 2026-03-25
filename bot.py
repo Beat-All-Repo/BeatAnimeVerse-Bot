@@ -923,6 +923,33 @@ async def safe_send_message(
         return None
 
 
+async def _gc_auto_delete(bot: Bot, chat_id: int, msg, delay: int = None) -> None:
+    """Schedule auto-deletion of a bot message in a group chat after `delay` seconds.
+    Uses auto_delete_delay setting if delay is not provided.
+    Only runs in group/supergroup chats where auto_delete_messages is enabled."""
+    try:
+        if not msg:
+            return
+        # Only auto-delete in groups
+        if str(chat_id).startswith("-"):
+            if delay is None:
+                try:
+                    delay = int(get_setting("auto_delete_delay", "60"))
+                except Exception:
+                    delay = 60
+            if get_setting("auto_delete_messages", "true") != "true":
+                return
+            async def _do_delete():
+                await asyncio.sleep(delay)
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
+                except Exception:
+                    pass
+            asyncio.create_task(_do_delete())
+    except Exception:
+        pass
+
+
 async def safe_edit_text(
     query: CallbackQuery,
     text: str,
@@ -2921,13 +2948,27 @@ def get_category_settings(category: str) -> Dict:
 
 
 def update_category_field(category: str, field: str, value: Any) -> bool:
-    """Update a single field in category_settings."""
+    """Update a single field in category_settings (upsert — inserts row if missing)."""
     try:
         with db_manager.get_cursor() as cur:
+            # Try UPDATE first; if no row exists, INSERT a minimal row then UPDATE
             cur.execute(
                 f"UPDATE category_settings SET {field} = %s WHERE category = %s",
                 (value, category),
             )
+            if cur.rowcount == 0:
+                # Row does not exist yet — insert a minimal one then set the field
+                try:
+                    cur.execute(
+                        "INSERT INTO category_settings (category) VALUES (%s) ON CONFLICT (category) DO NOTHING",
+                        (category,),
+                    )
+                    cur.execute(
+                        f"UPDATE category_settings SET {field} = %s WHERE category = %s",
+                        (value, category),
+                    )
+                except Exception:
+                    pass
         return True
     except Exception as exc:
         db_logger.error(f"update_category_field {field}: {exc}")
@@ -3993,6 +4034,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # ── Deep link handling ────────────────────────────────────────────────────────
     if context.args:
         link_id = context.args[0]
+
+        # Handle special deep links
+        if link_id.lower() == "help":
+            await loading_animation_end(context, chat_id, loading_msg)
+            await help_command(update, context)
+            return
 
         # Clone redirect for non-admin users
         clone_redirect = get_setting("clone_redirect_enabled", "false").lower() == "true"
@@ -6155,8 +6202,10 @@ async def id_command(
                 f"» {b(small_caps('replied user id'))} {code(str(ru.id))}{runame}\n"
                 f"» {b(small_caps('replied name'))} {e(ru.full_name or '')}\n"
             )
-        if rep.forward_from:
-            fu = rep.forward_from
+        _fwd_origin2 = getattr(rep, "forward_origin", None)
+        fu = (getattr(_fwd_origin2, "sender_user", None)
+              or getattr(rep, "forward_from", None))
+        if fu:
             text += f"» {b(small_caps('forward user id'))} {code(str(fu.id))} {e(fu.full_name or '')}\n"
 
         # Media file IDs
@@ -6723,6 +6772,12 @@ async def inline_query_handler(
                         b(small_caps(title_lbl)) + "\n" + bq(small_caps(hint)),
                         parse_mode=ParseMode.HTML,
                     ),
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton(
+                            small_caps(f"🔍 search {kw}"),
+                            switch_inline_query_current_chat=f"{kw} "
+                        )
+                    ]]),
                 )
             )
         try:
@@ -6738,9 +6793,7 @@ async def inline_query_handler(
         watch_q = re.sub(r"^watch\s*", "", search, flags=re.IGNORECASE).strip()
         try:
             from database_dual import get_all_links
-            from modules.anime import _al_sync, _ANIME_GQL, _resolve_query
             all_links = get_all_links(limit=200, offset=0) or []
-            loop = asyncio.get_event_loop()
 
             seen_t: set = set()
             for row in all_links:
@@ -6756,19 +6809,9 @@ async def inline_query_handler(
                 deep_link = f"https://t.me/{BOT_USERNAME}?start={link_id_r}"
                 join_text = (get_setting("env_JOIN_BTN_TEXT", "") or small_caps("ᴊᴏɪɴ ɴᴏᴡ"))
 
-                # Try to get AniList cover for richer result
+                # Skip AniList API call for speed — use stored data only
                 cover_url = ""
                 score_str = ""
-                try:
-                    al_d = await loop.run_in_executor(None, _al_sync, _ANIME_GQL, ch_title)
-                    if al_d:
-                        cover_url = (al_d.get("coverImage") or {}).get("medium") or ""
-                        score = al_d.get("averageScore", "")
-                        status = (al_d.get("status") or "").replace("_", " ").title()
-                        genres = ", ".join((al_d.get("genres") or [])[:2])
-                        score_str = f"{score}/100" if score else ""
-                except Exception:
-                    pass
 
                 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton(join_text, url=deep_link)]])
@@ -6795,7 +6838,9 @@ async def inline_query_handler(
                             title=small_caps(ch_title[:40]),
                             description=small_caps("tap to get join link"),
                             input_message_content=InputTextMessageContent(
-                                b(small_caps(ch_title)), parse_mode=ParseMode.HTML,
+                                b(small_caps(ch_title)) + "
+" + bq(small_caps("click join now to access this anime channel")),
+                                parse_mode=ParseMode.HTML,
                             ),
                             reply_markup=kb,
                         )
@@ -7079,7 +7124,10 @@ async def group_message_handler(
         asyncio.create_task(_del_user_cmd())
 
     async def _group_post_with_autodel(category: str, query_text: str) -> None:
-        await generate_and_send_post(context, chat_id, category, query_text)
+        sent = await generate_and_send_post(context, chat_id, category, query_text)
+        # Auto-delete the bot's reply in groups too (not just the user command)
+        if auto_del and sent:
+            await _gc_auto_delete(context.bot, chat_id, sent, delay=del_delay)
 
     for prefix, category in [
         ("/anime ", "anime"), ("/manga ", "manga"),
@@ -8259,8 +8307,7 @@ def _register_all_handlers(app: Application) -> None:
     admin_filter = filters.User(user_id=ADMIN_ID) | filters.User(user_id=OWNER_ID)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("ping", ping_command))
-    app.add_handler(CommandHandler("alive", alive_command))
+    # NOTE: ping/alive are registered by modules/ping.py and modules/alive.py - do NOT add here
     app.add_handler(CommandHandler("test", test_command))
     app.add_handler(CommandHandler("search", search_command))
     app.add_handler(CommandHandler("anime", anime_command))
@@ -13094,11 +13141,11 @@ async def button_handler(
         }
         # Special: chatbot toggle is a real toggle, not just info
         if data == "feat_chatbot":
-            from database_dual import get_setting, set_setting
+            from database_dual import get_setting as _gs_feat, set_setting as _ss_feat
             chat_key = f"chatbot_{chat_id}"
-            current = (get_setting(chat_key, "true") or "true").lower()
+            current = (_gs_feat(chat_key, "true") or "true").lower()
             new_val = "false" if current == "true" else "true"
-            set_setting(chat_key, new_val)
+            _ss_feat(chat_key, new_val)
             status = small_caps("enabled ✅") if new_val == "true" else small_caps("disabled 🔕")
             try:
                 await query.answer(small_caps(f"chatbot {status}"), show_alert=True)
@@ -15053,8 +15100,7 @@ def main() -> None:
     # Public commands
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("ping", ping_command))
-    application.add_handler(CommandHandler("alive", alive_command))
+    # NOTE: ping/alive registered by modules/ping.py and modules/alive.py
     application.add_handler(CommandHandler("test", test_command))
     application.add_handler(CommandHandler("search", search_command))
     application.add_handler(CommandHandler("anime", anime_command))
