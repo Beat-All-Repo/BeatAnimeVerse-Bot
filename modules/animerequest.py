@@ -58,6 +58,7 @@ query ($search: String) {
     episodes
     averageScore
     siteUrl
+    coverImage { extraLarge large medium }
   }
 }
 """
@@ -163,6 +164,9 @@ def validate_on_anilist(query: str) -> dict | None:
             return None
         media = data["data"]["Media"]
         titles = media["title"]
+        cover_img = ((media.get("coverImage") or {}).get("extraLarge")
+                     or (media.get("coverImage") or {}).get("large")
+                     or (media.get("coverImage") or {}).get("medium") or "")
         return {
             "id":       media["id"],
             "romaji":   titles.get("romaji") or "",
@@ -172,6 +176,7 @@ def validate_on_anilist(query: str) -> dict | None:
             "episodes": media.get("episodes") or "?",
             "score":    media.get("averageScore") or "N/A",
             "url":      media.get("siteUrl") or "",
+            "cover":    cover_img,
         }
     except Exception:
         return None
@@ -383,14 +388,14 @@ def _uid(row):
 
 # ── /request ───────────────────────────────────────────────────────────────────
 
-def request_cmd(update: Update, context: CallbackContext):
+async def request_cmd(update: Update, context: CallbackContext):
     message = update.effective_message
     user    = update.effective_user
     chat    = update.effective_chat
     args    = context.args
 
     if not args:
-        return message.reply_text(
+        return await message.reply_text(
             "📋 *Usage:* `/request <anime name>`\n"
             "_Example:_ `/request Attack on Titan`",
             parse_mode=ParseMode.HTML,
@@ -399,28 +404,28 @@ def request_cmd(update: Update, context: CallbackContext):
     wait = _cooldown_remaining(user.id)
     if wait:
         m, s = divmod(wait, 60)
-        return message.reply_text(
+        return await message.reply_text(
             f"⏳ Slow down! Wait *{m}m {s}s* before your next request.",
             parse_mode=ParseMode.HTML,
         )
 
     pending = _pending_count_for_user(user.id, chat.id)
     if pending >= MAX_PENDING_PER_USER:
-        return message.reply_text(
+        return await message.reply_text(
             f"❌ You already have *{pending}* unresolved requests.\n"
             "Please wait for them to be fulfilled first.",
             parse_mode=ParseMode.HTML,
         )
 
     query = " ".join(args).strip()
-    wait_msg = message.reply_text(
+    wait_msg = await message.reply_text(
         f"🔍 Checking *{query}* on AniList...",
         parse_mode=ParseMode.HTML,
     )
 
     anime = validate_on_anilist(query)
     if not anime:
-        wait_msg.edit_text(
+        await wait_msg.edit_text(
             f"❌ *\"{query}\"* is not recognised as a valid anime.\n\n"
             "Only real anime titles (verified via AniList) are accepted.\n\n"
             "_Tip:_ find the exact title on [AniList](https://anilist.co) first.",
@@ -430,7 +435,7 @@ def request_cmd(update: Update, context: CallbackContext):
         return
 
     if _duplicate_exists(chat.id, anime["id"]):
-        wait_msg.edit_text(
+        await wait_msg.edit_text(
             f"⚠️ *{anime['english'] or anime['romaji']}* is already in the pending list!",
             parse_mode=ParseMode.HTML,
         )
@@ -442,19 +447,43 @@ def request_cmd(update: Update, context: CallbackContext):
         canonical, anime["id"], anime["url"]
     )
     _stamp_cooldown(user.id)
-    wait_msg.delete()
+    await wait_msg.delete()
 
-    message.reply_text(
-        f"✅ *Request Submitted!*\n\n"
-        f"🎬 *Anime:* [{canonical}]({anime['url']})\n"
-        f"   _({anime['native']})_\n"
-        f"📺 *Episodes:* `{anime['episodes']}`\n"
-        f"📊 *Status:* `{anime['status']}`\n"
-        f"⭐ *Score:* `{anime['score']}/100`\n\n"
-        f"🔖 *Request ID:* `#{req_id}`\n"
-        f"_Admins will review it soon._",
+    # Build a styled request card with cover image if available
+    cover = anime.get("cover") or anime.get("url", "")
+    caption = (
+        f"<b>📨 ʀᴇQᴜᴇsᴛ sᴜʙᴍɪᴛᴛᴇᴅ!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f"» <b>ᴀɴɪᴍᴇ :</b> <a href=\'{anime['url']}\'>{canonical}</a>\n"
+        f"» <b>ɴᴀᴛɪᴠᴇ :</b> {anime.get('native', '') or ''}\n"
+        f"» <b>ᴇᴘɪsᴏᴅᴇs :</b> <code>{anime['episodes']}</code>\n"
+        f"» <b>sᴛᴀᴛᴜs :</b> <code>{anime['status']}</code>\n"
+        f"» <b>sᴄᴏʀᴇ :</b> <code>{anime['score']}/100</code>\n\n"
+        f"» <b>ʀᴇQᴜᴇsᴛ ɪᴅ :</b> <code>#{req_id}</code>\n"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"<i>Admins will review it soon.</i>"
+    )
+    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔗 ᴠɪᴇᴡ ᴏɴ ᴀɴɪʟɪsᴛ", url=anime["url"])
+    ]])
+    if cover and cover.startswith("http"):
+        try:
+            await context.bot.send_photo(
+                chat_id=message.chat_id,
+                photo=cover,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=kb,
+            )
+            return
+        except Exception:
+            pass
+    await message.reply_text(
+        caption,
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=False,
+        reply_markup=kb,
     )
 
 
