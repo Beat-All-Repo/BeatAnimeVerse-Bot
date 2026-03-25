@@ -12,11 +12,11 @@ from modules.helper_funcs.chat_status import dev_plus
 
 
 @dev_plus
-def shell(update: Update, context: CallbackContext):
+async def shell(update: Update, context: CallbackContext):
     message = update.effective_message
     cmd = message.text.split(" ", 1)
     if len(cmd) == 1:
-        message.reply_text("No command to execute was given.")
+        await message.reply_text("No command to execute was given.")
         return
     cmd = cmd[1]
     process = subprocess.Popen(
@@ -43,7 +43,7 @@ def shell(update: Update, context: CallbackContext):
                 chat_id=message.chat_id,
             )
     else:
-        message.reply_text(reply, parse_mode=ParseMode.HTML)
+        await message.reply_text(reply, parse_mode=ParseMode.HTML)
 
 
 SHELL_HANDLER = CommandHandler(["sh"], shell, run_async=True)
