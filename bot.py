@@ -3632,78 +3632,78 @@ def _build_panel_pages(maint: bool, clone_red: bool, clean_gc: bool) -> dict:
         return InlineKeyboardMarkup(rows)
 
     main_btns = [
-        _btn("📊 STATS",     "admin_stats"),
-        _btn("📢 BROADCAST", "admin_broadcast_start"),
-        _btn("👥 USERS",     "user_management"),
-        _btn("📡 CHANNELS",  "manage_force_sub"),
-        _btn("🔗 LINKS",     "generate_links"),
-        _btn("🤖 CLONES",    "manage_clones"),
-        _btn("⚙️ SETTINGS",  "admin_settings"),
-        _btn("🎌 CATEGORY",  "admin_category_settings"),
-        _btn("📤 UPLOAD",    "upload_menu"),
-        _btn("📋 FILTERS",   "admin_filter_settings"),
-        _btn("🎨 POSTER DB", "admin_filter_poster"),
-        _btn("🚩 FLAGS",     "admin_feature_flags"),
+        _btn("STATS", "admin_stats"),
+        _btn("BROADCAST", "admin_broadcast_start"),
+        _btn("USERS", "user_management"),
+        _btn("CHANNELS", "manage_force_sub"),
+        _btn("LINKS", "generate_links"),
+        _btn("CLONES", "manage_clones"),
+        _btn("SETTINGS", "admin_settings"),
+        _btn("CATEGORY", "admin_category_settings"),
+        _btn("UPLOAD", "upload_menu"),
+        _btn("FILTERS", "admin_filter_settings"),
+        _btn("POSTER DB", "admin_filter_poster"),
+        _btn("FLAGS", "admin_feature_flags"),
     ]
     tools_btns = [
-        _btn("♻️ AUTO FWD",  "admin_autoforward"),
-        _btn("📖 MANGA",     "admin_autoupdate"),
-        _btn("🎨 STYLE",     "admin_text_style"),
-        _btn("📊 SYSTEM",    "admin_sysstats"),
-        _btn("📜 LOGS",      "admin_logs"),
-        _btn("🔄 RESTART",   "admin_restart_confirm"),
-        _btn("📥 IMP USERS", "admin_import_users"),
-        _btn("📥 IMP LINKS", "admin_import_links"),
-        _btn("📤 EXP USERS", "admin_export_users_quick"),
-        _btn("💾 DB CLEAN",  "dbcleanup_confirm"),
-        _btn("🖼 PANELS",    "panel_img_add_urls"),
-        _btn("🌐 ENV VARS",  "admin_env_panel"),
+        _btn("AUTO FWD", "admin_autoforward"),
+        _btn("MANGA", "admin_autoupdate"),
+        _btn("STYLE", "admin_text_style"),
+        _btn("SYSTEM", "admin_sysstats"),
+        _btn("LOGS", "admin_logs"),
+        _btn("RESTART", "admin_restart_confirm"),
+        _btn("IMP USERS", "admin_import_users"),
+        _btn("IMP LINKS", "admin_import_links"),
+        _btn("EXP USERS", "admin_export_users_quick"),
+        _btn("DB CLEAN", "dbcleanup_confirm"),
+        _btn("PANELS", "panel_img_add_urls"),
+        _btn("ENV VARS", "admin_env_panel"),
     ]
     feat_btns = [
-        _btn("👫 COUPLE",    "feat_couple"),
-        _btn("👋 SLAP",      "feat_slap"),
-        _btn("🤗 HUG",       "feat_hug"),
-        _btn("💋 KISS",      "feat_kiss"),
-        _btn("🤲 PAT",       "feat_pat"),
-        _btn("🔍 INLINE",    "feat_inline_search"),
-        _btn("😂 REACTIONS", "feat_reactions"),
-        _btn("🤖 CHATBOT",   "feat_chatbot"),
-        _btn("🎲 T/DARE",    "feat_truth_dare"),
-        _btn("📝 NOTES",     "feat_notes"),
-        _btn("⚠️ WARNS",     "feat_warns"),
-        _btn("🔇 MUTE",      "feat_muting"),
+        _btn("COUPLE", "feat_couple"),
+        _btn("SLAP", "feat_slap"),
+        _btn("HUG", "feat_hug"),
+        _btn("KISS", "feat_kiss"),
+        _btn("PAT", "feat_pat"),
+        _btn("INLINE", "feat_inline_search"),
+        _btn("REACTIONS", "feat_reactions"),
+        _btn("CHATBOT", "feat_chatbot"),
+        _btn("T/DARE", "feat_truth_dare"),
+        _btn("NOTES", "feat_notes"),
+        _btn("WARNS", "feat_warns"),
+        _btn("MUTE", "feat_muting"),
     ]
     poster_btns = [
-        _btn("🎌 ANI",   "poster_cmd_ani"),
-        _btn("🔴 NET",   "poster_cmd_net"),
-        _btn("🎬 CRUN",  "poster_cmd_crun"),
-        _btn("🌑 DARK",  "poster_cmd_dark"),
-        _btn("☀️ LIGHT", "poster_cmd_light"),
-        _btn("✨ MOD",   "poster_cmd_mod"),
-        _btn("🚫 BANS",  "feat_bans"),
-        _btn("📋 RULES", "feat_rules"),
-        _btn("📡 AIRING","feat_airing"),
-        _btn("👤 CHAR",  "feat_character"),
-        _btn("ℹ️ ANIME", "feat_anime_info"),
-        _btn("💤 AFK",   "feat_afk"),
+        _btn("ANI", "poster_cmd_ani"),
+        _btn("NET", "poster_cmd_net"),
+        _btn("CRUN", "poster_cmd_crun"),
+        _btn("DARK", "poster_cmd_dark"),
+        _btn("LIGHT", "poster_cmd_light"),
+        _btn("MOD", "poster_cmd_mod"),
+        _btn("BANS", "feat_bans"),
+        _btn("RULES", "feat_rules"),
+        _btn("AIRING", "feat_airing"),
+        _btn("CHAR", "feat_character"),
+        _btn("ANIME", "feat_anime_info"),
+        _btn("AFK", "feat_afk"),
     ]
     all_mods = [
-        _btn("ADMIN",      "mod_admin"),      _btn("ANTIFLOOD",  "mod_antiflood"),
-        _btn("APPROVE",    "mod_approve"),    _btn("BLACKLIST",  "mod_blacklist"),
-        _btn("BL STICKER", "mod_blsticker"),  _btn("CHATBOT",    "mod_chatbot"),
-        _btn("CLEANER",    "mod_cleaner"),    _btn("CONNECTION", "mod_connection"),
-        _btn("CURRENCY",   "mod_currency"),   _btn("FILTERS",    "mod_custfilters"),
-        _btn("GBAN",       "mod_globalbans"), _btn("IMDB",       "mod_imdb"),
-        _btn("LOCKS",      "mod_locks"),      _btn("LOGCHAN",    "mod_logchannel"),
-        _btn("PING",       "mod_ping"),       _btn("PURGE",      "mod_purge"),
-        _btn("REPORTING",  "mod_reporting"),  _btn("SED",        "mod_sed"),
-        _btn("SHELL",      "mod_shell"),      _btn("SPEEDTEST",  "mod_speedtest"),
-        _btn("STICKERS",   "mod_stickers"),   _btn("TAGALL",     "mod_tagall"),
-        _btn("TRANSLATE",  "mod_translator"), _btn("TRUTH/DARE", "mod_truthdare"),
-        _btn("UD",         "mod_ud"),         _btn("WALLPAPER",  "mod_wallpaper"),
-        _btn("WIKI",       "mod_wiki"),       _btn("WRITE",      "mod_writetool"),
-        _btn("ANIMEQUOTE", "mod_animequotes"),_btn("GETTIME",    "mod_gettime"),
-        _btn("BAD WORDS",  "mod_badwords"),
+        _btn("ADMIN", "mod_admin"),      _btn("ANTIFLOOD", "mod_antiflood"),
+        _btn("APPROVE", "mod_approve"),    _btn("BLACKLIST", "mod_blacklist"),
+        _btn("BL STICKER", "mod_blsticker"),  _btn("CHATBOT", "mod_chatbot"),
+        _btn("CLEANER", "mod_cleaner"),    _btn("CONNECTION", "mod_connection"),
+        _btn("CURRENCY", "mod_currency"),   _btn("FILTERS", "mod_custfilters"),
+        _btn("GBAN", "mod_globalbans"), _btn("IMDB", "mod_imdb"),
+        _btn("LOCKS", "mod_locks"),      _btn("LOGCHAN", "mod_logchannel"),
+        _btn("PING", "mod_ping"),       _btn("PURGE", "mod_purge"),
+        _btn("REPORTING", "mod_reporting"),  _btn("SED", "mod_sed"),
+        _btn("SHELL", "mod_shell"),      _btn("SPEEDTEST", "mod_speedtest"),
+        _btn("STICKERS", "mod_stickers"),   _btn("TAGALL", "mod_tagall"),
+        _btn("TRANSLATE", "mod_translator"), _btn("TRUTH/DARE", "mod_truthdare"),
+        _btn("UD", "mod_ud"),         _btn("WALLPAPER", "mod_wallpaper"),
+        _btn("WIKI", "mod_wiki"),       _btn("WRITE", "mod_writetool"),
+        _btn("ANIMEQUOTE", "mod_animequotes"),_btn("GETTIME", "mod_gettime"),
+        _btn("BAD WORDS", "mod_badwords"),
     ]
 
     return {
@@ -4179,15 +4179,12 @@ async def handle_deep_link(
             _jbr_note = "\n" + b(small_caps("tap join → request sent → auto-approved instantly"))
 
         _link_msg = (
-            b(_here_link) + "\n\n"
-            + bq(
-                b(small_caps("⚡ this link expires in ")) + f"<code>{LINK_EXPIRY_MINUTES}</code> "
-                + b(small_caps("minutes")) + "\n"
-                + b(small_caps("💡 if expired, tap the post button again for a fresh link"))
-                + _jbr_note
-            )
+            f"<blockquote><b>{small_caps(_here_link)}</b></blockquote>\n\n"
+            + f"<u><b>{small_caps('ɴᴏᴛᴇ: ɪꜰ ᴛʜᴇ ʟɪɴᴋ ɪs ᴇxᴘɪʀᴇᴅ, ᴘʟᴇᴀsᴇ ᴄʟɪᴄᴋ ᴛʜᴇ ᴘᴏsᴛ ʟɪɴᴋ ᴀɢᴀɪɴ ᴛᴏ ɢᴇᴛ ᴀ ɴᴇᴡ ᴏɴᴇ.')}</u></b>"
         )
-        keyboard = [[bold_button(_join_text, url=invite.invite_link)]]
+        if _jbr_note:
+            _link_msg += "\n" + _jbr_note
+        keyboard = [[bold_button(small_caps(_join_text), url=invite.invite_link)]]
         await context.bot.send_message(
             chat_id, _link_msg,
             parse_mode=ParseMode.HTML,
@@ -7026,27 +7023,34 @@ async def inline_query_handler(
 async def group_message_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Handle messages in bot-connected groups with auto-delete support."""
+    """
+    Handle messages in connected groups.
+    Filter poster (anime title matching) fires in ALL groups where bot is member.
+    Other features (anime commands, auto-delete) only in connected groups.
+    """
     if not update.message or not update.effective_chat:
-        return
-    if get_setting("group_commands_enabled", "true") != "true":
         return
     if not _passes_filter(update):
         return
 
     chat_id = update.effective_chat.id
-    # Fast in-memory check — connected groups are cached in _panel_cache_get
+    text    = update.message.text or update.message.caption or ""
+    lower   = text.lower().strip()
+
+    # ── Filter poster fires in ANY group (bot just needs to be member) ─────────
+    # This matches anime titles from generated_links regardless of connection status
+    if _FILTER_POSTER_AVAILABLE and lower and not lower.startswith("/"):
+        asyncio.create_task(_handle_anime_filter(update, context, lower))
+
+    # ── Check connected group for everything else ──────────────────────────────
     _connected = _panel_cache_get("connected_groups")
     if _connected is not None:
         if chat_id not in _connected:
             return
     else:
-        # Cache miss — check DB once, update cache
         try:
             with db_manager.get_cursor() as cur:
-                cur.execute(
-                    "SELECT group_id FROM connected_groups WHERE active = TRUE"
-                )
+                cur.execute("SELECT group_id FROM connected_groups WHERE active = TRUE")
                 rows = cur.fetchall() or []
             _ids = {r[0] for r in rows}
             _panel_cache_set("connected_groups", _ids)
@@ -7054,6 +7058,9 @@ async def group_message_handler(
                 return
         except Exception:
             return
+
+    if get_setting("group_commands_enabled", "true") != "true":
+        return
 
     # Read text OR caption (for photo/video messages with captions)
     text  = update.message.text or update.message.caption or ""
@@ -8283,6 +8290,199 @@ def _register_all_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("get",        note_get_cmd))
     app.add_handler(CommandHandler("rules",      rules_cmd))
     app.add_handler(CommandHandler("setrules",   setrules_cmd, filters=filters.ChatType.GROUPS))
+
+    # ── Module group management commands — registered directly in PTB v21 ──────
+    # These come from modules that may not load via bridge; register directly.
+    _G = filters.ChatType.GROUPS
+    _GU = None  # No filter — works everywhere
+
+    async def _pin_cmd(update, context):
+        if not update.message or not update.message.reply_to_message:
+            return await update.message.reply_text("Reply to a message to pin it.")
+        try:
+            await context.bot.pin_chat_message(
+                update.effective_chat.id,
+                update.message.reply_to_message.message_id,
+                disable_notification=False,
+            )
+        except Exception as exc:
+            await update.message.reply_text(f"❌ {exc}")
+
+    async def _unpin_cmd(update, context):
+        try:
+            await context.bot.unpin_chat_message(update.effective_chat.id)
+        except Exception as exc:
+            await update.message.reply_text(f"❌ {exc}")
+
+    async def _del_cmd(update, context):
+        if update.message and update.message.reply_to_message:
+            try:
+                await update.message.reply_to_message.delete()
+                await update.message.delete()
+            except Exception:
+                pass
+
+    async def _promote_cmd(update, context):
+        from telegram.constants import ChatMemberStatus
+        msg = update.message
+        target = msg.reply_to_message.from_user if msg.reply_to_message else None
+        if not target and context.args:
+            try:
+                target = await context.bot.get_chat(context.args[0])
+            except Exception:
+                pass
+        if not target:
+            return await msg.reply_text("Reply to a user or provide @username")
+        try:
+            await context.bot.promote_chat_member(
+                update.effective_chat.id, target.id,
+                can_manage_chat=True, can_delete_messages=True,
+                can_manage_video_chats=True, can_restrict_members=True,
+                can_promote_members=False, can_change_info=True,
+                can_invite_users=True, can_pin_messages=True,
+            )
+            await msg.reply_text(f"✅ Promoted {target.first_name or target.id}")
+        except Exception as exc:
+            await msg.reply_text(f"❌ {exc}")
+
+    async def _demote_cmd(update, context):
+        msg = update.message
+        target = msg.reply_to_message.from_user if msg.reply_to_message else None
+        if not target and context.args:
+            try:
+                target = await context.bot.get_chat(context.args[0])
+            except Exception:
+                pass
+        if not target:
+            return await msg.reply_text("Reply to a user or provide @username")
+        try:
+            from telegram import ChatPermissions
+            await context.bot.promote_chat_member(
+                update.effective_chat.id, target.id,
+                can_manage_chat=False, can_delete_messages=False,
+                can_manage_video_chats=False, can_restrict_members=False,
+                can_promote_members=False, can_change_info=False,
+                can_invite_users=False, can_pin_messages=False,
+            )
+            await msg.reply_text(f"✅ Demoted {target.first_name or target.id}")
+        except Exception as exc:
+            await msg.reply_text(f"❌ {exc}")
+
+    async def _mute_cmd(update, context):
+        from telegram import ChatPermissions
+        msg = update.message
+        target = msg.reply_to_message.from_user if msg.reply_to_message else None
+        if not target and context.args:
+            try:
+                target = await context.bot.get_chat(context.args[0])
+            except Exception:
+                pass
+        if not target:
+            return await msg.reply_text("Reply to a user or provide @username")
+        try:
+            await context.bot.restrict_chat_member(
+                update.effective_chat.id, target.id,
+                ChatPermissions(can_send_messages=False),
+            )
+            await msg.reply_text(f"🔇 Muted {target.first_name or target.id}")
+        except Exception as exc:
+            await msg.reply_text(f"❌ {exc}")
+
+    async def _unmute_cmd(update, context):
+        from telegram import ChatPermissions
+        msg = update.message
+        target = msg.reply_to_message.from_user if msg.reply_to_message else None
+        if not target and context.args:
+            try:
+                target = await context.bot.get_chat(context.args[0])
+            except Exception:
+                pass
+        if not target:
+            return await msg.reply_text("Reply to a user or provide @username")
+        try:
+            await context.bot.restrict_chat_member(
+                update.effective_chat.id, target.id,
+                ChatPermissions(can_send_messages=True, can_send_photos=True,
+                    can_send_videos=True, can_send_documents=True,
+                    can_send_polls=True, can_invite_users=True),
+            )
+            await msg.reply_text(f"🔊 Unmuted {target.first_name or target.id}")
+        except Exception as exc:
+            await msg.reply_text(f"❌ {exc}")
+
+    async def _ban_cmd(update, context):
+        msg = update.message
+        target = msg.reply_to_message.from_user if msg.reply_to_message else None
+        if not target and context.args:
+            try:
+                target = await context.bot.get_chat(context.args[0])
+            except Exception:
+                pass
+        if not target:
+            return await msg.reply_text("Reply to a user or provide @username")
+        try:
+            await context.bot.ban_chat_member(update.effective_chat.id, target.id)
+            await msg.reply_text(f"🚫 Banned {target.first_name or target.id}")
+        except Exception as exc:
+            await msg.reply_text(f"❌ {exc}")
+
+    async def _unban_cmd(update, context):
+        msg = update.message
+        target = msg.reply_to_message.from_user if msg.reply_to_message else None
+        if not target and context.args:
+            try:
+                target = await context.bot.get_chat(context.args[0])
+            except Exception:
+                pass
+        if not target:
+            return await msg.reply_text("Reply to a user or provide @username")
+        try:
+            await context.bot.unban_chat_member(update.effective_chat.id, target.id)
+            await msg.reply_text(f"✅ Unbanned {target.first_name or target.id}")
+        except Exception as exc:
+            await msg.reply_text(f"❌ {exc}")
+
+    async def _kick_cmd(update, context):
+        msg = update.message
+        target = msg.reply_to_message.from_user if msg.reply_to_message else None
+        if not target and context.args:
+            try:
+                target = await context.bot.get_chat(context.args[0])
+            except Exception:
+                pass
+        if not target:
+            return await msg.reply_text("Reply to a user or provide @username")
+        try:
+            await context.bot.ban_chat_member(update.effective_chat.id, target.id)
+            await context.bot.unban_chat_member(update.effective_chat.id, target.id)
+            await msg.reply_text(f"👢 Kicked {target.first_name or target.id}")
+        except Exception as exc:
+            await msg.reply_text(f"❌ {exc}")
+
+    async def _invitelink_cmd(update, context):
+        try:
+            link = await context.bot.export_chat_invite_link(update.effective_chat.id)
+            await update.message.reply_text(f"🔗 Invite link:\n{link}")
+        except Exception as exc:
+            await update.message.reply_text(f"❌ {exc}")
+
+    # Register all group management commands
+    _mgmt_cmds = [
+        ("pin",        _pin_cmd),
+        ("unpin",      _unpin_cmd),
+        ("del",        _del_cmd),
+        ("promote",    _promote_cmd),
+        ("demote",     _demote_cmd),
+        ("mute",       _mute_cmd),
+        ("unmute",     _unmute_cmd),
+        ("ban",        _ban_cmd),
+        ("unban",      _unban_cmd),
+        ("kick",       _kick_cmd),
+        ("invitelink", _invitelink_cmd),
+    ]
+    for _cmd_name, _cmd_fn in _mgmt_cmds:
+        app.add_handler(CommandHandler(_cmd_name, _cmd_fn, filters=_G))
+    logger.info(f"[mgmt] Registered {len(_mgmt_cmds)} group management commands")
     app.add_handler(CommandHandler("warns",      warns_cmd))
     app.add_handler(CommandHandler("warn",       warn_cmd, filters=filters.ChatType.GROUPS))
     app.add_handler(CommandHandler("unwarn",     unwarn_cmd, filters=filters.ChatType.GROUPS))
@@ -13151,10 +13351,19 @@ async def button_handler(
         await cmd_command(update, context)
         return
 
+    # ── Anime flow callbacks (anpick_, lang_, size_, anthmb_) ───────────────────
+    # These are registered in modules/anime.py — delegate to it here
+    if data.startswith(("anpick_", "lang_", "size_", "anthmb_")):
+        try:
+            from modules.anime import _anime_callback
+            await _anime_callback(update, context)
+        except Exception as exc:
+            logger.debug(f"anime callback error: {exc}")
+        return
+
     # ── Unhandled fallback ─────────────────────────────────────────────────────────
-    logger.info(f"Unhandled callback: {data!r} from user {uid}")
-    # Don't show alert for unhandled — just silently ignore
-    # (already answered at the top)
+    logger.debug(f"Unhandled callback: {data!r} from user {uid}")
+    # (already answered at top — silently ignore)
 
 
 # ================================================================================
