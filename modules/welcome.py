@@ -99,16 +99,22 @@ VALID_WELCOME_FORMATTERS = [
     "id", "count", "chatname", "mention",
 ]
 
-ENUM_FUNC_MAP = {
-    sql.Types.TEXT.value:        dispatcher.bot.send_message,
-    sql.Types.BUTTON_TEXT.value: dispatcher.bot.send_message,
-    sql.Types.STICKER.value:     dispatcher.bot.send_sticker,
-    sql.Types.DOCUMENT.value:    dispatcher.bot.send_document,
-    sql.Types.PHOTO.value:       dispatcher.bot.send_photo,
-    sql.Types.AUDIO.value:       dispatcher.bot.send_audio,
-    sql.Types.VOICE.value:       dispatcher.bot.send_voice,
-    sql.Types.VIDEO.value:       dispatcher.bot.send_video,
+# ENUM_FUNC_MAP: use string method names, resolved at runtime to avoid import-time errors
+ENUM_FUNC_MAP_KEYS = {
+    sql.Types.TEXT.value:        "send_message",
+    sql.Types.BUTTON_TEXT.value: "send_message",
+    sql.Types.STICKER.value:     "send_sticker",
+    sql.Types.DOCUMENT.value:    "send_document",
+    sql.Types.PHOTO.value:       "send_photo",
+    sql.Types.AUDIO.value:       "send_audio",
+    sql.Types.VOICE.value:       "send_voice",
+    sql.Types.VIDEO.value:       "send_video",
 }
+
+def ENUM_FUNC_MAP(type_val, bot):
+    """Get the bot send method for a media type."""
+    method_name = ENUM_FUNC_MAP_KEYS.get(type_val, "send_message")
+    return getattr(bot, method_name, bot.send_message)
 
 # Strong-mute user waitlist: user_id → state dict
 VERIFIED_USER_WAITLIST = {}
@@ -536,7 +542,7 @@ def new_member(update: Update, context: CallbackContext):
 
         if welcome_bool:
             if media_wel:
-                sent = ENUM_FUNC_MAP[welc_type](
+                sent = ENUM_FUNC_MAP(welc_type, dispatcher.bot)(
                     chat.id, cust_content,
                     caption=res, reply_markup=keyboard,
                     reply_to_message_id=reply, parse_mode="markdown",
@@ -612,7 +618,7 @@ def left_member(update: Update, context: CallbackContext):
                 return
 
             if goodbye_type not in (sql.Types.TEXT, sql.Types.BUTTON_TEXT):
-                ENUM_FUNC_MAP[goodbye_type](chat.id, cust_goodbye)
+                ENUM_FUNC_MAP(goodbye_type, dispatcher.bot)(chat.id, cust_goodbye)
                 return
 
             first_name = left_mem.first_name or "PersonWithNoName"
@@ -686,11 +692,11 @@ def welcome(update: Update, context: CallbackContext):
             buttons = sql.get_welc_buttons(chat.id)
             if noformat:
                 welcome_m += revert_buttons(buttons)
-                ENUM_FUNC_MAP[welcome_type](chat.id, cust_content, caption=welcome_m)
+                ENUM_FUNC_MAP(welcome_type, dispatcher.bot)(chat.id, cust_content, caption=welcome_m)
             else:
                 keyb     = build_keyboard(buttons)
                 keyboard = InlineKeyboardMarkup(keyb)
-                ENUM_FUNC_MAP[welcome_type](
+                ENUM_FUNC_MAP(welcome_type, dispatcher.bot)(
                     chat.id, cust_content, caption=welcome_m,
                     reply_markup=keyboard, parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
@@ -748,9 +754,9 @@ def goodbye(update: Update, context: CallbackContext):
                 send(update, goodbye_m, keyboard, sql.DEFAULT_GOODBYE)
         else:
             if noformat:
-                ENUM_FUNC_MAP[goodbye_type](chat.id, goodbye_m)
+                ENUM_FUNC_MAP(goodbye_type, dispatcher.bot)(chat.id, goodbye_m)
             else:
-                ENUM_FUNC_MAP[goodbye_type](chat.id, goodbye_m, parse_mode=ParseMode.HTML)
+                ENUM_FUNC_MAP(goodbye_type, dispatcher.bot)(chat.id, goodbye_m, parse_mode=ParseMode.HTML)
 
     elif args[0].lower() in ("on", "yes"):
         sql.set_gdbye_preference(str(chat.id), True)
