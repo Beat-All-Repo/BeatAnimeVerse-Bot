@@ -4422,7 +4422,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     searching_msg = await safe_send_message(
         context.bot, chat_id,
-        b(f"🔍 Searching for: {e(query_text)}…"),
+        b(f" Searching for: {e(query_text)}…"),
     )
 
     results = []
@@ -4476,7 +4476,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     await safe_send_message(
         context.bot, chat_id,
-        b(f"🔍 Search results for: {e(query_text)}"),
+        b(f" Search results for: {e(query_text)}"),
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -6838,8 +6838,7 @@ async def inline_query_handler(
                             title=small_caps(ch_title[:40]),
                             description=small_caps("tap to get join link"),
                             input_message_content=InputTextMessageContent(
-                                b(small_caps(ch_title)) + "
-" + bq(small_caps("click join now to access this anime channel")),
+                                b(small_caps(ch_title)) + "\n" + bq(small_caps("click join now to access this anime channel")),
                                 parse_mode=ParseMode.HTML,
                             ),
                             reply_markup=kb,
@@ -6847,7 +6846,6 @@ async def inline_query_handler(
                     )
                 if len(results) >= 10:
                     break
-
         except Exception as exc:
             logger.debug(f"[inline] watch: {exc}")
 
@@ -6936,7 +6934,7 @@ async def inline_query_handler(
             pass
         return
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # ══════════c════════════════════════════════════════════════════════════════
     # GROUP MANAGEMENT quick reference
     # ══════════════════════════════════════════════════════════════════════════
     if search_lower.startswith("manage"):
