@@ -30,6 +30,7 @@ class Users(BASE):
 
 class Chats(BASE):
     __tablename__ = "chats"
+    __table_args__ = {"extend_existing": True}
     chat_id = Column(String(14), primary_key=True)
     chat_name = Column(UnicodeText, nullable=False)
 
@@ -43,6 +44,7 @@ class Chats(BASE):
 
 class ChatMembers(BASE):
     __tablename__ = "chat_members"
+    __table_args__ = {"extend_existing": True}
     priv_chat_id = Column(BigInteger, primary_key=True)
     # NOTE: Use dual primary key instead of private primary key?
     chat = Column(
