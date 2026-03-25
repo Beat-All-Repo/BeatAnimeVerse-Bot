@@ -341,8 +341,18 @@ def _default_wm_b() -> dict:
 
 
 def _default_wm_c() -> dict:
-    return {"enabled": False, "file_id": "", "url": "", "position": "bottom-left",
-            "scale": 0.12, "opacity": 200}
+    """Default layer C: channel logo sticker at bottom-left, small (12% width)."""
+    import os as _os
+    _logo_path = _os.path.join(_os.path.dirname(__file__), "assets", "channel_logo.webp")
+    _local_url = f"file://{_logo_path}" if _os.path.exists(_logo_path) else ""
+    return {
+        "enabled":  True,           # ON by default when logo exists
+        "file_id":  "",             # Telegram file_id (set when admin sends sticker in bot)
+        "url":      _local_url,     # Local fallback: assets/channel_logo.webp
+        "position": "bottom-left",  # Bottom-left corner, small
+        "scale":    0.10,           # 10% of poster width = small logo
+        "opacity":  230,
+    }
 
 
 def get_wm_layer(chat_id: int, layer: str) -> dict:
@@ -472,6 +482,8 @@ async def download_sticker(bot: Any, file_id: str) -> Optional[str]:
 def _load_image_from_url(url: str) -> Optional[Any]:
     if not PIL_OK or not url:
         return None
+    if url.startswith('file://'):
+        return _load_image_from_path(url[7:])
     if url in _img_cache:
         try:
             return Image.open(BytesIO(_img_cache[url])).convert("RGBA")
@@ -703,7 +715,8 @@ async def apply_watermark_layers(
 
     # Layer C — sticker / image overlay
     lc = get_wm_layer(chat_id, "c")
-    if lc.get("enabled"):
+    # Apply if enabled OR if a file_id is set (sticker was saved)
+    if lc.get("enabled") or lc.get("file_id"):
         overlay_img = None
         # Try sticker file_id first (Telegram sticker)
         fid = lc.get("file_id", "")
@@ -721,9 +734,9 @@ async def apply_watermark_layers(
             img = _apply_image_watermark_layer(
                 img,
                 overlay=overlay_img,
-                position=lc.get("position", "bottom-left"),
-                scale=float(lc.get("scale", 0.12)),
-                opacity=int(lc.get("opacity", 200)),
+                position=lc.get("position", "bottom-left"),  # default: bottom-left, small
+                scale=float(lc.get("scale", 0.12)),           # 12% of poster width = small
+                opacity=int(lc.get("opacity", 220)),
             )
 
     return img
