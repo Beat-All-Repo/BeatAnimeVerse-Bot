@@ -1624,11 +1624,24 @@ async def send_transition_sticker(
     """
     Transition sticker — fire and forget (no wait, no delete delay).
     Sends sticker and schedules background delete after 1s without blocking.
+    Priority:
+      1. DB override: loading_sticker_id (set via /set_loader reply or LOADER STICKER env panel)
+      2. env TRANSITION_STICKER
     """
-    if not TRANSITION_STICKER_ID:
+    # Priority 1: DB-stored custom sticker (set via /set_loader or env panel)
+    sticker_to_send = ""
+    try:
+        sticker_to_send = get_setting("loading_sticker_id", "") or ""
+    except Exception:
+        pass
+    # Priority 2: env TRANSITION_STICKER
+    if not sticker_to_send:
+        sticker_to_send = TRANSITION_STICKER_ID or ""
+
+    if not sticker_to_send:
         return
     try:
-        sticker_msg = await context.bot.send_sticker(chat_id, TRANSITION_STICKER_ID)
+        sticker_msg = await context.bot.send_sticker(chat_id, sticker_to_send)
         # Background delete — does NOT block the caller
         async def _delete_later():
             await asyncio.sleep(1.0)
@@ -3657,10 +3670,10 @@ def _build_panel_pages(maint: bool, clone_red: bool, clean_gc: bool) -> dict:
     def _nav(cur):
         row = []
         if cur > 0:
-            row.append(InlineKeyboardButton("🔙", callback_data=f"adm_page_{cur-1}"))
+            row.append(InlineKeyboardButton("◀", callback_data=f"adm_page_{cur-1}"))
         row.append(InlineKeyboardButton(f"· {cur+1}/{TOTAL} ·", callback_data="noop"))
         if cur < TOTAL - 1:
-            row.append(InlineKeyboardButton("🔜", callback_data=f"adm_page_{cur+1}"))
+            row.append(InlineKeyboardButton("▶", callback_data=f"adm_page_{cur+1}"))
         row.append(_close_btn())
         return row
 
@@ -4050,10 +4063,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await loading_animation_end(context, chat_id, loading_msg)
                 await safe_send_message(
                     context.bot, chat_id,
-                    b(" Getting your link via our server bot…"),
+                    b("🔄 Getting your link via our server bot…"),
                     reply_markup=InlineKeyboardMarkup([[
                         InlineKeyboardButton(
-                            " Join Now ",
+                            "📥 Get Your Link",
                             url=f"https://t.me/{clone_uname}?start={link_id}"
                         )
                     ]]),
@@ -4072,11 +4085,83 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await send_admin_menu(chat_id, context)
         return
 
- ),
-            reply_markup=reply_markup,
-            message_effect_id=5104841245755180586)  # 🔥
-        
+    # ── Regular user welcome ──────────────────────────────────────────────────────
+    keyboard = [
+          [InlineKeyboardButton("ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ", url=PUBLIC_ANIME_CHANNEL_URL)],
+          [InlineKeyboardButton("ᴄᴏɴᴛᴀᴄᴛ ᴀᴅᴍɪɴ", url=f"https://t.me/{ADMIN_CONTACT_USERNAME}")],
+          [InlineKeyboardButton("ʀᴇǫᴜᴇsᴛ ᴀɴɪᴍᴇ ᴄʜᴀɴɴᴇʟ", url=REQUEST_CHANNEL_URL)],
+          [InlineKeyboardButton("ꜰᴇᴀᴛᴜʀᴇs", callback_data="user_features_0"),
+           InlineKeyboardButton("ᴀʙᴏᴜᴛ ᴍᴇ", callback_data="about_bot")],
+          [_close_btn()],
+      ]
+    markup = InlineKeyboardMarkup(keyboard)
+
+    # Try to copy welcome message from source channel
+    _sent_start_msg = None
+    try:
+        _sent_start_msg = await context.bot.copy_message(
+            chat_id=chat_id,
+            from_chat_id=WELCOME_SOURCE_CHANNEL,
+            message_id=WELCOME_SOURCE_MESSAGE_ID,
+            reply_markup=markup,
+        )
+    except Exception:
+        pass
+    if _sent_start_msg:
+        # React with ✨ emoji on start message
+        try:
+            await context.bot.set_message_reaction(
+                chat_id=chat_id,
+                message_id=_sent_start_msg.message_id,
+                reaction=[{"type": "emoji", "emoji": "✨"}],
+                is_big=False,
+            )
+        except Exception:
+            pass
         return
+
+    # Fallback welcome
+    if WELCOME_IMAGE_URL:
+        try:
+            await context.bot.send_photo(
+                chat_id,
+                WELCOME_IMAGE_URL,
+                caption=(
+                    b(f"✨ Welcome to {e(BOT_NAME)}!") + "\n\n"
+                    + bq(b("Your gateway to all things Anime, Manga & Movies!"))
+                ),
+                parse_mode=ParseMode.HTML,
+                reply_markup=markup,
+            )
+            return
+        except Exception:
+            pass
+
+    try:
+        _fb_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=b(f"Welcome to {e(BOT_NAME)}!") + "\n\n"
+                 + bq(b("Your gateway to all things Anime, Manga & Movies!")),
+            parse_mode="HTML",
+            reply_markup=markup,
+            message_effect_id=5104841245755180586,  # 🔥 fire
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        _fb_msg = await safe_send_message(
+            context.bot, chat_id,
+            b(f"Welcome to {e(BOT_NAME)}!") + "\n\n"
+            + bq(b("Your gateway to all things Anime, Manga & Movies!")),
+            reply_markup=markup,
+        )
+    if _fb_msg:
+        try:
+            await context.bot.set_message_reaction(
+                chat_id=chat_id, message_id=_fb_msg.message_id,
+                reaction=[{"type": "emoji", "emoji": "✨"}], is_big=False,
+            )
+        except Exception:
+            pass
 
 
 # ================================================================================
@@ -4361,7 +4446,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     searching_msg = await safe_send_message(
         context.bot, chat_id,
-        b(f" Searching for: {e(query_text)}…"),
+        b(f"🔍 Searching for: {e(query_text)}…"),
     )
 
     results = []
@@ -4415,7 +4500,7 @@ async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     await safe_send_message(
         context.bot, chat_id,
-        b(f" Search results for: {e(query_text)}"),
+        b(f"🔍 Search results for: {e(query_text)}"),
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -5880,15 +5965,32 @@ async def set_loader_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     reply = update.message.reply_to_message if update.message else None
     args = context.args or []
 
+    # Accept sticker from: reply to sticker OR the message itself having a sticker
+    _sticker_obj = None
     if reply and reply.sticker:
+        _sticker_obj = reply.sticker
+    elif update.message and update.message.sticker:
+        _sticker_obj = update.message.sticker
+
+    if _sticker_obj:
         # Set sticker as loader
-        sticker_id = reply.sticker.file_id
+        sticker_id = _sticker_obj.file_id
         set_setting("loading_sticker_id", sticker_id)
         set_setting("loading_anim_enabled", "true")
+        # Also persist as env_TRANSITION_STICKER so env panel shows it
+        try:
+            set_setting("env_TRANSITION_STICKER", sticker_id)
+        except Exception:
+            pass
+        # Preview: send the sticker so admin can confirm it's the right one
+        try:
+            await context.bot.send_sticker(update.effective_chat.id, sticker_id)
+        except Exception:
+            pass
         await safe_send_message(
             context.bot, update.effective_chat.id,
-            "<b>✅ Custom loading sticker set!</b>\n\n"
-            "Every panel open will now show your sticker instead of ❗ animation.\n"
+            "<b>✅ Loading sticker set!</b>\n\n"
+            "This sticker will now show on /start for all users.\n"
             "Use /set_loader on to restore default, /set_loader off to disable.",
             parse_mode="HTML",
         )
@@ -6748,9 +6850,23 @@ async def inline_query_handler(
                 deep_link = f"https://t.me/{BOT_USERNAME}?start={link_id_r}"
                 join_text = (get_setting("env_JOIN_BTN_TEXT", "") or small_caps("ᴊᴏɪɴ ɴᴏᴡ"))
 
-                # Skip AniList API call for speed — use stored data only
+                # Try cache first (no network call if cached), skip if miss
                 cover_url = ""
                 score_str = ""
+                try:
+                    from modules.anime import _cache_get, _INLINE_GQL, _al_page_sync
+                    _ck = f"page:{_INLINE_GQL[:10]}:{ch_title.lower()}"
+                    _cached = _cache_get(_ck)
+                    if _cached:
+                        _item = next((x for x in _cached if (x.get("title",{}) or {}).get("english","").lower() == ch_title.lower()
+                                      or (x.get("title",{}) or {}).get("romaji","").lower() == ch_title.lower()), None)
+                        if _item:
+                            ci = _item.get("coverImage",{}) or {}
+                            cover_url = ci.get("medium") or ci.get("large","")
+                            sc = _item.get("averageScore","")
+                            score_str = f"{sc}/100" if sc else ""
+                except Exception:
+                    pass
 
                 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton(join_text, url=deep_link)]])
@@ -6785,6 +6901,7 @@ async def inline_query_handler(
                     )
                 if len(results) >= 10:
                     break
+
         except Exception as exc:
             logger.debug(f"[inline] watch: {exc}")
 
@@ -6873,7 +6990,7 @@ async def inline_query_handler(
             pass
         return
 
-    # ══════════c════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════════════
     # GROUP MANAGEMENT quick reference
     # ══════════════════════════════════════════════════════════════════════════
     if search_lower.startswith("manage"):
@@ -6910,11 +7027,25 @@ async def inline_query_handler(
         return
 
     # ══════════════════════════════════════════════════════════════════════════
-    # POSTER / DEFAULT — anime search (handles "poster <name>" or just "<name>")
+    # POSTER / DEFAULT — real-time AniList multi-result (like website search)
     # ══════════════════════════════════════════════════════════════════════════
     anime_q = re.sub(r"^poster\s+", "", search, flags=re.IGNORECASE).strip() or search
 
     if anime_q:
+        # Multi-result search using inline_search_anime (cached TTL 5min)
+        try:
+            from modules.anime import inline_search_anime
+            _inline_res = await inline_search_anime(anime_q, BOT_USERNAME)
+            if _inline_res:
+                try:
+                    await query_obj.answer(_inline_res[:8], cache_time=10, is_personal=True)
+                except Exception:
+                    pass
+                return
+        except Exception as _ise:
+            logger.debug(f"[inline] inline_search_anime: {_ise}")
+
+        # Fallback: single AniList result
         try:
             from modules.anime import _al_sync, _ANIME_GQL, _resolve_query
             loop = asyncio.get_event_loop()
@@ -6955,10 +7086,12 @@ async def inline_query_handler(
                 if len(cap) > 1000:
                     cap = cap[:996] + "…"
 
-                from telegram import InlineKeyboardMarkup, InlineKeyboardButton
                 kb = None
                 if site:
-                    kb = InlineKeyboardMarkup([[InlineKeyboardButton(small_caps("📋 Info"), url=site)]])
+                    kb = InlineKeyboardMarkup([[
+                        InlineKeyboardButton(small_caps("📋 Info"), url=site),
+                        InlineKeyboardButton(small_caps("🔍 Watch"), switch_inline_query_current_chat=f"watch {title}"),
+                    ]])
 
                 use_img = cover or banner
                 if use_img:
@@ -7075,6 +7208,17 @@ async def group_message_handler(
             if query_text:
                 await _group_post_with_autodel(category, query_text)
             return
+
+    # ── Single-letter alpha filter panel ──────────────────────────────────────
+    # If user types exactly one alphabet letter, show all anime starting with it
+    stripped = text.strip()
+    if len(stripped) == 1 and stripped.isalpha() and not stripped.startswith("/"):
+        try:
+            from modules.anime import _send_alpha_filter_panel
+            asyncio.create_task(_send_alpha_filter_panel(update, context, stripped))
+        except Exception as _afe:
+            logger.debug(f"alpha_filter: {_afe}")
+        return
 
     # ── Filter-Poster Integration ──────────────────────────────────────────────
     # New logic:
@@ -10961,6 +11105,9 @@ async def button_handler(
             _btn("POSTER CHANNEL",   "env_edit_POSTER_DB_CHANNEL"),
             _btn("ANIME URL",        "env_edit_PUBLIC_ANIME_CHANNEL_URL"),
             _btn("WELCOME TEXT",     "env_edit_BOT_WELCOME_TEXT"),
+            _btn("ALIVE IMAGE",      "env_edit_START_IMG"),
+            _btn("LOADER STICKER",   "env_edit_TRANSITION_STICKER"),
+            _btn("FILTER PANEL TTL", "env_edit_FILTER_PANEL_TTL"),
         ]
         rows = _grid3(grid)
         # Panel image controls
@@ -14710,10 +14857,20 @@ async def handle_admin_message(
                 reply_markup=InlineKeyboardMarkup([[_back_btn("admin_env_panel"), _close_btn()]]),
             )
         else:
-            set_setting(f"env_{env_key}", text.strip())
+            val = text.strip()
+            set_setting(f"env_{env_key}", val)
+            # Special syncs — keep DB and env-override in agreement
+            if env_key == "TRANSITION_STICKER" and val:
+                # When admin sets loader sticker from env panel, also update the
+                # loading_sticker_id key so send_transition_sticker picks it up immediately
+                set_setting("loading_sticker_id", val)
+                set_setting("loading_anim_enabled", "true")
+            elif env_key == "TRANSITION_STICKER" and not val:
+                # Clearing loader sticker — disable custom sticker
+                set_setting("loading_sticker_id", "")
             await safe_send_message(
                 context.bot, chat_id,
-                b(f"✔️ {e(env_key)} updated.") + f"\n<code>{e(text.strip()[:80])}</code>",
+                b(f"✔️ {e(env_key)} updated.") + f"\n<code>{e(val[:80])}</code>",
                 reply_markup=InlineKeyboardMarkup([[_back_btn("admin_env_panel"), _close_btn()]]),
             )
         return
