@@ -1181,13 +1181,24 @@ async def _deliver_panel(
     # ── Step 3b: Send ──────────────────────────────────────────────────────────
     if photo_to_send:
         try:
-            sent = await bot.send_photo(
-                chat_id=chat_id,
-                photo=photo_to_send,
-                caption=caption,
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup,
-            )
+            try:
+                sent = await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=photo_to_send,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup,
+                    message_effect_id=5104841245755180586,  # 🔥
+                )
+            except Exception:
+                # Fallback without effect (effect not supported in all chat types)
+                sent = await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=photo_to_send,
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup,
+                )
             # ── Store file_id for next time (if not already stored) ───────────
             if sent and sent.photo and not stored:
                 fid = sent.photo[-1].file_id
@@ -1208,13 +1219,23 @@ async def _deliver_panel(
 
     # ── Step 4: Text fallback ──────────────────────────────────────────────────
     try:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=caption,
-            parse_mode=ParseMode.HTML,
-            reply_markup=reply_markup,
-            disable_web_page_preview=True,
-        )
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+                message_effect_id=5104841245755180586,  # 🔥
+            )
+        except Exception:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+            )
         return True
     except Exception as exc:
         logger.debug(f"_deliver_panel text fallback failed: {exc}")
@@ -4108,13 +4129,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         pass
     if _sent_start_msg:
-        # React with ✨ emoji on start message
+        # React with 🔥 emoji on start message (copy_message can't use message_effect_id)
         try:
             await context.bot.set_message_reaction(
                 chat_id=chat_id,
                 message_id=_sent_start_msg.message_id,
-                reaction=[{"type": "emoji", "emoji": "✨"}],
-                is_big=False,
+                reaction=[{"type": "emoji", "emoji": "🔥"}],
+                is_big=True,
             )
         except Exception:
             pass
@@ -4123,16 +4144,29 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Fallback welcome
     if WELCOME_IMAGE_URL:
         try:
-            await context.bot.send_photo(
-                chat_id,
-                WELCOME_IMAGE_URL,
-                caption=(
-                    b(f"✨ Welcome to {e(BOT_NAME)}!") + "\n\n"
-                    + bq(b("Your gateway to all things Anime, Manga & Movies!"))
-                ),
-                parse_mode=ParseMode.HTML,
-                reply_markup=markup,
-            )
+            try:
+                await context.bot.send_photo(
+                    chat_id,
+                    WELCOME_IMAGE_URL,
+                    caption=(
+                        b(f"✨ Welcome to {e(BOT_NAME)}!") + "\n\n"
+                        + bq(b("Your gateway to all things Anime, Manga & Movies!"))
+                    ),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=markup,
+                    message_effect_id=5104841245755180586,  # 🔥
+                )
+            except Exception:
+                await context.bot.send_photo(
+                    chat_id,
+                    WELCOME_IMAGE_URL,
+                    caption=(
+                        b(f"✨ Welcome to {e(BOT_NAME)}!") + "\n\n"
+                        + bq(b("Your gateway to all things Anime, Manga & Movies!"))
+                    ),
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=markup,
+                )
             return
         except Exception:
             pass
