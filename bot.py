@@ -6803,10 +6803,7 @@ async def inline_query_handler(
         except Exception:
             pass
 
-    from telegram import (
-        InlineQueryResultArticle, InlineQueryResultPhoto,
-        InputTextMessageContent,
-    )
+    
 
     results = []
     search_lower = search.lower()
@@ -6819,22 +6816,22 @@ async def inline_query_handler(
             (
                 "🎌 Poster", "poster",
                 "Search anime/manga/movie poster",
-                "Type: @bot poster demon slayer",
+                "Type: @BeatAnime_probot poster demon slayer",
             ),
             (
                 "📺 Anime to Watch", "watch",
                 "Browse available anime channels",
-                "Type: @bot watch jujutsu kaisen",
+                "Type: @BeatAnime_probot watch jujutsu kaisen",
             ),
             (
                 "👤 Character Info", "character",
                 "Search anime character details",
-                "Type: @bot character tanjiro",
+                "Type: @BeatAnime_probot character tanjiro",
             ),
             (
                 "⚙️ Group Mgmt", "manage",
                 "Group management quick commands",
-                "Type: @bot manage to see commands",
+                "Type: @BeatAnime_probot manage to see commands",
             ),
         ]
         for title_lbl, kw, desc, hint in menu_items:
@@ -6902,7 +6899,7 @@ async def inline_query_handler(
                 except Exception:
                     pass
 
-                from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+                
                 kb = InlineKeyboardMarkup([[InlineKeyboardButton(join_text, url=deep_link)]])
 
                 if cover_url:
@@ -6980,7 +6977,7 @@ async def inline_query_handler(
                     if len(cap) > 900:
                         cap = cap[:896] + "…"
 
-                    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+                    
                     kb = InlineKeyboardMarkup([[InlineKeyboardButton("📋 AniList", url=site)]]) if site else None
 
                     if img:
@@ -7123,8 +7120,8 @@ async def inline_query_handler(
                 kb = None
                 if site:
                     kb = InlineKeyboardMarkup([[
-                        InlineKeyboardButton(small_caps("📋 Info"), url=site),
-                        InlineKeyboardButton(small_caps("🔍 Watch"), switch_inline_query_current_chat=f"watch {title}"),
+                        InlineKeyboardButton(small_caps(" Info"), url=site),
+                        InlineKeyboardButton(small_caps(" Watch"), switch_inline_query_current_chat=f"watch {title}"),
                     ]])
 
                 use_img = cover or banner
